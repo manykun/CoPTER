@@ -1,0 +1,1 @@
+python ../copter/copter.py
