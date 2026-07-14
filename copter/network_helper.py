@@ -34,6 +34,13 @@ class NetworkHelper:
         self.obs_history = [deque(maxlen=nhp.state_observations + 1) for _ in range(self.n_port)]
         logger.info(f"Observation history sizes: {len(self.obs_history)}")
 
+        # Windowed statistics for queue length and ECN rate
+        # These capture the temporal dynamics that instantaneous sampling misses
+        self.window_size = 32  # Number of steps to average over
+        self.qlen_window = [deque(maxlen=self.window_size) for _ in range(self.n_port)]
+        self.ecn_window = [deque(maxlen=self.window_size) for _ in range(self.n_port)]
+        self.txrate_window = [deque(maxlen=self.window_size) for _ in range(self.n_port)]
+
         # Initialize an empty action for next step
         self.action = [0.0] * (self.n_port * self.nhp.port_actions)   
         self.action_port_bitmap = [0] * self.n_port  # Track the port index for each action
@@ -134,6 +141,10 @@ class NetworkHelper:
                 p_max=obs[start_index + 5]
             )
             self.obs_history[port_idx].append(port_obs)
+            # Update windowed statistics for reward calculation
+            self.qlen_window[port_idx].append(port_obs.queue_length_norm)
+            self.ecn_window[port_idx].append(port_obs.ecn_rate_norm)
+            self.txrate_window[port_idx].append(port_obs.tx_rate_norm)
             logger.info(f"Step {curr_step} - Port {port_idx} - Observation {port_obs}.")
 
         logger.info(f"Step {curr_step} - Done {done}")
@@ -169,30 +180,112 @@ class NetworkHelper:
             curr_port_state_list += self.obs_history[port_idx][history_idx].to_list()
         return curr_port_state_list
     
-    # 端口reward计算
     def get_port_current_reward(self, port_idx):
         """
-        Calculate the reward for the specified port based on the current observation.
+        Calculate reward for a single port from windowed statistics.
+
+        Design goals:
+        1. Sensitive to DCQCN parameter effects (Kmin/Kmax/Pmax).
+        2. Meaningful reward gradient ONLY on congested/active ports.
+        3. Values bounded in a stable numeric range.
+
+        Reward components (each in [0, 1]):
+          - r_throughput: link utilization (tx_rate clamped to [0, 1]).
+          - r_queue    : penalises queue build-up via exp(-k * combined_qlen).
+                         Combined_qlen mixes 70% peak + 30% average so bursts
+                         are visible AND sustained backlog is punished.
+          - r_ecn      : penalises excessive ECN marking. Optimal marking
+                         rate is around 0.02-0.05. Uses a smooth bell curve
+                         so both under-marking and over-marking are penalised.
         """
-        def qlen_reward_mapping(queue_length_norm):
-            """
-            NOTE: In our setting, the maximum buffer size would be 1024 KB. So the qlen_reward will be zero if qlen > 1024 KB, even if 
-                    it is very uncommon to have such a large queue length given the PFC exists.
-            """
-            import bisect
-            qlen_reward = [1, 0.9, 0.8, 0.7, 0.6, 0.5, 0.4, 0.3, 0.2, 0.1, 0]
-            qlen_norm_milestones = [2**i / 1024 for i in range(11)]
+        if len(self.qlen_window[port_idx]) > 0:
+            avg_qlen   = float(np.mean(self.qlen_window[port_idx]))
+            peak_qlen  = float(np.max(self.qlen_window[port_idx]))
+            avg_ecn    = float(np.mean(self.ecn_window[port_idx]))
+            peak_ecn   = float(np.max(self.ecn_window[port_idx]))
+            avg_txrate = float(np.mean(self.txrate_window[port_idx]))
+        else:
+            curr = self.obs_history[port_idx][-1]
+            avg_qlen = peak_qlen = curr.queue_length_norm
+            avg_ecn  = peak_ecn  = curr.ecn_rate_norm
+            avg_txrate = curr.tx_rate_norm
 
-            return qlen_reward[bisect.bisect_left(qlen_norm_milestones, queue_length_norm)]
+        # Clamp tx_rate to [0, 1] to fix upstream ns-3 rate-stat overshoot
+        # (rate estimator sometimes reports >1.0 with narrow windows).
+        tx = max(0.0, min(1.0, avg_txrate))
 
-        curr_port_obs = self.obs_history[port_idx][-1]
+        # r_throughput: reward utilisation. Slightly nonlinear so approaching
+        # 1.0 gives extra reward, encouraging the agent to keep the pipe full.
+        r_throughput = tx
 
-        REWARD_WEIGHT_QLEN = 0.5
-        reward = ((1-REWARD_WEIGHT_QLEN) * curr_port_obs.tx_rate_norm +
-                  REWARD_WEIGHT_QLEN * qlen_reward_mapping(curr_port_obs.queue_length_norm))
+        # r_queue: exponential penalty. Coefficient 6.0 makes a 0.1 queue
+        # occupancy drop reward from 1.0 to 0.55, giving a strong gradient.
+        combined_qlen = 0.7 * peak_qlen + 0.3 * avg_qlen
+        r_queue = float(np.exp(-6.0 * combined_qlen))
+
+        # r_ecn: bell-shaped centred at 0.03 (ideal marking rate).
+        # Under-marking (ecn≈0) → still ok (≈ 0.60) because queue penalty
+        # will bite instead. Over-marking penalised more aggressively.
+        # Using a piecewise-smooth function:
+        #   ecn=0.00 → 0.60   ecn=0.03 → 1.00   ecn=0.10 → 0.50   ecn=0.30 → 0.06
+        ideal_ecn = 0.03
+        if avg_ecn <= ideal_ecn:
+            r_ecn = 0.6 + 0.4 * (avg_ecn / ideal_ecn)
+        else:
+            r_ecn = float(np.exp(-7.0 * (avg_ecn - ideal_ecn)))
+
+        # Weighted sum. Throughput gets the highest weight: the force-action
+        # sanity study (2026-07) showed r_queue/r_ecn are nearly flat across
+        # good/bad parameter settings in our scenarios, while r_throughput is
+        # the component whose ordering matches the measured FCT ordering.
+        W_THROUGHPUT = 0.50
+        W_QUEUE      = 0.30
+        W_ECN        = 0.20
+        reward = W_THROUGHPUT * r_throughput + W_QUEUE * r_queue + W_ECN * r_ecn
 
         return reward
+
+    def get_port_congestion_score(self, port_idx):
+        """Return a scalar quantifying how "interesting" (congested) a port
+        is for reward purposes. Higher = more congested = more DCQCN signal.
+        Used to select top-K ports for reward aggregation.
+        """
+        if len(self.qlen_window[port_idx]) == 0:
+            return 0.0
+        peak_qlen = float(np.max(self.qlen_window[port_idx]))
+        peak_ecn  = float(np.max(self.ecn_window[port_idx]))
+        avg_txrate = float(np.mean(self.txrate_window[port_idx]))
+        # Any of these signals qualifies a port as "interesting".
+        return peak_qlen * 10.0 + peak_ecn * 5.0 + min(1.0, avg_txrate)
     
 
     def get_n_port(self):
         return self.n_port
+
+    def is_port_active(self, port_idx):
+        """Backwards-compat: a port is active if any traffic passed through.
+        Prefer `is_port_congested` for reward aggregation."""
+        if len(self.txrate_window[port_idx]) > 0:
+            return float(np.mean(self.txrate_window[port_idx])) > 0.01
+        return self.obs_history[port_idx][-1].queue_length_norm > 0.0
+
+    def is_port_congested(self, port_idx):
+        """A port is CONGESTED (i.e. carries a meaningful DCQCN signal) if
+        the peak queue length or peak ECN rate exceeded a small threshold
+        inside the observation window. Only congested ports get their reward
+        counted in the rollout mean — averaging over idle ports washes out
+        the policy signal entirely.
+        """
+        if len(self.qlen_window[port_idx]) == 0:
+            return False
+        peak_qlen = float(np.max(self.qlen_window[port_idx]))
+        peak_ecn  = float(np.max(self.ecn_window[port_idx]))
+        # A port qualifies as congested when queue built up beyond a
+        # trivial floor OR ECN marking actually occurred.
+        return peak_qlen > 0.005 or peak_ecn > 1e-5
+
+    def get_topk_congested_ports(self, k):
+        """Return indices of the top-K most-congested ports this window."""
+        scores = [(self.get_port_congestion_score(p), p) for p in range(self.n_port)]
+        scores.sort(key=lambda x: -x[0])
+        return [p for score, p in scores[:k] if score > 0.0]

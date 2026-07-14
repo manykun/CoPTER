@@ -1,0 +1,57 @@
+# SOR curriculum (catastrophic forgetting) experiment config.
+# ns3_conf here is only the default; the orchestrator overrides it per phase
+# via NS3_CONF_OVERRIDE.
+
+total_epochs: 1
+exp_name: cur_sor
+model_dir: cur_models_sor-0624
+
+ns3_port: 5558
+ns3_conf: simulation/mix/sor_Hadoop_Shuffle.conf
+ns3_dir: ns-3.33
+ns3_binary: ns-3.33/build/scratch/copter-sim
+ns3_log_level: level_all
+ns3_inter_run_sleep: 5
+
+static_steps: 4
+train_intervals: 8
+switch_buffer: 10000
+max_steps: 0
+
+epsilon_start: 1.0
+epsilon_end: 0.05
+# epsilon decays by ENV steps now (~98/epoch). Curriculum: 4 phases x 15 epochs
+# x 98 steps = ~5880 env steps; decay over ~2/3 of it. MUST match ACC config.
+epsilon_decay_steps: 4000
+state_save_interval: 50
+seed: 1
+
+sor:
+  recent_size: 2000
+  boundary_size: 20000
+  max_clusters: 32
+  prototype_distance: 1.0
+  prototype_eta: 0.05
+  boundary_threshold: 0.5
+  alpha_td: 1.0
+  beta_under_sample: 0.2
+  gamma_drift: 0.5
+  rho_boundary: 0.5
+  temperature: 1.0
+  lambda_cons: 0.01
+  lambda_reg: 0.001
+  drift_reg_threshold: 0.5
+  ref_update_interval: 256
+  sync_interval: 8
+  save_buffer_every: 5
+
+convergence:
+  enable: false
+  reward_window: 5
+  reward_delta: 0.005
+  min_epochs: 10
+
+tensorboard:
+  enable: true
+  log_dir: tb_logs_sor
+  flush_secs: 30

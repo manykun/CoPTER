@@ -1,10 +1,28 @@
 
 import os
 import argparse
+import hashlib
+import json
+import random
+import numpy as np
 from loguru import logger
 from network_helper import NetworkHelper
 from agent_helper import AgentHelper
 from structures import NetworkHelperParameters, AgentHelperParameters
+
+
+def set_random_seed(seed: int):
+    random.seed(seed)
+    np.random.seed(seed)
+    try:
+        import torch
+        torch.manual_seed(seed)
+        if hasattr(torch, "cuda") and torch.cuda.is_available():
+            torch.cuda.manual_seed_all(seed)
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
+    except Exception as exc:
+        logger.warning(f"Failed to set torch random seed: {exc}")
 
 
 if __name__ == "__main__":
@@ -21,10 +39,47 @@ if __name__ == "__main__":
     parser.add_argument("-s", "--static_steps", type=int, default=4, help="static_steps: The number of initial steps to keep the actions static.")
     parser.add_argument("-i", "--train_intervals", type=int, default=8, help="train_intervals: The number of intervals for training the agent.")
     parser.add_argument("-b", "--switch_buffer", type=int, default=10000, help="switch_buffer: The size of switch buffer in bytes.")
+    parser.add_argument("--max_steps", type=int, default=0, help="max_steps: If > 0, exit cleanly after this many steps in this run (one epoch). 0 means run until ns3 ends.")
+    parser.add_argument("--epsilon_start", type=float, default=1.0)
+    parser.add_argument("--epsilon_end", type=float, default=0.05)
+    parser.add_argument("--epsilon_decay_steps", type=int, default=50000)
+    parser.add_argument("--state_save_interval", type=int, default=1)
+    parser.add_argument("--seed", type=int, default=1, help="Random seed for Python, NumPy, and PyTorch.")
+    parser.add_argument("--run_id", type=str, default=None, help="Optional run identifier stored with training state and metrics.")
+    parser.add_argument("--phase", type=str, default=None, help="Optional training phase stored with training state and metrics.")
+    parser.add_argument("--resume", action="store_true", help="Resume models, replay buffers and counters from saved state.")
+    parser.add_argument("--checkpoint", type=str, default=None, help="Checkpoint filename override used when resuming.")
+    parser.add_argument("--eval_greedy", action="store_true", help="Pure greedy evaluation: epsilon=0, no recording/training/saving.")
+    parser.add_argument("--eval_tag", type=str, default="", help="Optional tag recorded into metrics (e.g. phase/task name).")
+    parser.add_argument("--force_action", type=str, default="", help="Sanity-check: force a fixed action index triple 'kmin_idx,kmax_idx,pmax_idx' for ALL ports/steps (overrides the policy). Used to test reward sensitivity to actions.")
+    parser.add_argument("--watch_ports", type=str, default="", help="Comma-separated port indices to track explicitly. Their per-epoch rollout reward (EMA) is written to metrics jsonl and TensorBoard (rollout/reward_port{p}) so a fixed port's reward trajectory can be plotted across epochs.")
+    # ---- tensorboard ----
+    parser.add_argument("--tb_enable", type=str, default="true", help="Enable tensorboard logging: true/false")
+    parser.add_argument("--tb_log_dir", type=str, default="tb_logs", help="TensorBoard root log dir; actual dir = <tb_log_dir>/<exp_name>")
+    parser.add_argument("--tb_flush_secs", type=int, default=30)
     args = parser.parse_args()
+    set_random_seed(args.seed)
+
+    # Parse optional forced action (sanity-check for reward sensitivity).
+    forced_action_idx = None
+    if args.force_action:
+        try:
+            forced_action_idx = tuple(int(x) for x in args.force_action.split(","))
+            assert len(forced_action_idx) == 3
+        except Exception as exc:
+            raise SystemExit(f"--force_action must be 'kmin_idx,kmax_idx,pmax_idx'; got {args.force_action!r} ({exc})")
+
+    # Parse optional watch-port list (fixed ports whose reward we track across epochs).
+    watch_ports = []
+    if args.watch_ports:
+        try:
+            watch_ports = [int(x) for x in args.watch_ports.split(",") if x.strip() != ""]
+        except Exception as exc:
+            raise SystemExit(f"--watch_ports must be comma-separated ints; got {args.watch_ports!r} ({exc})")
 
     # Print the parsed arguments
     logger.info(f"Parsed arguments: {args}")
+    logger.info(f"Random seed fixed to {args.seed}")
 
     # Initialize Logger
     logger.add(args.exp_name + "_log/copter_{time}.log", level="INFO", rotation="5 MB")
@@ -35,27 +90,74 @@ if __name__ == "__main__":
     
     network_helper = NetworkHelper(ns3_socket=args.ns3_socket, nhp=network_helper_params)
     
-    agent_helper_params = AgentHelperParameters()
+    agent_helper_params = AgentHelperParameters(
+        epsilon_start=args.epsilon_start,
+        epsilon_end=args.epsilon_end,
+        epsilon_decay_steps=args.epsilon_decay_steps,
+        state_save_interval=args.state_save_interval,
+    )
 
-    agent_helper = AgentHelper(node_number=network_helper.get_n_port(), ahp=agent_helper_params, model_dir=args.model_dir, mode=args.mode, 
-                               exp_name=args.exp_name, online=args.online, network_helper=network_helper, fmap_dir=args.fmap_dir)
-    
-    agent_helper.load(args.override_name)
+    config_hash = hashlib.sha256(
+        json.dumps(vars(args), sort_keys=True, default=str).encode("utf-8")
+    ).hexdigest()
+    agent_helper = AgentHelper(node_number=network_helper.get_n_port(), ahp=agent_helper_params, model_dir=args.model_dir, mode=args.mode,
+                               exp_name=args.exp_name, online=args.online, network_helper=network_helper, fmap_dir=args.fmap_dir,
+                               run_id=args.run_id, phase=args.phase, config_hash=config_hash)
+
+    checkpoint_name = args.checkpoint if args.resume and args.checkpoint else args.override_name
+    agent_helper.load(checkpoint_name)
+
+    # ---- Initialize TensorBoard SummaryWriter (跨 epoch 续写到同一目录，曲线连续) ----
+    tb_enabled = str(args.tb_enable).lower() in ("1", "true", "yes", "on")
+    tb_writer = None
+    if tb_enabled:
+        try:
+            from torch.utils.tensorboard import SummaryWriter
+            tb_dir = os.path.join(args.tb_log_dir, args.exp_name)
+            os.makedirs(tb_dir, exist_ok=True)
+            tb_writer = SummaryWriter(log_dir=tb_dir, flush_secs=args.tb_flush_secs)
+            # 把超参写到 text 面板，方便回查
+            hparams_text = "\n".join([f"- **{k}**: {v}" for k, v in vars(args).items()])
+            tb_writer.add_text("hparams", hparams_text, global_step=agent_helper.global_train_step)
+            agent_helper.attach_tb(tb_writer)
+            logger.info(f"TensorBoard initialized: log_dir={tb_dir}")
+        except Exception as e:
+            logger.warning(f"Failed to initialize TensorBoard: {e}")
+            tb_writer = None
 
     current_step = 0
+    # Accumulator for per-step rollout reward (used so eval epochs also report
+    # a mean_reward; training epochs additionally have replay-batch rewards
+    # tracked in agent_helper._recent_rewards).
+    rollout_reward_sum = 0.0
+    rollout_reward_count = 0
+    # Track additional metrics for diagnosing catastrophic forgetting.
+    congested_port_count_sum = 0     # total congested-port samples across the epoch
+    congested_step_count = 0          # steps that had ≥1 congested port
+    per_port_reward_ema = {}          # port_idx → EMA of reward (for debugging)
+    # NEW: track distribution of rewards across congested ports each step.
+    # rollout_top30_reward: mean of the top-30% congested-port rewards this step.
+    # This filters out structurally-stuck ports (e.g. a permanently-saturated
+    # bottleneck) whose reward cannot respond to DCQCN parameters and would
+    # otherwise clamp the metric to a floor. It surfaces the policy's actual
+    # improvement on the ports where it can matter.
+    rollout_top30_sum = 0.0
+    rollout_top30_count = 0
+    rollout_median_sum = 0.0
+    rollout_median_count = 0
 
     try:
         while True:
             if current_step == 0:
                 # Get the initial observation for all ports
-                network_helper.monitor(current_step)
+                done = network_helper.monitor(current_step)
 
             elif current_step < max(4, args.static_steps):
                 # For the first few steps, we keep their actions as what the environment provides.
                 for port_idx in range(network_helper.get_n_port()):
                     paras = network_helper.get_port_current_parameters(port_idx)
                     network_helper.configurator(current_step, port_idx, paras)
-                network_helper.monitor(current_step)
+                done = network_helper.monitor(current_step)
 
             else:
                 # Get the current states for all ports. NOTE: `Observation` is different from `State` in CoPTER.
@@ -65,14 +167,89 @@ if __name__ == "__main__":
                 ]
 
                 # Decide the actions for all ports with AgenHelper
-                paras, actions = agent_helper.decide(port_states)
+                # Use globally-decaying epsilon so that exploration carries across runs.
+                current_epsilon = 0.0 if args.eval_greedy else agent_helper.get_current_epsilon()
+                if forced_action_idx is not None:
+                    # Sanity-check: bypass the policy and apply a fixed action to
+                    # every port so we can measure reward sensitivity to actions.
+                    from structures import DCQCNParameters
+                    kmin_values = [0.0, 0.0949, 0.2259, 0.4066, 0.6560, 1.0]
+                    kmax_values = [0.0, 0.25, 0.5, 1.0]
+                    pmax_values = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0]
+                    ki, ka, pi = forced_action_idx
+                    forced_para = DCQCNParameters(kmin_values[ki], kmax_values[ka], pmax_values[pi])
+                    n_port = network_helper.get_n_port()
+                    paras = [forced_para for _ in range(n_port)]
+                    actions = [forced_action_idx for _ in range(n_port)]
+                else:
+                    paras, actions = agent_helper.decide(port_states, epsi=current_epsilon)
 
                 # Cofigure the actions for each port
                 for port_idx, parameter in enumerate(paras):
                     network_helper.configurator(current_step, port_idx, parameter)
 
                 # Enforce the updated parameters
-                network_helper.monitor(current_step)
+                done = network_helper.monitor(current_step)
+                # Accumulate per-port reward for this step.
+                #
+                # KEY DESIGN: aggregate reward ONLY over CONGESTED ports.
+                # An idle port always returns a near-constant "everything is
+                # fine" reward regardless of DCQCN parameters. Averaging idle
+                # ports (which dominate numerically) washes out the policy
+                # signal — the rollout mean stays glued to ~0.72 no matter
+                # what the agent does. By restricting the average to
+                # congested ports we surface the true policy performance.
+                #
+                # Fallback chain:
+                #   1. Congested ports (queue built up OR ECN marked)  → best signal
+                #   2. Top-K congested by score (if none pass threshold) → still concentrated
+                #   3. All active ports (last resort)
+                try:
+                    n_port = network_helper.get_n_port()
+                    congested_ports = [p for p in range(n_port)
+                                       if network_helper.is_port_congested(p)]
+                    if len(congested_ports) > 0:
+                        rewards = []
+                        for p in congested_ports:
+                            r = float(network_helper.get_port_current_reward(p))
+                            rewards.append(r)
+                            # Update per-port EMA for diagnostics
+                            prev = per_port_reward_ema.get(p, r)
+                            per_port_reward_ema[p] = 0.9 * prev + 0.1 * r
+                        rollout_reward_sum += sum(rewards)
+                        rollout_reward_count += len(rewards)
+                        congested_port_count_sum += len(rewards)
+                        congested_step_count += 1
+
+                        # Top-30% mean: robust to structurally-stuck ports.
+                        rewards_sorted = sorted(rewards, reverse=True)
+                        k = max(1, int(len(rewards_sorted) * 0.30))
+                        top30 = rewards_sorted[:k]
+                        rollout_top30_sum += sum(top30) / len(top30)
+                        rollout_top30_count += 1
+
+                        # Median reward: robust to both tails.
+                        mid = len(rewards_sorted) // 2
+                        median = rewards_sorted[mid] if len(rewards_sorted) % 2 == 1 \
+                                 else 0.5 * (rewards_sorted[mid - 1] + rewards_sorted[mid])
+                        rollout_median_sum += median
+                        rollout_median_count += 1
+                    else:
+                        # No congested ports this step — take the top-K by
+                        # congestion score so the metric is still concentrated
+                        # on the ports carrying the strongest DCQCN signal.
+                        topk = network_helper.get_topk_congested_ports(k=8)
+                        if len(topk) > 0:
+                            rewards = [float(network_helper.get_port_current_reward(p))
+                                       for p in topk]
+                            rollout_reward_sum += sum(rewards)
+                            rollout_reward_count += len(rewards)
+                            rollout_top30_sum += max(rewards)
+                            rollout_top30_count += 1
+                            rollout_median_sum += sorted(rewards)[len(rewards)//2]
+                            rollout_median_count += 1
+                except Exception as _exc:
+                    logger.warning(f"rollout reward accumulation failed at step {current_step}: {_exc}")
             # 步骤1：先执行monitor，确保获取端口标识
             # done = network_helper.monitor(current_step)
 
@@ -91,7 +268,7 @@ if __name__ == "__main__":
             #         network_helper.configurator(current_step, port_idx, parameter)
 
                 # 只有在线模式才记录经验（如果offline模式不需要记录，可添加此判断）
-                if args.online:
+                if args.online and not args.eval_greedy:
 
                     # Record the states and actions in the agent's replay buffer
                     for port_idx in range(network_helper.get_n_port()):
@@ -105,17 +282,88 @@ if __name__ == "__main__":
                         agent_helper.record(port_idx, last_state, action, current_state)
 
                 # Train the agent every `train_intervals` steps
-                if args.online and current_step % args.train_intervals == 0:
+                if args.online and not args.eval_greedy and current_step % args.train_intervals == 0:
                     agent_helper.sync()
                     agent_helper.train(current_step)
-                    # Save the agents' model and replay buffers whenever training is done.
-                    agent_helper.save()
 
             current_step += 1
 
+            if done:
+                logger.info("NS3 environment reported done; exiting this epoch cleanly.")
+                break
+
+            # Optional clean exit at max_steps for a single epoch (set by launcher).
+            if args.max_steps > 0 and current_step >= args.max_steps:
+                logger.info(f"Reached max_steps={args.max_steps}; exiting this epoch cleanly.")
+                break
+
     except KeyboardInterrupt:
         print("Ctrl-C -> Exit")
-        
+
+    except Exception as e:
+        logger.exception(f"Unexpected error in main loop: {e}")
+        raise
+
     finally:
-        network_helper.close_env()
+        # Always persist agent state so cross-run training is continuous.
+        try:
+            if not args.eval_greedy:
+                agent_helper.save()
+            agent_helper.append_epoch_metrics({
+                "steps_this_epoch": current_step,
+                "eval_greedy": bool(args.eval_greedy),
+                "eval_tag": args.eval_tag,
+                # PRIMARY metric: top-30% congested-port reward. Robust to
+                # structurally-stuck ports (permanent bottlenecks) that would
+                # otherwise clamp a naive mean. Reflects policy's actual
+                # ceiling on the responsive subset of the network.
+                "rollout_mean_reward": (rollout_top30_sum / rollout_top30_count) if rollout_top30_count > 0 else None,
+                # Legacy full-congested-mean, kept for backward compatibility.
+                "rollout_all_congested_mean": (rollout_reward_sum / rollout_reward_count) if rollout_reward_count > 0 else None,
+                # Median reward — robust to both tails.
+                "rollout_median_reward": (rollout_median_sum / rollout_median_count) if rollout_median_count > 0 else None,
+                "congested_step_ratio": (congested_step_count / current_step) if current_step > 0 else 0.0,
+                "avg_congested_ports_per_step": (congested_port_count_sum / congested_step_count) if congested_step_count > 0 else 0.0,
+                "per_port_reward_top5": (
+                    [{"port": p, "reward": round(r, 4)} for p, r in
+                     sorted(per_port_reward_ema.items(), key=lambda kv: -kv[1])[:5]]
+                    if per_port_reward_ema else []
+                ),
+                "per_port_reward_bottom5": (
+                    [{"port": p, "reward": round(r, 4)} for p, r in
+                     sorted(per_port_reward_ema.items(), key=lambda kv: kv[1])[:5]]
+                    if per_port_reward_ema else []
+                ),
+                # Fixed watch-list ports: their rollout reward EMA this epoch.
+                # Enables plotting a specific port's reward trajectory across
+                # epochs (None if the port was never congested this epoch).
+                "watch_ports_reward": {
+                    str(p): (round(per_port_reward_ema[p], 6) if p in per_port_reward_ema else None)
+                    for p in watch_ports
+                } if watch_ports else {},
+            })
+            logger.info(
+                f"Saved training state at exit: epoch={agent_helper.epoch}, "
+                f"global_step={agent_helper.global_train_step}, epsilon={agent_helper.epsilon:.4f}"
+            )
+            # Fixed watch-port reward -> TensorBoard under a dedicated namespace
+            # so each port has its own continuous curve across epochs.
+            if tb_writer is not None and watch_ports:
+                step = int(agent_helper.global_train_step)
+                for p in watch_ports:
+                    rv = per_port_reward_ema.get(p)
+                    if rv is not None:
+                        tb_writer.add_scalar(f"rollout/reward_port{p}", float(rv), step)
+        except Exception as e:
+            logger.exception(f"Failed to save agent state on exit: {e}")
+        try:
+            network_helper.close_env()
+        except Exception:
+            pass
+        try:
+            if tb_writer is not None:
+                tb_writer.flush()
+                tb_writer.close()
+        except Exception:
+            pass
         print("Done")

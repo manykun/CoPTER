@@ -17,6 +17,12 @@ class AgentHelperParameters:
     rb_size: int = 1000
     rb_size_global: int = 100000
     target_update_interval: int = 16
+    # ---- Continuous training: epsilon schedule + persistence ----
+    epsilon_start: float = 1.0
+    epsilon_end: float = 0.05
+    epsilon_decay_steps: int = 50000      # global train-call count over which epsilon linearly decays
+    state_save_interval: int = 1          # save replay buffer / train_state every N train() calls
+    reward_window: int = 200              # sliding window size for mean reward metric
 
 
 

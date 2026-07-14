@@ -1,0 +1,43 @@
+# Single-scenario ACC config for the "does RL raise the reward?" experiment.
+# Trains ONLY on Hadoop_Shuffle and tracks a fixed set of congested ports so
+# their reward trajectory can be plotted across epochs, plus force_action
+# baselines for comparison. Driven by scripts/run_acc_watch_baseline.sh.
+#
+# Kept isolated from the curriculum run: its own model_dir / log dir so it
+# never touches cur_models_acc-0624.
+
+total_epochs: 1            # orchestrated one epoch at a time by the runner
+exp_name: watch_acc_hadoop
+mode: ACC
+model_dir: watch_models_acc
+
+ns3_port: 5558
+ns3_conf: simulation/mix/acc_Hadoop_Shuffle.conf
+ns3_dir: ns-3.33
+ns3_binary: ns-3.33/build/scratch/copter-sim
+ns3_log_level: level_all
+ns3_inter_run_sleep: 5
+
+static_steps: 4
+train_intervals: 8
+switch_buffer: 80          # matches BUFFER_SIZE in acc_Hadoop_Shuffle.conf (KB)
+max_steps: 0
+
+epsilon_start: 1.0
+epsilon_end: 0.05
+# Decays by env steps (~98/epoch). 800 -> epsilon reaches 0.05 in ~8 epochs,
+# leaving the rest of training as exploitation so a learning curve is visible.
+epsilon_decay_steps: 800
+state_save_interval: 50
+seed: 1
+
+convergence:
+  enable: false
+  reward_window: 5
+  reward_delta: 0.005
+  min_epochs: 10
+
+tensorboard:
+  enable: true
+  log_dir: tb_logs_watch_acc
+  flush_secs: 30

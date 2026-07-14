@@ -32,6 +32,7 @@ namespace ns3 {
 		memset(ingress_bytes, 0, sizeof(ingress_bytes));
 		memset(paused, 0, sizeof(paused));
 		memset(egress_bytes, 0, sizeof(egress_bytes));
+		memset(peak_egress_bytes, 0, sizeof(peak_egress_bytes));  // Initialize peak tracking
 	}
 	bool SwitchMmu::CheckIngressAdmission(uint32_t port, uint32_t qIndex, uint32_t psize){
 		if (psize + hdrm_bytes[port][qIndex] > headroom[port] && psize + GetSharedUsed(port, qIndex) > GetPfcThreshold(port)){
@@ -62,6 +63,12 @@ namespace ns3 {
 	}
 	void SwitchMmu::UpdateEgressAdmission(uint32_t port, uint32_t qIndex, uint32_t psize){
 		egress_bytes[port][qIndex] += psize;
+		// Update peak: sum all queues for this port
+		uint32_t total = 0;
+		for (uint32_t k = 0; k < qCnt; k++)
+			total += egress_bytes[port][k];
+		if (total > peak_egress_bytes[port])
+			peak_egress_bytes[port] = total;
 	}
 	void SwitchMmu::RemoveFromIngressAdmission(uint32_t port, uint32_t qIndex, uint32_t psize){
 		uint32_t from_hdrm = std::min(hdrm_bytes[port][qIndex], psize);
@@ -72,6 +79,12 @@ namespace ns3 {
 	}
 	void SwitchMmu::RemoveFromEgressAdmission(uint32_t port, uint32_t qIndex, uint32_t psize){
 		egress_bytes[port][qIndex] -= psize;
+		// Update peak after removal (queue might have peaked during burst)
+		uint32_t total = 0;
+		for (uint32_t k = 0; k < qCnt; k++)
+			total += egress_bytes[port][k];
+		if (total > peak_egress_bytes[port])
+			peak_egress_bytes[port] = total;
 	}
 	bool SwitchMmu::CheckShouldPause(uint32_t port, uint32_t qIndex){
 		return !paused[port][qIndex] && (hdrm_bytes[port][qIndex] > 0 || GetSharedUsed(port, qIndex) >= GetPfcThreshold(port));
@@ -129,5 +142,16 @@ namespace ns3 {
 	}
 	void SwitchMmu::ConfigBufferSize(uint32_t size){
 		buffer_size = size;
+	}
+
+	// Peak queue tracking for RL observations
+	void SwitchMmu::ResetPeakBytes(uint32_t port){
+		peak_egress_bytes[port] = 0;
+	}
+	uint32_t SwitchMmu::GetPeakBytes(uint32_t port){
+		return peak_egress_bytes[port];
+	}
+	void SwitchMmu::ResetAllPeakBytes(void){
+		memset(peak_egress_bytes, 0, sizeof(peak_egress_bytes));
 	}
 }

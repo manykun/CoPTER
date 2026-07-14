@@ -22,6 +22,14 @@ __pycache__
 *.tr
 *.fct
 *.csv
+*.pkl
+
+copter/tb_logs*/
+events*
+thesis/
+experiments/
+simulation/output_archive/
+copter/*.pdf
 
 no_git*
 
@@ -32,5 +40,28 @@ TODO
 
 tools/analysis/**/*
 !tools/analysis/**/*.py
+
+ns-3.33/.lock-waf_linux_build
+
+backup_*/
+copter/cur_models*/
+copter/models_*/
+copter/watch_models*/
+*.corrupt_bak
+*.tar
+
+
+.ipynb_checkpoints/
+*.png
+*.pdf
+*.jsonl
+
+sor/cur_models_sor/
+sor/eval_models_sor*/
+sor/forgetting_plots/
+
+m3_environment copy.yml
+scripts/reward_sensitivity_acc_Hadoop_Shuffle.txt
+sor/run_sor_train (1).sh
 
 !.gitignore

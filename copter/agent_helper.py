@@ -3,7 +3,10 @@
 
 import numpy as np
 import os
+import json
+import pickle
 import random
+import time
 from collections import deque
 from loguru import logger
 
@@ -57,7 +60,10 @@ class AgentHelper:
             online: bool = True,
             # fmap_dir: str = None
             network_helper: "NetworkHelper" = None,  # 传入NetworkHelper获取标识和fmap路径
-            fmap_dir: str = None  # 确保保留fmap_dir参数
+            fmap_dir: str = None,  # 确保保留fmap_dir参数
+            run_id: str = None,
+            phase: str = None,
+            config_hash: str = None
             ):
         # Assert fmap_dir is provided if mode is CoPTER
         if mode == "CoPTER" and fmap_dir is None:
@@ -73,6 +79,9 @@ class AgentHelper:
         self.mode = mode
         self.exp_name = exp_name
         self.online = online
+        self.run_id = run_id
+        self.phase = phase
+        self.config_hash = config_hash
 
         # Load fmap if mode is CoPTER
         # self.fmap = self._load_fmap(fmap_dir, 0) if mode == "CoPTER" else None
@@ -114,6 +123,64 @@ class AgentHelper:
 
         self.shared_rb = deque(maxlen=self.p.rb_size_global)
 
+        # ---- Continuous-training state (cross-run persistence) ----
+        self.global_train_step = 0           # number of agent_helper.train() calls completed (across runs)
+        self.global_env_step = 0             # number of environment steps observed (across runs); drives epsilon decay
+        self.epsilon = self.p.epsilon_start
+        self.train_call_count = 0
+        self._train_call_count_since_save = 0
+        self._recent_rewards = deque(maxlen=self.p.reward_window)
+        self._recent_losses = deque(maxlen=self.p.reward_window)
+        # Current "epoch" id (i.e. how many copter.py invocations) - read from train_state if exists
+        self.epoch = 0
+
+        # Optional TensorBoard SummaryWriter (set by attach_tb after init in copter.py)
+        self._tb = None
+
+    def attach_tb(self, tb_writer):
+        """Attach an already-initialized torch.utils.tensorboard.SummaryWriter."""
+        self._tb = tb_writer
+
+    # ---------- helpers for persistence paths ----------
+    def _train_state_path(self):
+        return os.path.join(self.model_dir, f"{self.exp_name}_train_state.json")
+
+    def _rb_path(self, port_idx):
+        return os.path.join(self.model_dir, f"{self.exp_name}_rb_port{port_idx}.pkl")
+
+    def _shared_rb_path(self):
+        return os.path.join(self.model_dir, f"{self.exp_name}_shared_rb.pkl")
+
+    def _metrics_path(self):
+        return os.path.join(self.model_dir, f"{self.exp_name}_metrics.jsonl")
+
+    @staticmethod
+    def _atomic_write_bytes(path, data: bytes):
+        tmp = path + ".tmp"
+        with open(tmp, "wb") as f:
+            f.write(data)
+        os.replace(tmp, path)
+
+    @staticmethod
+    def _atomic_write_text(path, text: str):
+        tmp = path + ".tmp"
+        with open(tmp, "w") as f:
+            f.write(text)
+        os.replace(tmp, path)
+
+    # ---------- epsilon schedule ----------
+    def get_current_epsilon(self) -> float:
+        # Decay by ENVIRONMENT steps (~98/epoch), not train-call count, so the
+        # schedule actually progresses within a realistic number of epochs.
+        self.global_env_step += 1
+        decay = self.p.epsilon_decay_steps
+        if decay <= 0:
+            return self.p.epsilon_end
+        frac = min(1.0, self.global_env_step / decay)
+        eps = self.p.epsilon_start + (self.p.epsilon_end - self.p.epsilon_start) * frac
+        self.epsilon = eps
+        return eps
+
     # 为所有端口生成决策：遍历每个端口对应的智能体，调用智能体的选择动作方法，收集并返回所有决策
     def decide(self, port_states: list[list[float]], epsi=0.1) -> tuple[list[DCQCNParameters], list[tuple[int, int, int]]]:
         paras: list[DCQCNParameters] = []
@@ -149,7 +216,12 @@ class AgentHelper:
     
 
     def train(self, current_step: int):
+        self.train_call_count += 1
         sample_size = self.p.train_set_size
+        any_trained = False
+        # Per-train-call metric collectors
+        per_port_loss = {}
+        per_port_reward = {}
         for port_idx, agent in enumerate(self.agent_pool):
             # 判断当前端口的经验回放缓冲区是否有足够多的样本
             if len(self.rb_pool[port_idx]) > sample_size:
@@ -157,7 +229,15 @@ class AgentHelper:
                 states, actions, rewards, next_states = self.rb_pool[port_idx].sample(sample_size)
 
                 logger.info(f"Training agent {agent.name} with {len(states)} samples.")
-                agent.train_model(states, actions, rewards, next_states)
+                loss = agent.train_model(states, actions, rewards, next_states)
+                if loss is not None:
+                    self._recent_losses.append(float(loss))
+                    per_port_loss[port_idx] = float(loss)
+                # collect mean reward of the sampled batch as a smoothed proxy
+                batch_mean_reward = float(np.mean(rewards))
+                self._recent_rewards.append(batch_mean_reward)
+                per_port_reward[port_idx] = batch_mean_reward
+                any_trained = True
                 # 定期更新目标网络
                 if current_step % self.p.target_update_interval == 0:
                     logger.info(f"Updating target network for agent {agent.name} at step {current_step}.")
@@ -166,48 +246,198 @@ class AgentHelper:
                 # 经验不足需要提前调用sync()
                 logger.warning(f"Agent {agent.name} has insufficient experiences for training. Make sure to call sync() before training.")
 
+        if any_trained:
+            self.global_train_step += 1
+            self._train_call_count_since_save += 1
+            # ---- TensorBoard logging (per train() call) ----
+            if self._tb is not None:
+                try:
+                    step = int(self.global_train_step)
+                    self._tb.add_scalar("train/epsilon", float(self.epsilon), step)
+                    self._tb.add_scalar("train/env_step", int(current_step), step)
+                    self._tb.add_scalar("train/epoch", int(self.epoch), step)
+                    self._tb.add_scalar("train/shared_buffer_size", len(self.shared_rb), step)
+                    if per_port_loss:
+                        self._tb.add_scalar("train/loss", float(np.mean(list(per_port_loss.values()))), step)
+                        for pi, lv in per_port_loss.items():
+                            self._tb.add_scalar(f"train/loss_port{pi}", lv, step)
+                    if per_port_reward:
+                        self._tb.add_scalar("train/reward", float(np.mean(list(per_port_reward.values()))), step)
+                        for pi, rv in per_port_reward.items():
+                            self._tb.add_scalar(f"train/reward_port{pi}", rv, step)
+                    for pi, rb in enumerate(self.rb_pool):
+                        self._tb.add_scalar(f"train/buffer_size_port{pi}", len(rb), step)
+                except Exception as e:
+                    logger.warning(f"tensorboard train log failed: {e}")
+            # 按 state_save_interval 落盘 buffer + train_state（防崩溃丢进度）
+            if self._train_call_count_since_save >= self.p.state_save_interval:
+                self._save_train_state_and_buffers()
+                self._train_call_count_since_save = 0
+
 
     def load(self, override_name=None):
         # Load all agents' models from the model directory
         for agent in self.agent_pool:
             agent.load_model(self.model_dir, override_name)
-            
 
-        # # Load replay buffers if available
-        # for i, rb in enumerate(self.rb_pool):
-        #     rb_path = os.path.join(self.model_dir, f"{self.exp_name}_{self.agent_pool[i].name}_rb.npy")
-        #     if os.path.exists(rb_path):
-        #         rb_data = np.load(rb_path, allow_pickle=True)
-        #         rb.push_batch(rb_data.tolist())
-        #         logger.info(f"Loaded replay buffer for agent {self.agent_pool[i].name} from {rb_path}")
-        #     else:
-        #         logger.warning(f"No replay buffer found for agent {self.agent_pool[i].name} at {rb_path}")
+        # ---- Load replay buffers (per port) ----
+        for i, rb in enumerate(self.rb_pool):
+            rb_path = self._rb_path(i)
+            if os.path.exists(rb_path):
+                try:
+                    with open(rb_path, "rb") as f:
+                        rb_data = pickle.load(f)
+                    rb.push_batch(rb_data)
+                    logger.info(f"Loaded replay buffer for port {i} ({len(rb_data)} entries) from {rb_path}")
+                except Exception as e:
+                    logger.warning(f"Failed to load replay buffer at {rb_path}: {e}")
+            else:
+                logger.warning(f"No replay buffer found for port {i} at {rb_path} (cold start).")
 
-        # # Load shared experience if available
-        # shared_rb_path = os.path.join(self.model_dir, f"{self.exp_name}_shared_replay_buffer.npy")
-        # if os.path.exists(shared_rb_path):
-        #     shared_rb_data = np.load(shared_rb_path, allow_pickle=True)
-        #     self.shared_rb.push_batch(shared_rb_data.tolist())
-        #     logger.info(f"Loaded shared replay buffer from {shared_rb_path}")
-        # else:
-        #     logger.warning(f"No shared replay buffer found at {shared_rb_path}. Using empty shared replay buffer.")
+        # ---- Load shared replay buffer ----
+        shared_rb_path = self._shared_rb_path()
+        if os.path.exists(shared_rb_path):
+            try:
+                with open(shared_rb_path, "rb") as f:
+                    shared_data = pickle.load(f)
+                for entry in shared_data:
+                    self.shared_rb.append(entry)
+                logger.info(f"Loaded shared replay buffer ({len(shared_data)} entries) from {shared_rb_path}")
+            except Exception as e:
+                logger.warning(f"Failed to load shared replay buffer: {e}")
+        else:
+            logger.warning(f"No shared replay buffer found at {shared_rb_path} (cold start).")
 
+        # ---- Load training state (global_train_step / epsilon / epoch) ----
+        ts_path = self._train_state_path()
+        if os.path.exists(ts_path):
+            try:
+                with open(ts_path, "r") as f:
+                    ts = json.load(f)
+                self.global_train_step = int(ts.get("global_train_step", 0))
+                self.global_env_step = int(ts.get("global_env_step", 0))
+                self.train_call_count = int(ts.get("train_call_count", self.global_train_step))
+                self.epsilon = float(ts.get("epsilon", self.p.epsilon_start))
+                self.epoch = int(ts.get("epoch", 0))
+                if self.run_id is None:
+                    self.run_id = ts.get("run_id")
+                if self.phase is None:
+                    self.phase = ts.get("phase")
+                if self.config_hash is None:
+                    self.config_hash = ts.get("config_hash")
+                logger.info(
+                    f"Resumed training state: global_step={self.global_train_step}, "
+                    f"epsilon={self.epsilon:.4f}, epoch={self.epoch}"
+                )
+            except Exception as e:
+                logger.warning(f"Failed to load train_state at {ts_path}: {e}; using defaults.")
+        else:
+            logger.info(f"No train_state found at {ts_path}; starting fresh from epsilon={self.p.epsilon_start}.")
+
+        # advance epoch counter for THIS run
+        self.epoch += 1
+
+    def _save_train_state_and_buffers(self):
+        if not os.path.exists(self.model_dir):
+            os.makedirs(self.model_dir)
+        # Replay buffers
+        for i, rb in enumerate(self.rb_pool):
+            try:
+                data = pickle.dumps(list(rb.buffer), protocol=pickle.HIGHEST_PROTOCOL)
+                self._atomic_write_bytes(self._rb_path(i), data)
+            except Exception as e:
+                logger.warning(f"Failed to save replay buffer for port {i}: {e}")
+        # Shared replay buffer
+        try:
+            data = pickle.dumps(list(self.shared_rb), protocol=pickle.HIGHEST_PROTOCOL)
+            self._atomic_write_bytes(self._shared_rb_path(), data)
+        except Exception as e:
+            logger.warning(f"Failed to save shared replay buffer: {e}")
+        # Train state
+        ts = {
+            "global_train_step": int(self.global_train_step),
+            "global_env_step": int(self.global_env_step),
+            "train_call_count": int(self.train_call_count),
+            "epsilon": float(self.epsilon),
+            "epoch": int(self.epoch),
+            "time": time.time(),
+            "exp_name": self.exp_name,
+            "mode": self.mode,
+            "node_number": self.node_number,
+            "replay_size_per_port": [len(rb) for rb in self.rb_pool],
+            "shared_replay_size": len(self.shared_rb),
+        }
+        ts.update({
+            key: value for key, value in {
+                "run_id": self.run_id,
+                "phase": self.phase,
+                "config_hash": self.config_hash,
+            }.items() if value is not None
+        })
+
+        try:
+            self._atomic_write_text(self._train_state_path(), json.dumps(ts))
+        except Exception as e:
+            logger.warning(f"Failed to save train_state: {e}")
 
     def save(self):
-        # Save all agents' models from the model directory
+        # Save all agents' models
         for agent in self.agent_pool:
             agent.save_model(self.model_dir)
+        # Save buffers + train state
+        self._save_train_state_and_buffers()
 
-        # # Save replay buffers if available
-        # for i, rb in enumerate(self.rb_pool):
-        #     rb_path = os.path.join(self.model_dir, f"{self.exp_name}_{self.agent_pool[i].name}_rb")
-        #     np.save(rb_path, list(rb.buffer))
-        #     logger.info(f"Saved replay buffer for agent {self.agent_pool[i].name} at {rb_path}")
-            
-        # # Save shared experience if available
-        # shared_rb_path = os.path.join(self.model_dir, f"{self.exp_name}_shared_replay_buffer")
-        # np.save(shared_rb_path, list(self.shared_rb.buffer))
-        # logger.info(f"Saved shared replay buffer at {shared_rb_path}")
+    def append_epoch_metrics(self, extra: dict = None):
+        """Called once per epoch (per copter.py invocation) before exit."""
+        mean_reward = float(np.mean(self._recent_rewards)) if len(self._recent_rewards) > 0 else None
+        mean_loss = float(np.mean(self._recent_losses)) if len(self._recent_losses) > 0 else None
+        record = {
+            "epoch": int(self.epoch),
+            "global_train_step": int(self.global_train_step),
+            "global_env_step": int(self.global_env_step),
+            "train_call_count": int(self.train_call_count),
+            "epsilon": float(self.epsilon),
+            "mean_reward": mean_reward,
+            "mean_loss": mean_loss,
+            "time": time.time(),
+        }
+        record.update({
+            key: value for key, value in {
+                "run_id": self.run_id,
+                "phase": self.phase,
+                "config_hash": self.config_hash,
+            }.items() if value is not None
+        })
+
+        if extra:
+            record.update(extra)
+        try:
+            with open(self._metrics_path(), "a") as f:
+                f.write(json.dumps(record) + "\n")
+            logger.info(f"Epoch metrics appended: {record}")
+        except Exception as e:
+            logger.warning(f"Failed to append metrics: {e}")
+        # ---- TensorBoard epoch-level logging ----
+        if self._tb is not None:
+            try:
+                step = int(self.global_train_step)
+                self._tb.add_scalar("epoch/index", int(self.epoch), step)
+                self._tb.add_scalar("epoch/epsilon", float(self.epsilon), step)
+                self._tb.add_scalar("epoch/shared_buffer_size", len(self.shared_rb), step)
+                if mean_reward is not None:
+                    self._tb.add_scalar("epoch/mean_reward", mean_reward, step)
+                if mean_loss is not None:
+                    self._tb.add_scalar("epoch/mean_loss", mean_loss, step)
+                if extra:
+                    for k, v in extra.items():
+                        if isinstance(v, (int, float)):
+                            self._tb.add_scalar(f"epoch/{k}", v, step)
+                for pi, rb in enumerate(self.rb_pool):
+                    self._tb.add_scalar(f"epoch/buffer_size_port{pi}", len(rb), step)
+                self._tb.flush()
+            except Exception as e:
+                logger.warning(f"tensorboard epoch log failed: {e}")
+        return record
 
 
      # 修改：记录经验时传入fmap和action以计算融合奖励

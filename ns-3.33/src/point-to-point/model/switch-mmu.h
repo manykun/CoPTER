@@ -41,6 +41,12 @@ public:
 	void ConfigNPort(uint32_t n_port);
 	void ConfigBufferSize(uint32_t size);
 
+	// Peak queue tracking for RL observations
+	// These track the maximum queue length since last reset
+	void ResetPeakBytes(uint32_t port);
+	uint32_t GetPeakBytes(uint32_t port);
+	void ResetAllPeakBytes(void);
+
 	// config
 	uint32_t node_id;
 	uint32_t buffer_size;
@@ -59,6 +65,7 @@ public:
 	uint32_t ingress_bytes[pCnt][qCnt];
 	uint32_t paused[pCnt][qCnt];
 	uint32_t egress_bytes[pCnt][qCnt];
+	uint32_t peak_egress_bytes[pCnt];  // Peak queue per port since last reset
 };
 
 } /* namespace ns3 */

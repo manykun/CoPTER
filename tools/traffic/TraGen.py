@@ -86,7 +86,9 @@ def main():
 
     bandwidth = translate_bandwidth(options.bandwidth)
     config_dir = os.path.dirname(options.group_config)
-    config_name = os.path.basename(options.group_config)[:-7]
+    config_name = os.path.splitext(os.path.basename(options.group_config))[0]
+    if config_name.endswith("_config"):
+        config_name = config_name[: -len("_config")]
 
     # 输出路径
     output_txt = os.path.join("result", config_name+".flow")
@@ -113,7 +115,7 @@ def main():
         start_time = int(group.get("start_time_s", 2) * 1e9)  # 纳秒
         duration = int(group.get("duration_s", 10) * 1e9)  # 纳秒
         # load = float(group.get("load", 0.3))
-        load = random.choice([0.6, 0.7, 0.8])
+        load = float(group["load"]) if "load" in group else random.choice([0.6, 0.7, 0.8])
         pattern = group.get("pattern", "poisson")
         period = float(group.get("period_s", 1)) * 1e9  # 纳秒
         incast_dst_count = int(group.get("incast_dst_count", 1))

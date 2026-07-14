@@ -57,7 +57,7 @@ class ACC(Agent):
         # 创建优化器，adam优化算法
         self.optimizer = torch.optim.Adam(self.policy_net.parameters(), lr=self.p.learning_rate)
         # 计算损失函数
-        self.loss_fn = torch.nn.MSELoss()
+        self.loss_fn = torch.nn.SmoothL1Loss()
 
 
     def save_model(self, save_path):
@@ -171,6 +171,8 @@ class ACC(Agent):
         self.optimizer.zero_grad()
         # 反向传播计算梯度
         loss.backward()
+        # 梯度裁剪，防止 Q 值爆炸导致 loss 发散
+        torch.nn.utils.clip_grad_norm_(self.policy_net.parameters(), max_norm=10.0)
         # 更新网络参数，利用adam优化器
         self.optimizer.step()
         logger.info(f"ACC Agent {self.name} - Training End with Loss: {loss.item()}")
@@ -185,6 +187,56 @@ class ACC(Agent):
         """
         # 目标网络参数定期有策略网络参数覆盖
         self.target_net.load_state_dict(self.policy_net.state_dict())
+
+    def save_model(self, save_path):
+        os.makedirs(save_path, exist_ok=True)
+        path = os.path.join(save_path, self.name)
+        checkpoint = {
+            "format_version": 2,
+            "policy": self.policy_net.state_dict(),
+            "target": self.target_net.state_dict(),
+            "optimizer": self.optimizer.state_dict(),
+            "rng": {
+                "python": random.getstate(),
+                "numpy": np.random.get_state(),
+                "torch": torch.get_rng_state(),
+                "torch_cuda": torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None,
+            },
+        }
+        tmp_path = f"{path}.tmp.{os.getpid()}"
+        try:
+            torch.save(checkpoint, tmp_path)
+            os.replace(tmp_path, path)
+        finally:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+        logger.info(f"Model checkpoint saved to {path}")
+
+    def load_model(self, save_path, override_name=None):
+        path = os.path.join(save_path, self.name if override_name is None else override_name)
+        if not os.path.exists(path):
+            logger.warning(f"Model file {path} does not exist. Initializing with random weights.")
+            return
+        checkpoint = torch.load(path, map_location=self.device)
+        if isinstance(checkpoint, dict) and "policy" in checkpoint:
+            self.policy_net.load_state_dict(checkpoint["policy"])
+            self.target_net.load_state_dict(checkpoint.get("target", checkpoint["policy"]))
+            if checkpoint.get("optimizer") is not None:
+                self.optimizer.load_state_dict(checkpoint["optimizer"])
+            rng = checkpoint.get("rng", {})
+            if rng.get("python") is not None:
+                random.setstate(rng["python"])
+            if rng.get("numpy") is not None:
+                np.random.set_state(rng["numpy"])
+            if rng.get("torch") is not None:
+                torch.set_rng_state(rng["torch"].cpu())
+            if torch.cuda.is_available() and rng.get("torch_cuda") is not None:
+                torch.cuda.set_rng_state_all(rng["torch_cuda"])
+        else:
+            # Backward compatibility with checkpoints containing only policy state_dict.
+            self.policy_net.load_state_dict(checkpoint)
+            self.update_target_network()
+        logger.info(f"Model loaded from {path}")
         
 
 class CoPTER(Agent):
@@ -202,7 +254,7 @@ class CoPTER(Agent):
         self.policy_net = TripleHeadCoPTER(self.p.state_dim, self.p.kmin_dim, self.p.kmax_dim, self.p.pmax_dim).to(self.device)
         self.target_net = TripleHeadCoPTER(self.p.state_dim, self.p.kmin_dim, self.p.kmax_dim, self.p.pmax_dim).to(self.device) 
         self.optimizer = torch.optim.Adam(self.policy_net.parameters(), lr=self.p.learning_rate)
-        self.loss_fn = torch.nn.MSELoss()
+        self.loss_fn = torch.nn.SmoothL1Loss()
 
         # Guidance Function
         self.f_matrix = f_matrix
@@ -386,6 +438,7 @@ class CoPTER(Agent):
             loss = self.loss_fn(q_prediction, q_estimation)
             self.optimizer.zero_grad()
             loss.backward()
+            torch.nn.utils.clip_grad_norm_(self.policy_net.parameters(), max_norm=10.0)
             self.optimizer.step()
             logger.info(f"CoPTER Agent {self.name} - Online Training End with Loss: {loss.item()}")
 

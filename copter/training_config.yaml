@@ -1,0 +1,50 @@
+# ============================================================
+# CoPTER ACC 连续训练配置文件
+# 由 simulation/run_train.sh 与 copter/run_train.sh 共同读取。
+# 修改本文件即可一站式调整训练规模、探索策略与收敛判据。
+# ============================================================
+
+# ----- 总体调度 -----
+total_epochs: 100                                          # 总共重新启动多少次 ns3 episode（agent 状态会跨 epoch 累积）
+exp_name: experiment_acc_continuous                        # 实验名（决定模型/buffer/metrics 落盘前缀）
+mode: ACC                                                  # 仅 ACC（CoPTER 暂不在本次改造范围内）
+model_dir: models                                          # 模型与 buffer 持久化目录（相对于 copter/ 目录）
+
+# ----- ns3 侧 -----
+ns3_port: 5558                                             # ns3-gym 端口
+ns3_conf: simulation/mix/copter_Hadoop_Shuffle.conf        # ns3 配置文件（相对于仓库根目录）
+ns3_dir: ns-3.33                                           # ns3 源码/构建目录（相对于仓库根目录，可改绝对路径）
+ns3_binary: ns-3.33/build/scratch/copter-sim               # ns3 可执行文件（相对于仓库根目录，可改绝对路径）
+ns3_log_level: level_all                                   # NS_LOG 级别
+ns3_inter_run_sleep: 5                                     # epoch 之间等待秒数（让端口释放）
+
+# ----- agent 侧 -----
+static_steps: 4
+train_intervals: 8
+switch_buffer: 10000
+max_steps: 0                                               # 0 = 跑到 ns3 自然结束；>0 = 每 epoch 跑这么多 step 后主动退出
+
+# ----- epsilon 衰减（基于全局训练步数线性衰减）-----
+epsilon_start: 1.0
+epsilon_end: 0.05
+epsilon_decay_steps: 50000
+
+# ----- replay buffer / 训练状态落盘频率 -----
+state_save_interval: 1                                     # 每 N 次 train() 调用持久化一次（防崩溃）
+
+# ----- 收敛判定（启动脚本读 metrics.jsonl 末尾若干行）-----
+convergence:
+  enable: true
+  reward_window: 5                                         # 取最近 N 个 epoch 的 mean_reward 作窗口
+  reward_delta: 0.005                                      # 相邻窗口均值差小于此值视为收敛
+  min_epochs: 10                                           # 至少跑这么多 epoch 才允许早停
+
+# ----- TensorBoard 训练曲线监控 -----
+# 跨 epoch 持续写到同一个目录（按 exp_name 区分 run），事件文件按 epoch 自动追加
+# 记录内容：
+#   每次 train() 调用：train/loss、train/reward（聚合 + 每端口）、train/epsilon、train/global_step
+#   每个 epoch 结束：epoch/mean_reward、epoch/mean_loss、epoch/epsilon、epoch/steps、epoch/buffer_size
+tensorboard:
+  enable: true                                             # 设为 true 启用 tensorboard
+  log_dir: tb_logs                                         # 日志根目录（相对于 copter/ 目录），实际目录为 <log_dir>/<exp_name>
+  flush_secs: 30                                           # 事件文件 flush 间隔（秒）

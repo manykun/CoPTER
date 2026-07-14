@@ -10,7 +10,7 @@ do
     # 执行命令并记录开始时间
     start_time=$(date +%s)
     # ./run-copter-sim.sh /home/ame/copter/simulation/mix/mix_webserver_websearch_hadoop_clusters/acc_mix_webserver_websearch_hadoop_clusters.conf --port=5555
-    ./run-copter-sim.sh /home/ame/copter/simulation/mix/thesis_mix_webserver_websearch_cachefollower_random/copter_thesis_mix_webserver_websearch_cachefollower_random.conf --port=5558
+    ./run-copter-sim.sh /root/paddlejob/workspace/yangziwen/CoPTER/simulation/mix/copter_Hadoop_Shuffle.conf --port=5558
     
     # 计算命令执行时间
     end_time=$(date +%s)

@@ -1,0 +1,42 @@
+# ACC baseline curriculum (catastrophic forgetting) experiment config.
+# ns3_conf here is only the default; the orchestrator overrides it per phase
+# via NS3_CONF_OVERRIDE.
+
+total_epochs: 1
+exp_name: cur_acc
+mode: ACC
+model_dir: cur_models_acc-0624
+
+ns3_port: 5558
+ns3_conf: simulation/mix/acc_Hadoop_Shuffle.conf
+ns3_dir: ns-3.33
+ns3_binary: ns-3.33/build/scratch/copter-sim
+ns3_log_level: level_all
+ns3_inter_run_sleep: 5
+
+static_steps: 4
+train_intervals: 8
+switch_buffer: 100
+max_steps: 0
+
+epsilon_start: 1.0
+epsilon_end: 0.05
+# epsilon decays by ENV steps (~98/epoch). For observable forgetting the decay
+# must essentially COMPLETE within phase 1, so phases 2-4 are pure exploitation
+# and new-task overwriting of the old policy shows up in greedy eval.
+# Validation run uses PHASE_EPOCHS=12 -> phase1 ~= 12*98 ~= 1176 env steps;
+# decay over ~800 steps finishes well inside phase 1.
+epsilon_decay_steps: 800
+state_save_interval: 50
+seed: 1
+
+convergence:
+  enable: false
+  reward_window: 5
+  reward_delta: 0.005
+  min_epochs: 10
+
+tensorboard:
+  enable: true
+  log_dir: tb_logs_acc
+  flush_secs: 30

@@ -1,0 +1,54 @@
+# SOR evaluation config for short ns-3 comparison
+# Use with: TRAIN_CONFIG=/root/paddlejob/workspace/yangziwen/CoPTER/sor/sor_eval_config.yaml sor/run_sor_train.sh
+
+total_epochs: 1
+exp_name: eval_sor
+model_dir: eval_models_sor
+
+ns3_port: 5558
+ns3_conf: simulation/mix/sor_Hadoop_Shuffle.conf
+ns3_dir: ns-3.33
+ns3_binary: ns-3.33/build/scratch/copter-sim
+ns3_log_level: level_all
+ns3_inter_run_sleep: 20
+
+static_steps: 4
+train_intervals: 8
+switch_buffer: 10000
+max_steps: 0
+
+epsilon_start: 1.0
+epsilon_end: 0.05
+epsilon_decay_steps: 50000
+state_save_interval: 1
+seed: 1
+
+sor:
+  recent_size: 2000
+  boundary_size: 20000
+  max_clusters: 32
+  prototype_distance: 1.0
+  prototype_eta: 0.05
+  boundary_threshold: 0.5
+  alpha_td: 1.0
+  beta_under_sample: 0.2
+  gamma_drift: 0.5
+  rho_boundary: 0.5
+  temperature: 1.0
+  lambda_cons: 0.01
+  lambda_reg: 0.001
+  drift_reg_threshold: 0.5
+  ref_update_interval: 256
+  sync_interval: 8
+  save_buffer_every: 5
+
+convergence:
+  enable: false
+  reward_window: 5
+  reward_delta: 0.005
+  min_epochs: 10
+
+tensorboard:
+  enable: true
+  log_dir: tb_logs_sor
+  flush_secs: 30

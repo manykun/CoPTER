@@ -215,20 +215,26 @@ Ptr<OpenGymDataContainer> MyGetObservation(void) {
             } else {
                 NS_LOG_DEBUG("交换机 ID: " << switch_id << "，端口 " << j << " 未连接到任何节点");
             }
-            uint32_t length = 0;
-            //计算该端口所有出端口队列的字节数
+            // Use PEAK queue length since last reset, not instantaneous value
+            // This captures burst peaks that instantaneous sampling misses
+            uint32_t peak_length = sw->m_mmu->GetPeakBytes(j);
+            uint32_t current_length = 0;
             for (uint32_t k = 0; k < SwitchMmu::qCnt; k++) {
-                length += sw->m_mmu->egress_bytes[j][k];
+                current_length += sw->m_mmu->egress_bytes[j][k];
             }
-            NS_LOG_DEBUG("交换机 " << switch_id << " 端口 " << j << " 的队列长度: " << length << " bytes");
-            //队列占用率
-            box->AddValue(double(length)/switch_buffer_bytes);
-            NS_LOG_DEBUG("交换机 " << switch_id << " 端口 " << j << " 的队列占用率: " << double(length)/switch_buffer_bytes);
+            // If current is higher than tracked peak, use current (edge case)
+            if (current_length > peak_length)
+                peak_length = current_length;
+            NS_LOG_DEBUG("交换机 " << switch_id << " 端口 " << j << " 峰值队列长度: " << peak_length << " bytes, 当前: " << current_length);
+            //队列占用率 - use peak for burst-sensitive reward
+            box->AddValue(double(peak_length)/switch_buffer_bytes);
+            NS_LOG_DEBUG("交换机 " << switch_id << " 端口 " << j << " 的峰值队列占用率: " << double(peak_length)/switch_buffer_bytes);
+            // Reset peak for next observation window
+            sw->m_mmu->ResetPeakBytes(j);
             // txRate and ecnRate
             uint64_t max_port_rate =  DynamicCast<QbbNetDevice>(sw->GetDevice(j))->GetDataRate().GetBitRate();
             box->AddValue(sw->GetPortRate(j)/max_port_rate);
             box->AddValue(sw->GetPortEcnRate(j)/max_port_rate);
-            
             sw->ResetRateStats(j, Simulator::Now().GetNanoSeconds()); // reset rate stats
 
             // ECN threshold (sw->m_mmu->kmin/kmax give the value in bytes)

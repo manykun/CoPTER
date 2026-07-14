@@ -72,6 +72,7 @@ public:
 	void UpdatePortEcnRate(uint32_t ifIndex, uint32_t size, uint64_t ts);
 	double GetPortRate(uint32_t ifIndex);
 	double GetPortEcnRate(uint32_t ifIndex);
+	uint64_t GetPortTotalTxBytes(uint32_t ifIndex) const { return m_txBytes[ifIndex]; }
 	void ResetRateStats(uint32_t ifIndex, uint64_t ts);
 	void ResetAllRateStats(uint64_t ts);
 };
