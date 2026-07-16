@@ -126,11 +126,11 @@ run_single_experiment() {
     local TRAIN_LOG_LOCAL="$5"
 
     mkdir -p "${LOG_DIR_LOCAL}"
-    local STATE_FILE="${MODEL_DIR}/${EXP_NAME_LOCAL}_training_state.json"
+    local STATE_FILE="${MODEL_DIR}/${EXP_NAME_LOCAL}_train_state.json"
 
     get_current_episode() {
         if [ -f "${STATE_FILE}" ]; then
-            python3 -c "import json; print(json.load(open('${STATE_FILE}')).get('episode', 0))" 2>/dev/null || echo "0"
+            python3 -c "import json; print(json.load(open('${STATE_FILE}')).get('epoch', 0))" 2>/dev/null || echo "0"
         else
             echo "0"
         fi
