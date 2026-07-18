@@ -128,12 +128,12 @@ class NetworkHelper:
         # state归一化并存储
         for port_idx in range(self.n_port):
             start_index = port_idx * self.nhp.port_states
-            # NOTE: The k_min_norm, k_max_norm, and p_max has been always limited to [20, 50], [50, 100] and [0, 1] range in ns-3 side.
-            #       So there is no need to adjust them even if the buffer size is not set as 400 KB in the ns-3 simulation. However, 
-            #       the queue_length_norm should be adjusted according to the switch buffer size to avoid underestimation of queuing
-            #       level and wrong reward calculation.
+            # ns-3 reports queue occupancy already normalized by the configured
+            # switch buffer.  Scaling it again here would double-normalize the
+            # state and make otherwise identical experiments depend on whether
+            # BUFFER_SIZE happens to be 400 KB.
             port_obs = PortObservation(
-                queue_length_norm=min(1, obs[start_index] * self.nhp.switch_buffer_size / 400),
+                queue_length_norm=float(np.clip(obs[start_index], 0.0, 1.0)),
                 tx_rate_norm=obs[start_index + 1],
                 ecn_rate_norm=obs[start_index + 2],
                 k_min_norm=obs[start_index + 3],
@@ -180,7 +180,7 @@ class NetworkHelper:
             curr_port_state_list += self.obs_history[port_idx][history_idx].to_list()
         return curr_port_state_list
     
-    def get_port_current_reward(self, port_idx):
+    def get_port_current_reward_components(self, port_idx):
         """
         Calculate reward for a single port from windowed statistics.
 
@@ -238,12 +238,26 @@ class NetworkHelper:
         # sanity study (2026-07) showed r_queue/r_ecn are nearly flat across
         # good/bad parameter settings in our scenarios, while r_throughput is
         # the component whose ordering matches the measured FCT ordering.
-        W_THROUGHPUT = 0.50
-        W_QUEUE      = 0.30
-        W_ECN        = 0.20
+        W_THROUGHPUT = self.nhp.reward_throughput_weight
+        W_QUEUE      = self.nhp.reward_queue_weight
+        W_ECN        = self.nhp.reward_ecn_weight
         reward = W_THROUGHPUT * r_throughput + W_QUEUE * r_queue + W_ECN * r_ecn
 
-        return reward
+        return {
+            "reward": float(reward),
+            "throughput": float(r_throughput),
+            "queue": float(r_queue),
+            "ecn": float(r_ecn),
+            "avg_tx_rate": float(avg_txrate),
+            "avg_queue": float(avg_qlen),
+            "peak_queue": float(peak_qlen),
+            "avg_ecn": float(avg_ecn),
+            "peak_ecn": float(peak_ecn),
+        }
+
+    def get_port_current_reward(self, port_idx):
+        """Return the scalar reward while preserving the historical API."""
+        return self.get_port_current_reward_components(port_idx)["reward"]
 
     def get_port_congestion_score(self, port_idx):
         """Return a scalar quantifying how "interesting" (congested) a port

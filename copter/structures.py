@@ -6,7 +6,10 @@ class NetworkHelperParameters:
     port_states: int = 6
     port_actions: int = 2
     state_observations: int = 3
-    switch_buffer_size: int = 10000  # in KB
+    switch_buffer_size: int = 400  # in KB; kept as experiment metadata
+    reward_throughput_weight: float = 0.50
+    reward_queue_weight: float = 0.30
+    reward_ecn_weight: float = 0.20
 
 
 @dataclass
@@ -33,6 +36,37 @@ class DCQCNParameters:
     p_max: float = 0.2
 
 
+# ACC and SOR share the same discrete action grid.  Keep the grid in one
+# place so forced-action baselines and learned policies always mean the same
+# thing.
+ACC_KMIN_VALUES = (0.0, 0.0949, 0.2259, 0.4066, 0.6560, 1.0)
+ACC_KMAX_VALUES = (0.0, 0.25, 0.5, 1.0)
+ACC_PMAX_VALUES = (0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0)
+
+
+def validate_acc_action_indices(indices):
+    """Validate and return an ACC action index triple."""
+    if len(indices) != 3:
+        raise ValueError("ACC action must contain kmin,kmax,pmax indices")
+    action = tuple(int(index) for index in indices)
+    limits = (len(ACC_KMIN_VALUES), len(ACC_KMAX_VALUES), len(ACC_PMAX_VALUES))
+    names = ("kmin", "kmax", "pmax")
+    for name, index, limit in zip(names, action, limits):
+        if not 0 <= index < limit:
+            raise ValueError(f"{name} index {index} is outside [0, {limit - 1}]")
+    return action
+
+
+def acc_action_from_indices(indices):
+    """Map a validated ACC action index triple to DCQCN parameters."""
+    kmin_index, kmax_index, pmax_index = validate_acc_action_indices(indices)
+    return DCQCNParameters(
+        ACC_KMIN_VALUES[kmin_index],
+        ACC_KMAX_VALUES[kmax_index],
+        ACC_PMAX_VALUES[pmax_index],
+    )
+
+
 @dataclass
 class PortObservation:
     queue_length_norm: float = 0.0
@@ -41,7 +75,7 @@ class PortObservation:
     k_min_norm: float = 1.0
     k_max_norm: float = 1.0
     p_max: float = 0.2
-    
+
     def to_list(self):
         return [self.queue_length_norm, self.tx_rate_norm, self.ecn_rate_norm, self.k_min_norm, self.k_max_norm, self.p_max]
 
@@ -56,5 +90,4 @@ class AgentParameters:
     gamma: float = 0.95
     kmin_res: int = 40
     kmax_res: int = 60
-    
-    
+    hidden_dims: tuple = (32, 64, 64, 32)

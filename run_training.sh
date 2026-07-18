@@ -39,20 +39,32 @@ NS3_LIB_DIR="$(realpath "${NS3_BLD_DIR}")/lib"
 # Defaults (override via command-line flags)
 MAX_EPISODES=200
 BASE_PORT=5556
-NS3_CONF="${COPTER_ROOT}/simulation/mix/CacheFollower_burst_incast/copter_CacheFollower_burst_incast.conf"
-EXP_NAME="20260418_1"
+NS3_CONF="${COPTER_ROOT}/simulation/mix/m3_256hosts.conf"
+EXP_NAME="acc_experiment"
 MODE="ACC"
 FMAP_DIR=""
-ONLINE_FLAG="--online"
+ONLINE=1
 MODEL_DIR="${COPTER_ROOT}/copter/models"
-SWITCH_BUFFER=10000
+SWITCH_BUFFER=400
 TRAIN_INTERVALS=8
 STATIC_STEPS=4
 EPSILON_START=1.0
-EPSILON_END=0.01
-EPSILON_DECAY=100
+EPSILON_END=0.05
+EPSILON_DECAY=50000
 WAIT_NS3_SEC=3
 WAIT_BETWEEN_SEC=5
+FORCE_ACTION=""
+EVAL_GREEDY=0
+EVAL_TAG=""
+SEED=1
+WATCH_PORTS=""
+MAX_STEPS=0
+TB_ENABLE="true"
+ONE_SHOT=0
+RUN_ID=""
+PHASE=""
+ACC_HIDDEN_DIMS="32,64,64,32"
+REWARD_WEIGHTS="0.50,0.30,0.20"
 
 # Multi-experiment: array of "config:exp" pairs
 EXP_LIST=()
@@ -72,7 +84,19 @@ while [[ $# -gt 0 ]]; do
         --eps-start)    EPSILON_START="$2";   shift 2 ;;
         --eps-end)      EPSILON_END="$2";     shift 2 ;;
         --eps-decay)    EPSILON_DECAY="$2";   shift 2 ;;
-        --offline)      ONLINE_FLAG="";      shift ;;
+        --force-action) FORCE_ACTION="$2";    shift 2 ;;
+        --eval-greedy)  EVAL_GREEDY=1; ONE_SHOT=1; shift ;;
+        --eval-tag)     EVAL_TAG="$2";        shift 2 ;;
+        --seed)         SEED="$2";            shift 2 ;;
+        --watch-ports)  WATCH_PORTS="$2";     shift 2 ;;
+        --max-steps)    MAX_STEPS="$2";       shift 2 ;;
+        --tb-enable)    TB_ENABLE="$2";       shift 2 ;;
+        --one-shot)     ONE_SHOT=1;            shift ;;
+        --run-id)       RUN_ID="$2";          shift 2 ;;
+        --phase)        PHASE="$2";           shift 2 ;;
+        --acc-hidden-dims) ACC_HIDDEN_DIMS="$2"; shift 2 ;;
+        --reward-weights) REWARD_WEIGHTS="$2"; shift 2 ;;
+        --offline)      ONLINE=0;              shift ;;
         *)              echo "Unknown arg: $1"; exit 1 ;;
     esac
 done
@@ -112,11 +136,6 @@ SIM_DIR="${COPTER_ROOT}/simulation"
 MAX_CONSECUTIVE_FAILURES=5
 
 # ==================== FMAP Flag ====================
-FMAP_FLAG=""
-if [ -n "${FMAP_DIR}" ]; then
-    FMAP_FLAG="-f ${FMAP_DIR}"
-fi
-
 # ==================== Run Single Experiment (used by main loop and parallel launcher) ====================
 run_single_experiment() {
     local NS3_CONF_LOCAL="$1"
@@ -153,11 +172,12 @@ run_single_experiment() {
         echo "${msg}" >> "${TRAIN_LOG_LOCAL}"
     }
 
-    local EPISODE CONSECUTIVE_FAILURES=0
+    local EPISODE CONSECUTIVE_FAILURES=0 RUN_COUNT=0
     EPISODE=$(get_current_episode)
     log_local "Resuming from episode ${EPISODE}"
 
-    while [ ${EPISODE} -lt ${MAX_EPISODES} ]; do
+    while { [ "${ONE_SHOT}" -eq 1 ] && [ "${RUN_COUNT}" -lt 1 ]; } || \
+          { [ "${ONE_SHOT}" -eq 0 ] && [ "${EPISODE}" -lt "${MAX_EPISODES}" ]; }; do
         log_local ""
         log_local "========== Episode ${EPISODE}/${MAX_EPISODES} =========="
         local EPISODE_START=$(date +%s)
@@ -189,20 +209,33 @@ run_single_experiment() {
         cd "${COPTER_ROOT}/copter"
 
         local AGENT_EXIT=0
-        python copter.py \
-            -p ${NS3_PORT_LOCAL} \
-            -e "${EXP_NAME_LOCAL}" \
-            -m "${MODE}" \
-            ${FMAP_FLAG} \
-            ${ONLINE_FLAG} \
-            -d "${MODEL_DIR}" \
-            -s ${STATIC_STEPS} \
-            -i ${TRAIN_INTERVALS} \
-            -b ${SWITCH_BUFFER} \
-            --epsilon_start ${EPSILON_START} \
-            --epsilon_end ${EPSILON_END} \
-            --epsilon_decay ${EPSILON_DECAY} \
-            >> "${LOG_DIR_LOCAL}/agent_ep${EPISODE}.log" 2>&1 || AGENT_EXIT=$?
+        local AGENT_ARGS=(
+            python copter.py
+            -p "${NS3_PORT_LOCAL}"
+            -e "${EXP_NAME_LOCAL}"
+            -m "${MODE}"
+            -d "${MODEL_DIR}"
+            -s "${STATIC_STEPS}"
+            -i "${TRAIN_INTERVALS}"
+            -b "${SWITCH_BUFFER}"
+            --epsilon_start "${EPSILON_START}"
+            --epsilon_end "${EPSILON_END}"
+            --epsilon_decay_steps "${EPSILON_DECAY}"
+            --seed "${SEED}"
+            --tb_enable "${TB_ENABLE}"
+            --acc_hidden_dims "${ACC_HIDDEN_DIMS}"
+            --reward_weights "${REWARD_WEIGHTS}"
+        )
+        [ "${ONLINE}" -eq 1 ] && AGENT_ARGS+=(--online)
+        [ -n "${FMAP_DIR}" ] && AGENT_ARGS+=(-f "${FMAP_DIR}")
+        [ -n "${FORCE_ACTION}" ] && AGENT_ARGS+=(--force_action "${FORCE_ACTION}")
+        [ "${EVAL_GREEDY}" -eq 1 ] && AGENT_ARGS+=(--eval_greedy)
+        [ -n "${EVAL_TAG}" ] && AGENT_ARGS+=(--eval_tag "${EVAL_TAG}")
+        [ -n "${WATCH_PORTS}" ] && AGENT_ARGS+=(--watch_ports "${WATCH_PORTS}")
+        [ "${MAX_STEPS}" -gt 0 ] && AGENT_ARGS+=(--max_steps "${MAX_STEPS}")
+        [ -n "${RUN_ID}" ] && AGENT_ARGS+=(--run_id "${RUN_ID}")
+        [ -n "${PHASE}" ] && AGENT_ARGS+=(--phase "${PHASE}")
+        "${AGENT_ARGS[@]}" >> "${LOG_DIR_LOCAL}/agent_ep${EPISODE}.log" 2>&1 || AGENT_EXIT=$?
 
         cd "${COPTER_ROOT}"
 
@@ -230,6 +263,12 @@ run_single_experiment() {
                 log_local "FATAL: ${MAX_CONSECUTIVE_FAILURES} consecutive failures. Aborting."
                 return 1
             fi
+        fi
+
+        RUN_COUNT=$((RUN_COUNT + 1))
+        if [ "${ONE_SHOT}" -eq 1 ]; then
+            [ "${AGENT_EXIT}" -eq 0 ] || return "${AGENT_EXIT}"
+            break
         fi
 
         if [ -f "${STATE_FILE}" ]; then
@@ -276,7 +315,7 @@ else:
     log_local ""
     log_local "=============================================="
     log_local "Training Complete - Total Episodes: ${EPISODE}"
-    log_local "TensorBoard: tensorboard --logdir ${COPTER_ROOT}/copter/runs/"
+    log_local "TensorBoard: tensorboard --logdir ${COPTER_ROOT}/copter/tb_logs/"
     log_local "=============================================="
 }
 
@@ -341,7 +380,7 @@ else
     echo ""
     echo "=============================================="
     echo "All experiments complete. Failed: ${FAILED}/${#PIDS[@]}"
-    echo "TensorBoard: tensorboard --logdir ${COPTER_ROOT}/copter/runs/"
+    echo "TensorBoard: tensorboard --logdir ${COPTER_ROOT}/copter/tb_logs/"
     echo "=============================================="
     [ ${FAILED} -eq 0 ] || exit 1
 fi

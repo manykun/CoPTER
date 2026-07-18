@@ -71,14 +71,39 @@ def load_cdf(file_path):
         return [list(map(float, line.strip().split())) for line in f if line.strip()]
 
 
+def expand_hosts(host_spec):
+    """Accept either an explicit host list or an inclusive {start, end} range."""
+    if isinstance(host_spec, list):
+        hosts = [int(host) for host in host_spec]
+    elif isinstance(host_spec, dict) and "start" in host_spec and "end" in host_spec:
+        start = int(host_spec["start"])
+        end = int(host_spec["end"])
+        if end < start:
+            raise ValueError(f"invalid host range: {start}..{end}")
+        hosts = list(range(start, end + 1))
+    else:
+        raise ValueError("hosts must be a list or an inclusive {start, end} object")
+    if not hosts:
+        raise ValueError("host set cannot be empty")
+    return hosts
+
+
 def main():
-    random.seed(42)
     parser = OptionParser()
     parser.add_option("-b", "--bandwidth", dest="bandwidth", default="10G",
                       help="bandwidth of host link (G/M/K), default 10G")
     parser.add_option("-c", "--config", dest="group_config", default=None,
                       help="JSON file specifying flow generation groups")
+    parser.add_option("--seed", dest="seed", type="int", default=42,
+                      help="random seed, default 42")
+    parser.add_option("--output-dir", dest="output_dir", default="result",
+                      help="directory for generated flow files")
+    parser.add_option("--name", dest="output_name", default=None,
+                      help="output basename; defaults to the config filename")
+    parser.add_option("--no-json", dest="no_json", action="store_true", default=False,
+                      help="skip the optional per-flow JSON output")
     options, _ = parser.parse_args()
+    random.seed(options.seed)
 
     if not options.group_config:
         print("Usage: --flow-groups <group_file.json> required")
@@ -86,36 +111,39 @@ def main():
 
     bandwidth = translate_bandwidth(options.bandwidth)
     config_dir = os.path.dirname(options.group_config)
-    config_name = os.path.splitext(os.path.basename(options.group_config))[0]
+    config_name = options.output_name or os.path.splitext(os.path.basename(options.group_config))[0]
     if config_name.endswith("_config"):
         config_name = config_name[: -len("_config")]
 
     # 输出路径
-    output_txt = os.path.join("result", config_name+".flow")
-    output_json = os.path.join("result", config_name+"_flows.json")
+    output_txt = os.path.join(options.output_dir, config_name+".flow")
+    output_json = os.path.join(options.output_dir, config_name+"_flows.json")
 
     if bandwidth is None:
         print("Bandwidth format incorrect")
         sys.exit(1)
 
-    # 创建result目录（如果不存在）
-    os.makedirs("result", exist_ok=True)
+    os.makedirs(options.output_dir, exist_ok=True)
 
     with open(options.group_config, 'r') as f:
         group_config = json.load(f)
+    if not isinstance(group_config, list) or not group_config:
+        raise ValueError("traffic configuration must be a non-empty JSON list")
 
     flow_list = []  # 存储所有流，用于全局排序
     flow_count = 0
 
     for group in group_config:
-        print(f"Processing group: src={group['src_hosts'][0]}-{group['src_hosts'][-1]}, cdf={group['cdf']}")
-        src_hosts = group["src_hosts"]
-        dst_hosts = group["dst_hosts"]
+        src_hosts = expand_hosts(group["src_hosts"])
+        dst_hosts = expand_hosts(group["dst_hosts"])
+        print(f"Processing group: src={src_hosts[0]}-{src_hosts[-1]}, cdf={group['cdf']}")
         cdf_path = os.path.join(config_dir, group["cdf"])
         start_time = int(group.get("start_time_s", 2) * 1e9)  # 纳秒
         duration = int(group.get("duration_s", 10) * 1e9)  # 纳秒
         # load = float(group.get("load", 0.3))
         load = float(group["load"]) if "load" in group else random.choice([0.6, 0.7, 0.8])
+        if load <= 0:
+            raise ValueError(f"load must be positive, got {load}")
         pattern = group.get("pattern", "poisson")
         period = float(group.get("period_s", 1)) * 1e9  # 纳秒
         incast_dst_count = int(group.get("incast_dst_count", 1))
@@ -342,16 +370,17 @@ def main():
         for flow in flow_list
     ]
 
-    # 写入JSON文件
-    with open(output_json, "w") as json_file:
-        json.dump(
-            json_output, 
-            json_file, 
-            indent=2,
-            default=lambda x: int(x) if isinstance(x, float) and x.is_integer() else x
-        )
+    if not options.no_json:
+        with open(output_json, "w") as json_file:
+            json.dump(
+                json_output,
+                json_file,
+                indent=2,
+                default=lambda x: int(x) if isinstance(x, float) and x.is_integer() else x
+            )
 
-    print(f"Generated {flow_count} flows. Saved to {output_txt} and {output_json}.")
+    destinations = output_txt if options.no_json else f"{output_txt} and {output_json}"
+    print(f"Generated {flow_count} flows with seed {options.seed}. Saved to {destinations}.")
 
 
 if __name__ == "__main__":

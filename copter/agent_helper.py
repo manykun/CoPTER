@@ -7,6 +7,7 @@ import json
 import pickle
 import random
 import time
+from dataclasses import replace
 from collections import deque
 from loguru import logger
 
@@ -63,7 +64,8 @@ class AgentHelper:
             fmap_dir: str = None,  # 确保保留fmap_dir参数
             run_id: str = None,
             phase: str = None,
-            config_hash: str = None
+            config_hash: str = None,
+            acc_hidden_dims=None,
             ):
         # Assert fmap_dir is provided if mode is CoPTER
         if mode == "CoPTER" and fmap_dir is None:
@@ -82,6 +84,10 @@ class AgentHelper:
         self.run_id = run_id
         self.phase = phase
         self.config_hash = config_hash
+        self.acc_parameters = replace(
+            DEFAULT_ACC_PARAMETER,
+            hidden_dims=tuple(acc_hidden_dims) if acc_hidden_dims else DEFAULT_ACC_PARAMETER.hidden_dims,
+        )
 
         # Load fmap if mode is CoPTER
         # self.fmap = self._load_fmap(fmap_dir, 0) if mode == "CoPTER" else None
@@ -109,7 +115,7 @@ class AgentHelper:
         for port_idx in range(node_number):
             # 根据模式初始化智能体
             if mode == "ACC":
-                agent = ACC(f"{self.exp_name}_ACC_{port_idx}", DEFAULT_ACC_PARAMETER)
+                agent = ACC(f"{self.exp_name}_ACC_{port_idx}", self.acc_parameters)
             else:  # CoPTER模式
                 agent = CoPTER(
                     f"{self.exp_name}_CoPTER_{port_idx}", 

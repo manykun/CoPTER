@@ -15,6 +15,23 @@ except ImportError:
 
 from backbone_sor import SORTripleHeadACC
 
+try:
+    from structures import (
+        ACC_KMAX_VALUES,
+        ACC_KMIN_VALUES,
+        ACC_PMAX_VALUES,
+        acc_action_from_indices,
+    )
+except ImportError:
+    import sys
+    sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "copter")))
+    from structures import (
+        ACC_KMAX_VALUES,
+        ACC_KMIN_VALUES,
+        ACC_PMAX_VALUES,
+        acc_action_from_indices,
+    )
+
 
 class SORACC:
     def __init__(self, name: str, agent_params, lambda_cons: float = 0.01, lambda_reg: float = 0.001, drift_reg_threshold: float = 0.5, ref_update_interval: int = 256):
@@ -36,11 +53,7 @@ class SORACC:
 
     @staticmethod
     def action_values():
-        return (
-            [0.0, 0.0949, 0.2259, 0.4066, 0.6560, 1.0],
-            [0.0, 0.25, 0.5, 1.0],
-            [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0],
-        )
+        return ACC_KMIN_VALUES, ACC_KMAX_VALUES, ACC_PMAX_VALUES
 
     def save_model(self, save_path):
         os.makedirs(save_path, exist_ok=True)
@@ -75,7 +88,6 @@ class SORACC:
         return embedding.squeeze(0).cpu().numpy()
 
     def select_action(self, state, epsilon=0.1):
-        kmin_values, kmax_values, pmax_values = self.action_values()
         if random.random() < epsilon:
             action = (
                 random.randint(0, self.p.kmin_dim - 1),
@@ -87,7 +99,7 @@ class SORACC:
             with torch.no_grad():
                 q_kmin, q_kmax, q_pmax = self.policy_net(state_tensor)
             action = (int(q_kmin.argmax().item()), int(q_kmax.argmax().item()), int(q_pmax.argmax().item()))
-        return DCQCNParameters(kmin_values[action[0]], kmax_values[action[1]], pmax_values[action[2]]), action
+        return acc_action_from_indices(action), action
 
     def train_model(self, states, actions, rewards, next_states, cluster_ids=None, prototypes=None, drift_scores=None):
         states_t = torch.FloatTensor(states).to(self.device)
@@ -158,11 +170,3 @@ class SORACC:
             + q_kmax.gather(1, actions[:, 1].unsqueeze(1))
             + q_pmax.gather(1, actions[:, 2].unsqueeze(1))
         )
-
-
-try:
-    from structures import DCQCNParameters
-except ImportError:
-    import sys
-    sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "copter")))
-    from structures import DCQCNParameters

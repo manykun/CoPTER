@@ -3,12 +3,18 @@ import os
 import argparse
 import hashlib
 import json
+import math
 import random
 import numpy as np
 from loguru import logger
 from network_helper import NetworkHelper
 from agent_helper import AgentHelper
-from structures import NetworkHelperParameters, AgentHelperParameters
+from structures import (
+    AgentHelperParameters,
+    NetworkHelperParameters,
+    acc_action_from_indices,
+    validate_acc_action_indices,
+)
 
 
 def set_random_seed(seed: int):
@@ -38,11 +44,13 @@ if __name__ == "__main__":
     parser.add_argument("-d", "--model_dir", type=str, default="models", help="model_dir: The directory where the model is stored.")
     parser.add_argument("-s", "--static_steps", type=int, default=4, help="static_steps: The number of initial steps to keep the actions static.")
     parser.add_argument("-i", "--train_intervals", type=int, default=8, help="train_intervals: The number of intervals for training the agent.")
-    parser.add_argument("-b", "--switch_buffer", type=int, default=10000, help="switch_buffer: The size of switch buffer in bytes.")
+    parser.add_argument("-b", "--switch_buffer", type=int, default=400, help="Switch buffer size in KB. This is experiment metadata; ns-3 normalizes queue occupancy.")
     parser.add_argument("--max_steps", type=int, default=0, help="max_steps: If > 0, exit cleanly after this many steps in this run (one epoch). 0 means run until ns3 ends.")
     parser.add_argument("--epsilon_start", type=float, default=1.0)
     parser.add_argument("--epsilon_end", type=float, default=0.05)
     parser.add_argument("--epsilon_decay_steps", type=int, default=50000)
+    parser.add_argument("--acc_hidden_dims", type=str, default="32,64,64,32", help="Comma-separated ACC hidden layer widths.")
+    parser.add_argument("--reward_weights", type=str, default="0.50,0.30,0.20", help="Throughput,queue,ECN reward weights; must sum to 1.")
     parser.add_argument("--state_save_interval", type=int, default=1)
     parser.add_argument("--seed", type=int, default=1, help="Random seed for Python, NumPy, and PyTorch.")
     parser.add_argument("--run_id", type=str, default=None, help="Optional run identifier stored with training state and metrics.")
@@ -58,14 +66,27 @@ if __name__ == "__main__":
     parser.add_argument("--tb_log_dir", type=str, default="tb_logs", help="TensorBoard root log dir; actual dir = <tb_log_dir>/<exp_name>")
     parser.add_argument("--tb_flush_secs", type=int, default=30)
     args = parser.parse_args()
+    try:
+        acc_hidden_dims = tuple(int(width) for width in args.acc_hidden_dims.split(","))
+        if not acc_hidden_dims or any(width <= 0 for width in acc_hidden_dims):
+            raise ValueError("all widths must be positive")
+    except ValueError as exc:
+        raise SystemExit(f"--acc_hidden_dims must be comma-separated positive integers: {exc}")
+    try:
+        reward_weights = tuple(float(weight) for weight in args.reward_weights.split(","))
+        if len(reward_weights) != 3 or any(weight < 0 for weight in reward_weights):
+            raise ValueError("exactly three non-negative weights are required")
+        if not math.isclose(sum(reward_weights), 1.0, rel_tol=0.0, abs_tol=1e-6):
+            raise ValueError(f"weights sum to {sum(reward_weights)}, not 1")
+    except ValueError as exc:
+        raise SystemExit(f"--reward_weights is invalid: {exc}")
     set_random_seed(args.seed)
 
     # Parse optional forced action (sanity-check for reward sensitivity).
     forced_action_idx = None
     if args.force_action:
         try:
-            forced_action_idx = tuple(int(x) for x in args.force_action.split(","))
-            assert len(forced_action_idx) == 3
+            forced_action_idx = validate_acc_action_indices(args.force_action.split(","))
         except Exception as exc:
             raise SystemExit(f"--force_action must be 'kmin_idx,kmax_idx,pmax_idx'; got {args.force_action!r} ({exc})")
 
@@ -86,7 +107,15 @@ if __name__ == "__main__":
     logger.info(f"Copter Starting Running at {os.getcwd()}")
 
     # Initialize NetworkHelper
-    network_helper_params = NetworkHelperParameters(port_states=6, port_actions=3, state_observations=3, switch_buffer_size=args.switch_buffer)
+    network_helper_params = NetworkHelperParameters(
+        port_states=6,
+        port_actions=3,
+        state_observations=3,
+        switch_buffer_size=args.switch_buffer,
+        reward_throughput_weight=reward_weights[0],
+        reward_queue_weight=reward_weights[1],
+        reward_ecn_weight=reward_weights[2],
+    )
     
     network_helper = NetworkHelper(ns3_socket=args.ns3_socket, nhp=network_helper_params)
     
@@ -102,7 +131,8 @@ if __name__ == "__main__":
     ).hexdigest()
     agent_helper = AgentHelper(node_number=network_helper.get_n_port(), ahp=agent_helper_params, model_dir=args.model_dir, mode=args.mode,
                                exp_name=args.exp_name, online=args.online, network_helper=network_helper, fmap_dir=args.fmap_dir,
-                               run_id=args.run_id, phase=args.phase, config_hash=config_hash)
+                               run_id=args.run_id, phase=args.phase, config_hash=config_hash,
+                               acc_hidden_dims=acc_hidden_dims)
 
     checkpoint_name = args.checkpoint if args.resume and args.checkpoint else args.override_name
     agent_helper.load(checkpoint_name)
@@ -145,6 +175,13 @@ if __name__ == "__main__":
     rollout_top30_count = 0
     rollout_median_sum = 0.0
     rollout_median_count = 0
+    reward_component_keys = (
+        "throughput", "queue", "ecn", "avg_tx_rate", "avg_queue",
+        "peak_queue", "avg_ecn", "peak_ecn",
+    )
+    reward_component_sums = {key: 0.0 for key in reward_component_keys}
+    reward_component_count = 0
+    action_histogram = {}
 
     try:
         while True:
@@ -172,17 +209,16 @@ if __name__ == "__main__":
                 if forced_action_idx is not None:
                     # Sanity-check: bypass the policy and apply a fixed action to
                     # every port so we can measure reward sensitivity to actions.
-                    from structures import DCQCNParameters
-                    kmin_values = [0.0, 0.0949, 0.2259, 0.4066, 0.6560, 1.0]
-                    kmax_values = [0.0, 0.25, 0.5, 1.0]
-                    pmax_values = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0]
-                    ki, ka, pi = forced_action_idx
-                    forced_para = DCQCNParameters(kmin_values[ki], kmax_values[ka], pmax_values[pi])
+                    forced_para = acc_action_from_indices(forced_action_idx)
                     n_port = network_helper.get_n_port()
                     paras = [forced_para for _ in range(n_port)]
                     actions = [forced_action_idx for _ in range(n_port)]
                 else:
                     paras, actions = agent_helper.decide(port_states, epsi=current_epsilon)
+
+                for action in actions:
+                    action_key = ",".join(str(index) for index in action)
+                    action_histogram[action_key] = action_histogram.get(action_key, 0) + 1
 
                 # Cofigure the actions for each port
                 for port_idx, parameter in enumerate(paras):
@@ -211,8 +247,12 @@ if __name__ == "__main__":
                     if len(congested_ports) > 0:
                         rewards = []
                         for p in congested_ports:
-                            r = float(network_helper.get_port_current_reward(p))
+                            components = network_helper.get_port_current_reward_components(p)
+                            r = float(components["reward"])
                             rewards.append(r)
+                            for key in reward_component_keys:
+                                reward_component_sums[key] += float(components[key])
+                            reward_component_count += 1
                             # Update per-port EMA for diagnostics
                             prev = per_port_reward_ema.get(p, r)
                             per_port_reward_ema[p] = 0.9 * prev + 0.1 * r
@@ -240,8 +280,13 @@ if __name__ == "__main__":
                         # on the ports carrying the strongest DCQCN signal.
                         topk = network_helper.get_topk_congested_ports(k=8)
                         if len(topk) > 0:
-                            rewards = [float(network_helper.get_port_current_reward(p))
-                                       for p in topk]
+                            rewards = []
+                            for p in topk:
+                                components = network_helper.get_port_current_reward_components(p)
+                                rewards.append(float(components["reward"]))
+                                for key in reward_component_keys:
+                                    reward_component_sums[key] += float(components[key])
+                                reward_component_count += 1
                             rollout_reward_sum += sum(rewards)
                             rollout_reward_count += len(rewards)
                             rollout_top30_sum += max(rewards)
@@ -324,6 +369,15 @@ if __name__ == "__main__":
                 "rollout_median_reward": (rollout_median_sum / rollout_median_count) if rollout_median_count > 0 else None,
                 "congested_step_ratio": (congested_step_count / current_step) if current_step > 0 else 0.0,
                 "avg_congested_ports_per_step": (congested_port_count_sum / congested_step_count) if congested_step_count > 0 else 0.0,
+                "forced_action": list(forced_action_idx) if forced_action_idx is not None else None,
+                "action_histogram": action_histogram,
+                **{
+                    f"reward_{key}_mean": (
+                        reward_component_sums[key] / reward_component_count
+                        if reward_component_count > 0 else None
+                    )
+                    for key in reward_component_keys
+                },
                 "per_port_reward_top5": (
                     [{"port": p, "reward": round(r, 4)} for p, r in
                      sorted(per_port_reward_ema.items(), key=lambda kv: -kv[1])[:5]]
@@ -342,10 +396,16 @@ if __name__ == "__main__":
                     for p in watch_ports
                 } if watch_ports else {},
             })
-            logger.info(
-                f"Saved training state at exit: epoch={agent_helper.epoch}, "
-                f"global_step={agent_helper.global_train_step}, epsilon={agent_helper.epsilon:.4f}"
-            )
+            if args.eval_greedy:
+                logger.info(
+                    f"Evaluation metrics recorded without modifying training state: "
+                    f"epoch={agent_helper.epoch}, global_step={agent_helper.global_train_step}"
+                )
+            else:
+                logger.info(
+                    f"Saved training state at exit: epoch={agent_helper.epoch}, "
+                    f"global_step={agent_helper.global_train_step}, epsilon={agent_helper.epsilon:.4f}"
+                )
             # Fixed watch-port reward -> TensorBoard under a dedicated namespace
             # so each port has its own continuous curve across epochs.
             if tb_writer is not None and watch_ports:

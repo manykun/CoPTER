@@ -6,7 +6,14 @@ from loguru import logger
 from scipy.interpolate import RegularGridInterpolator
 
 from backbone import DualHeadNN, TripleHeadACC, TripleHeadCoPTER
-from structures import DCQCNParameters, AgentParameters
+from structures import (
+    ACC_KMAX_VALUES,
+    ACC_KMIN_VALUES,
+    ACC_PMAX_VALUES,
+    AgentParameters,
+    DCQCNParameters,
+    acc_action_from_indices,
+)
 
 
 class Agent:
@@ -51,9 +58,9 @@ class ACC(Agent):
         # Model Initialization
         self.device = torch.device("cpu")
         # 初始化策略网络（评估网络），每个训练步更新
-        self.policy_net = TripleHeadACC(self.p.state_dim, self.p.kmin_dim, self.p.kmax_dim, self.p.pmax_dim).to(self.device)
+        self.policy_net = TripleHeadACC(self.p.state_dim, self.p.kmin_dim, self.p.kmax_dim, self.p.pmax_dim, self.p.hidden_dims).to(self.device)
         # 初始化目标网络，定期更新
-        self.target_net = TripleHeadACC(self.p.state_dim, self.p.kmin_dim, self.p.kmax_dim, self.p.pmax_dim).to(self.device) 
+        self.target_net = TripleHeadACC(self.p.state_dim, self.p.kmin_dim, self.p.kmax_dim, self.p.pmax_dim, self.p.hidden_dims).to(self.device)
         # 创建优化器，adam优化算法
         self.optimizer = torch.optim.Adam(self.policy_net.parameters(), lr=self.p.learning_rate)
         # 计算损失函数
@@ -96,10 +103,6 @@ class ACC(Agent):
         Returns:
             tuple: A tuple containing the selected action as a `DCQCNParameters` object and the action indices.
         """
-        kmin_values = [0.0, 0.0949, 0.2259, 0.4066, 0.6560, 1.0]  # 6
-        kmax_values = [0.0, 0.25, 0.5, 1.0]  # 4
-        pmax_values = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0]  # 10
-        
         if random.random() < epsilon:
             action = (random.randint(0, self.p.kmin_dim - 1), 
                       random.randint(0, self.p.kmax_dim - 1), 
@@ -114,9 +117,9 @@ class ACC(Agent):
             pmax_index = pmax.argmax().item()
             action = (int(kmin_index), int(kmax_index), int(pmax_index))
         
-        logger.info(f"ACC Agent {self.name} - Action: Kmin: {kmin_values[action[0]]}, Kmax: {kmax_values[action[1]]}, Pmax: {pmax_values[action[2]]}")
+        logger.info(f"ACC Agent {self.name} - Action: Kmin: {ACC_KMIN_VALUES[action[0]]}, Kmax: {ACC_KMAX_VALUES[action[1]]}, Pmax: {ACC_PMAX_VALUES[action[2]]}")
         # 返回kmin、kmax、pmax参数值以及索引值
-        return (DCQCNParameters(kmin_values[action[0]], kmax_values[action[1]], pmax_values[action[2]]), action)
+        return (acc_action_from_indices(action), action)
     
     
     def train_model(self, state, action, reward, next_state):
