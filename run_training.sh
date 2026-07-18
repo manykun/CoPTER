@@ -130,7 +130,9 @@ if [ ! -f "${NS3_BIN}" ]; then
 fi
 
 export LD_LIBRARY_PATH="${NS3_LIB_DIR}:${LD_LIBRARY_PATH:-}"
-export NS_LOG="CongestionControlSimulator=level_all:OpenGymInterface=level_all"
+# Do not force verbose ns-3 component logging. NS_LOG_UNCOND diagnostics are
+# still captured, while normal runs avoid a large level_all performance cost.
+export NS_LOG="${NS_LOG:-}"
 
 SIM_DIR="${COPTER_ROOT}/simulation"
 MAX_CONSECUTIVE_FAILURES=5
@@ -201,11 +203,15 @@ run_single_experiment() {
                 log_local "FATAL: ${MAX_CONSECUTIVE_FAILURES} consecutive failures. Aborting."
                 return 1
             fi
+            if [ "${ONE_SHOT}" -eq 1 ]; then
+                log_local "One-shot run will not retry a failed NS3 startup."
+                return 1
+            fi
             sleep 2
             continue
         fi
 
-        log_local "Starting RL agent..."
+        log_local "Starting RL agent (output: ${LOG_DIR_LOCAL}/agent_ep${EPISODE}.log)..."
         cd "${COPTER_ROOT}/copter"
 
         local AGENT_EXIT=0
@@ -259,6 +265,8 @@ run_single_experiment() {
         else
             CONSECUTIVE_FAILURES=$((CONSECUTIVE_FAILURES + 1))
             log_local "WARNING: Agent exited with code ${AGENT_EXIT} (failure ${CONSECUTIVE_FAILURES}/${MAX_CONSECUTIVE_FAILURES})"
+            log_local "Last 40 lines of agent log:"
+            tail -n 40 "${LOG_DIR_LOCAL}/agent_ep${EPISODE}.log" >&2 || true
             if [ ${CONSECUTIVE_FAILURES} -ge ${MAX_CONSECUTIVE_FAILURES} ]; then
                 log_local "FATAL: ${MAX_CONSECUTIVE_FAILURES} consecutive failures. Aborting."
                 return 1

@@ -61,7 +61,7 @@ git status --short
 
 ## 4. 先做烟雾测试
 
-烟雾测试只使用 `throughput` 的种子 1，共运行三次固定动作：
+烟雾测试只使用 `throughput` 的种子 1，并将流量确定性抽样到 2000 条，共运行三次固定动作：
 
 ```bash
 cd /mnt/sdb1/xuduokun/projects/CoPTER

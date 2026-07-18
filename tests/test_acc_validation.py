@@ -10,7 +10,7 @@ sys.path.insert(0, str(ROOT / "copter"))
 sys.path.insert(0, str(ROOT / "tools" / "traffic"))
 
 from structures import DCQCNParameters, acc_action_from_indices, validate_acc_action_indices
-from TraGen import expand_hosts
+from TraGen import downsample_flows, expand_hosts
 
 
 def load_analysis_module():
@@ -43,6 +43,13 @@ class ACCValidationTests(unittest.TestCase):
         self.assertEqual(expand_hosts([2, "3"]), [2, 3])
         with self.assertRaises(ValueError):
             expand_hosts({"start": 7, "end": 4})
+
+    def test_smoke_flow_downsampling_is_even_and_bounded(self):
+        flows = list(range(10))
+        self.assertEqual(downsample_flows(flows, 4), [0, 2, 5, 7])
+        self.assertIs(downsample_flows(flows, 0), flows)
+        with self.assertRaises(ValueError):
+            downsample_flows(flows, -1)
 
     def test_percentile_and_rank_correlation(self):
         analysis = load_analysis_module()

@@ -15,6 +15,7 @@ REWARD_WEIGHTS="0.50,0.30,0.20"
 KMIN_RANGE="20000,50000"
 KMAX_RANGE="50000,100000"
 SMOKE=0
+MAX_FLOWS=0
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -48,6 +49,7 @@ if [[ "${SMOKE}" -eq 1 ]]; then
     SEEDS="${SEEDS%% *}"
     SCENARIOS="${SCENARIOS%% *}"
     EPISODES=1
+    MAX_FLOWS=2000
 fi
 
 RUN_DIR="${ROOT}/experiments/acc_validation/${RUN_ID}"
@@ -61,6 +63,21 @@ validate_prepared_configs() {
         for seed in ${SEEDS}; do
             local config="${ROOT}/simulation/mix/acc_validation/${scenario}_seed${seed}.conf"
             [[ -f "${config}" ]] || { echo "Missing ${config}; run --stage prepare first" >&2; return 1; }
+            local flow_file="${ROOT}/simulation/mix/acc_validation/${scenario}_seed${seed}.flow"
+            [[ -f "${flow_file}" ]] || { echo "Missing ${flow_file}; run --stage prepare first" >&2; return 1; }
+            local meta_file="${ROOT}/simulation/mix/acc_validation/${scenario}_seed${seed}.meta"
+            [[ -f "${meta_file}" ]] || { echo "Missing ${meta_file}; run --stage prepare again" >&2; return 1; }
+            local prepared_max_flows
+            prepared_max_flows="$(awk -F= '$1 == "max_flows" {print $2}' "${meta_file}")"
+            if [[ "${prepared_max_flows}" != "${MAX_FLOWS}" ]]; then
+                echo "Prepared flow cap (${prepared_max_flows}) does not match requested cap (${MAX_FLOWS})." >&2
+                echo "Rerun this run-id's prepare stage with the same --smoke setting." >&2
+                return 1
+            fi
+            if [[ "${SMOKE}" -eq 1 ]] && [[ "$(sed -n '1p' "${flow_file}")" -gt "${MAX_FLOWS}" ]]; then
+                echo "Smoke flow has more than ${MAX_FLOWS} rows; rerun --stage prepare --smoke." >&2
+                return 1
+            fi
             local actual_buffer actual_kmin_min actual_kmin_max actual_kmax_min actual_kmax_max
             actual_buffer="$(awk '$1 == "BUFFER_SIZE" {print $2}' "${config}")"
             actual_kmin_min="$(awk '$1 == "OPENGYM_MIN_KMIN" {print $2}' "${config}")"
@@ -84,7 +101,8 @@ prepare() {
         --scenarios "${SCENARIOS}" \
         --buffer-kb "${BUFFER_KB}" \
         --kmin-range "${KMIN_RANGE}" \
-        --kmax-range "${KMAX_RANGE}"
+        --kmax-range "${KMAX_RANGE}" \
+        --max-flows "${MAX_FLOWS}"
 }
 
 copy_outputs() {
@@ -102,6 +120,8 @@ copy_outputs() {
         "${destination}/input.flow"
     cp "${ROOT}/simulation/mix/acc_validation/${scenario}_seed${seed}.conf" \
         "${destination}/input.conf"
+    cp "${ROOT}/simulation/mix/acc_validation/${scenario}_seed${seed}.meta" \
+        "${destination}/input.meta"
     shopt -u nullglob
     if [[ -f "${metrics_file}" ]]; then
         tail -n 1 "${metrics_file}" > "${destination}/metrics.json"

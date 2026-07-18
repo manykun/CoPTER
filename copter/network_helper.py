@@ -68,7 +68,9 @@ class NetworkHelper:
         start_index = port_idx * self.nhp.port_actions
         end_index = start_index + self.nhp.port_actions
         self.action[start_index:end_index] = port_action.k_min_norm, port_action.k_max_norm, port_action.p_max
-        logger.info(f"Step {curr_step} - Port {port_idx} - Action set to {port_action}.")
+        # Per-port INFO logging produces hundreds of thousands of lines on the
+        # 256-host topology. Keep it available only when TRACE is requested.
+        logger.trace(f"Step {curr_step} - Port {port_idx} - Action set to {port_action}.")
         self.action_port_bitmap[port_idx] = 1  # Mark the port as having an action set
 
     # 执行动作并获取新state
@@ -120,11 +122,27 @@ class NetworkHelper:
             # 验证所有端口都设置了动作->执行动作->重置动作位图
             assert sum(self.action_port_bitmap) > self.n_port - 1, "Not all ports have actions set. Please check the configurator."
             obs, _, done, info = self.env.step(self.action)
-            # logger.info(obs)
-            print(obs)
-            obs = np.array(obs)
             # print(self.action)    
             self.action_port_bitmap = [0] * self.n_port  # Reset the action bitmap for the next step
+
+        # ns3-gym legitimately returns observation=None together with done=True
+        # for the terminal notification. Do not turn None into a 0-D object
+        # array and index it as a regular observation.
+        if obs is None:
+            if done:
+                logger.info(f"Step {curr_step} - Terminal notification received without observation.")
+                return True
+            raise RuntimeError(
+                f"ns3-gym returned observation=None while done={done} at step {curr_step}"
+            )
+
+        obs = np.asarray(obs)
+        expected_size = self.n_port * self.nhp.port_states
+        if obs.ndim != 1 or obs.size != expected_size:
+            raise RuntimeError(
+                f"Invalid ns3 observation at step {curr_step}: "
+                f"shape={obs.shape}, size={obs.size}, expected={expected_size}, done={done}"
+            )
         # state归一化并存储
         for port_idx in range(self.n_port):
             start_index = port_idx * self.nhp.port_states
@@ -145,7 +163,7 @@ class NetworkHelper:
             self.qlen_window[port_idx].append(port_obs.queue_length_norm)
             self.ecn_window[port_idx].append(port_obs.ecn_rate_norm)
             self.txrate_window[port_idx].append(port_obs.tx_rate_norm)
-            logger.info(f"Step {curr_step} - Port {port_idx} - Observation {port_obs}.")
+            logger.trace(f"Step {curr_step} - Port {port_idx} - Observation {port_obs}.")
 
         logger.info(f"Step {curr_step} - Done {done}")
         return done

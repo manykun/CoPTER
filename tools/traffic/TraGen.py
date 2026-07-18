@@ -88,6 +88,19 @@ def expand_hosts(host_spec):
     return hosts
 
 
+def downsample_flows(flow_list, max_flows):
+    """Evenly downsample a time-sorted flow list for a fast smoke test."""
+    if max_flows < 0:
+        raise ValueError("max_flows cannot be negative")
+    if max_flows == 0 or len(flow_list) <= max_flows:
+        return flow_list
+    original_count = len(flow_list)
+    return [
+        flow_list[(index * original_count) // max_flows]
+        for index in range(max_flows)
+    ]
+
+
 def main():
     parser = OptionParser()
     parser.add_option("-b", "--bandwidth", dest="bandwidth", default="10G",
@@ -102,6 +115,8 @@ def main():
                       help="output basename; defaults to the config filename")
     parser.add_option("--no-json", dest="no_json", action="store_true", default=False,
                       help="skip the optional per-flow JSON output")
+    parser.add_option("--max-flows", dest="max_flows", type="int", default=0,
+                      help="if positive, deterministically downsample to at most this many flows")
     options, _ = parser.parse_args()
     random.seed(options.seed)
 
@@ -349,6 +364,14 @@ def main():
 
     # 所有流按开始时间（纳秒）排序
     flow_list.sort(key=lambda x: x["start_ns"])
+
+    if options.max_flows > 0 and len(flow_list) > options.max_flows:
+        original_count = len(flow_list)
+        flow_list = downsample_flows(flow_list, options.max_flows)
+        flow_count = len(flow_list)
+        print(f"Downsampled {original_count} generated flows to {flow_count} for smoke testing.")
+    elif options.max_flows < 0:
+        raise ValueError("--max-flows cannot be negative")
 
     # 写入TXT文件（排序后）
     with open(output_txt, "w") as txt_file:

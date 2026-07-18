@@ -8,6 +8,7 @@ SCENARIOS="throughput incast mixed"
 BUFFER_KB=400
 KMIN_RANGE="20000,50000"
 KMAX_RANGE="50000,100000"
+MAX_FLOWS=0
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -16,6 +17,7 @@ while [[ $# -gt 0 ]]; do
         --buffer-kb)   BUFFER_KB="$2"; shift 2 ;;
         --kmin-range)  KMIN_RANGE="$2"; shift 2 ;;
         --kmax-range)  KMAX_RANGE="$2"; shift 2 ;;
+        --max-flows)   MAX_FLOWS="$2"; shift 2 ;;
         *) echo "Unknown argument: $1" >&2; exit 2 ;;
     esac
 done
@@ -44,6 +46,7 @@ for scenario in ${SCENARIOS}; do
             --seed "${seed}" \
             --output-dir "${FLOW_DIR}" \
             --name "${name}" \
+            --max-flows "${MAX_FLOWS}" \
             --no-json
 
         flow_file="${FLOW_DIR}/${name}.flow"
@@ -53,6 +56,16 @@ for scenario in ${SCENARIOS}; do
             echo "Invalid flow file ${flow_file}: header=${declared}, rows=${actual}" >&2
             exit 1
         fi
+
+        {
+            echo "scenario=${scenario}"
+            echo "seed=${seed}"
+            echo "flows=${actual}"
+            echo "max_flows=${MAX_FLOWS}"
+            echo "buffer_kb=${BUFFER_KB}"
+            echo "kmin_range=${KMIN_RANGE}"
+            echo "kmax_range=${KMAX_RANGE}"
+        } > "${FLOW_DIR}/${name}.meta"
 
         sed \
             -e "s/@SCENARIO@/${scenario}/g" \

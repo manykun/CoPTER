@@ -226,6 +226,9 @@ if __name__ == "__main__":
 
                 # Enforce the updated parameters
                 done = network_helper.monitor(current_step)
+                if done:
+                    logger.info("NS3 terminal notification received after action; exiting before reward/record update.")
+                    break
                 # Accumulate per-port reward for this step.
                 #
                 # KEY DESIGN: aggregate reward ONLY over CONGESTED ports.
