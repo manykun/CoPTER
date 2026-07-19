@@ -82,15 +82,16 @@ def load_runs(root, kind):
     runs = {}
     if not root.exists():
         return runs
-    for metrics_path in root.glob("*/seed_*/*/metrics.json"):
-        method_dir = metrics_path.parent
+    for method_dir in root.glob("*/seed_*/*"):
+        if not method_dir.is_dir():
+            continue
         relative = method_dir.relative_to(root)
         scenario, seed_dir, method = relative.parts
         fct_files = sorted(method_dir.glob("*.fct"))
         if not fct_files:
             continue
         seed = int(seed_dir.removeprefix("seed_"))
-        runs[(scenario, seed, method)] = {
+        runs[(kind, scenario, seed, method)] = {
             "kind": kind,
             "directory": method_dir,
             "flows": parse_fct(fct_files[0]),
@@ -104,7 +105,7 @@ def build_rows(runs):
     rows = []
     grouped = defaultdict(list)
     for key in runs:
-        grouped[key[:2]].append(key)
+        grouped[key[:3]].append(key)
     for _, keys in grouped.items():
         common = None
         for key in keys:
@@ -112,7 +113,7 @@ def build_rows(runs):
             common = flow_keys if common is None else common & flow_keys
         common = common or set()
         for key in sorted(keys):
-            scenario, seed, method = key
+            kind, scenario, seed, method = key
             run = runs[key]
             row = {
                 "kind": run["kind"],
@@ -207,35 +208,24 @@ def sensitivity_gate(rows, threshold):
             "scenarios": scenario_results}
 
 
-def effectiveness_gate(rows, improvement):
-    lookup = {(row["kind"], row["scenario"], row["seed"], row["method"]): row for row in rows}
+def baseline_gate(rows):
+    by_scenario_seed = defaultdict(list)
+    for row in rows:
+        if row["kind"] == "baseline":
+            by_scenario_seed[(row["scenario"], row["seed"])].append(row)
     scenario_results = {}
-    scenarios = sorted({row["scenario"] for row in rows if row["kind"] == "eval"})
-    for scenario in scenarios:
-        seeds = sorted({row["seed"] for row in rows if row["kind"] == "eval" and row["scenario"] == scenario})
+    for scenario in sorted({key[0] for key in by_scenario_seed}):
         seed_results = []
-        for seed in seeds:
-            greedy = lookup.get(("eval", scenario, seed, "greedy"))
-            static = [row for row in rows if row["kind"] == "sensitivity" and row["scenario"] == scenario and row["seed"] == seed]
-            balanced = next((row for row in static if row["method"] == "balanced"), None)
-            candidates = [row for row in static if row["p95_fct_us"] is not None]
-            if not greedy or not balanced or not candidates:
-                seed_results.append({"seed": seed, "passed": False, "reason": "missing baseline or evaluation"})
+        for (candidate, seed), group in sorted(by_scenario_seed.items()):
+            if candidate != scenario:
                 continue
-            best = min(candidates, key=lambda row: row["p95_fct_us"])
-            complete = (greedy["completion_ratio"] or 0.0) >= 0.99
-            improves_balanced = greedy["p95_fct_us"] <= balanced["p95_fct_us"] * (1.0 - improvement)
-            near_best = greedy["p95_fct_us"] <= best["p95_fct_us"] * 1.05
+            methods = {row["method"] for row in group}
+            complete = all((row["completion_ratio"] or 0.0) >= 0.99 for row in group)
             seed_results.append({
                 "seed": seed,
-                "greedy_p95_fct_us": greedy["p95_fct_us"],
-                "balanced_p95_fct_us": balanced["p95_fct_us"],
-                "best_static": best["method"],
-                "best_static_p95_fct_us": best["p95_fct_us"],
+                "methods": sorted(methods),
                 "complete": complete,
-                "improves_balanced": improves_balanced,
-                "near_best_static": near_best,
-                "passed": complete and improves_balanced and near_best,
+                "passed": complete and methods == {"secn1", "secn2"},
             })
         passes = sum(item["passed"] for item in seed_results)
         scenario_results[scenario] = {
@@ -248,13 +238,65 @@ def effectiveness_gate(rows, improvement):
             "scenarios": scenario_results}
 
 
-def write_report(path, rows, sensitivity, effectiveness):
+def effectiveness_gate(rows, improvement):
+    lookup = {(row["kind"], row["scenario"], row["seed"], row["method"]): row for row in rows}
+    scenario_results = {}
+    scenarios = sorted({row["scenario"] for row in rows if row["kind"] == "eval"})
+    for scenario in scenarios:
+        seeds = sorted({row["seed"] for row in rows if row["kind"] == "eval" and row["scenario"] == scenario})
+        seed_results = []
+        for seed in seeds:
+            greedy = lookup.get(("eval", scenario, seed, "greedy"))
+            baselines = [
+                row for row in rows
+                if row["kind"] == "baseline" and row["scenario"] == scenario and row["seed"] == seed
+            ]
+            candidates = [row for row in baselines if row["p95_fct_us"] is not None]
+            methods = {row["method"] for row in candidates}
+            if not greedy or methods != {"secn1", "secn2"}:
+                seed_results.append({"seed": seed, "passed": False,
+                                     "reason": "missing SECN_1/SECN_2 baseline or evaluation"})
+                continue
+            best = min(candidates, key=lambda row: row["p95_fct_us"])
+            complete = (greedy["completion_ratio"] or 0.0) >= 0.99 and all(
+                (row["completion_ratio"] or 0.0) >= 0.99 for row in candidates
+            )
+            improves_any = any(
+                greedy["p95_fct_us"] <= row["p95_fct_us"] * (1.0 - improvement)
+                for row in candidates
+            )
+            near_best = greedy["p95_fct_us"] <= best["p95_fct_us"] * 1.05
+            seed_results.append({
+                "seed": seed,
+                "greedy_p95_fct_us": greedy["p95_fct_us"],
+                "secn1_p95_fct_us": next(row["p95_fct_us"] for row in candidates if row["method"] == "secn1"),
+                "secn2_p95_fct_us": next(row["p95_fct_us"] for row in candidates if row["method"] == "secn2"),
+                "best_paper_baseline": best["method"],
+                "best_paper_baseline_p95_fct_us": best["p95_fct_us"],
+                "complete": complete,
+                "improves_at_least_one_baseline": improves_any,
+                "near_best_paper_baseline": near_best,
+                "passed": complete and improves_any and near_best,
+            })
+        passes = sum(item["passed"] for item in seed_results)
+        scenario_results[scenario] = {
+            "seeds": seed_results,
+            "passed": bool(seed_results) and passes >= math.ceil(len(seed_results) / 2),
+        }
+    passed_scenarios = sum(result["passed"] for result in scenario_results.values())
+    required = math.ceil(2 * len(scenario_results) / 3) if scenario_results else 1
+    return {"passed": passed_scenarios >= required, "required_scenarios": required,
+            "scenarios": scenario_results}
+
+
+def write_report(path, rows, sensitivity, baselines, effectiveness):
     lines = ["# ACC validation report", "", "## Decision", ""]
     lines.append(f"- Action sensitivity: **{'PASS' if sensitivity['passed'] else 'FAIL'}**")
+    lines.append(f"- Paper static baselines complete: **{'PASS' if baselines['passed'] else 'FAIL'}**")
     lines.append(f"- Learned ACC effectiveness: **{'PASS' if effectiveness['passed'] else 'FAIL'}**")
     lines.extend(["", "The gate requires p95 FCT action sensitivity in at least two thirds of scenarios, "
-                  "and greedy ACC to improve the balanced static baseline by at least 5% while staying "
-                  "within 5% of the best static action.", "", "## Measurements", "",
+                  "complete SECN_1/SECN_2 paper baselines, and greedy ACC to improve at least one paper "
+                  "baseline by 5% while staying within 5% of the better paper baseline.", "", "## Measurements", "",
                   "| Phase | Scenario | Seed | Method | Completion | p95 FCT (us) | p99 slowdown | Reward |",
                   "|---|---|---:|---|---:|---:|---:|---:|"])
     for row in sorted(rows, key=lambda item: (item["kind"], item["scenario"], item["seed"], item["method"])):
@@ -266,7 +308,8 @@ def write_report(path, rows, sensitivity, effectiveness):
             f"{fmt(row['p99_slowdown'], 3)} | {fmt(row['rollout_mean_reward'])} |"
         )
     lines.extend(["", "## Gate details", "", "```json",
-                  json.dumps({"sensitivity": sensitivity, "effectiveness": effectiveness}, indent=2),
+                  json.dumps({"sensitivity": sensitivity, "baseline": baselines,
+                              "effectiveness": effectiveness}, indent=2),
                   "```", ""])
     path.write_text("\n".join(lines))
 
@@ -275,8 +318,8 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--run-dir", required=True, type=Path)
     parser.add_argument("--baseline-run-dir", type=Path, default=None,
-                        help="Optional run directory supplying sensitivity baselines.")
-    parser.add_argument("--stage", choices=("sensitivity", "effectiveness", "all"), default="all")
+                        help="Optional run directory supplying action sweeps and paper baselines.")
+    parser.add_argument("--stage", choices=("sensitivity", "baseline", "effectiveness", "all"), default="all")
     parser.add_argument("--sensitivity-threshold", type=float, default=0.05)
     parser.add_argument("--improvement-threshold", type=float, default=0.05)
     parser.add_argument("--gate", action="store_true", help="exit non-zero when the selected gate fails")
@@ -284,12 +327,15 @@ def main():
 
     runs = {}
     baseline_run_dir = args.baseline_run_dir or args.run_dir
-    if args.stage in ("sensitivity", "all", "effectiveness"):
+    if args.stage in ("sensitivity", "all"):
         runs.update(load_runs(baseline_run_dir / "sensitivity", "sensitivity"))
+    if args.stage in ("baseline", "effectiveness", "all"):
+        runs.update(load_runs(baseline_run_dir / "baseline", "baseline"))
     if args.stage in ("effectiveness", "all"):
         runs.update(load_runs(args.run_dir / "eval", "eval"))
     rows = build_rows(runs)
     sensitivity = sensitivity_gate(rows, args.sensitivity_threshold)
+    baselines = baseline_gate(rows)
     effectiveness = effectiveness_gate(rows, args.improvement_threshold)
 
     args.run_dir.mkdir(parents=True, exist_ok=True)
@@ -298,13 +344,17 @@ def main():
             writer = csv.DictWriter(handle, fieldnames=list(rows[0].keys()))
             writer.writeheader()
             writer.writerows(rows)
-    result = {"sensitivity": sensitivity, "effectiveness": effectiveness}
+    result = {"sensitivity": sensitivity, "baseline": baselines, "effectiveness": effectiveness}
     (args.run_dir / "analysis.json").write_text(json.dumps(result, indent=2))
-    write_report(args.run_dir / "REPORT.md", rows, sensitivity, effectiveness)
+    write_report(args.run_dir / "REPORT.md", rows, sensitivity, baselines, effectiveness)
 
-    selected_passed = sensitivity["passed"] if args.stage == "sensitivity" else effectiveness["passed"]
+    selected_passed = {
+        "sensitivity": sensitivity["passed"],
+        "baseline": baselines["passed"],
+        "effectiveness": effectiveness["passed"],
+    }.get(args.stage, False)
     if args.stage == "all":
-        selected_passed = sensitivity["passed"] and effectiveness["passed"]
+        selected_passed = sensitivity["passed"] and baselines["passed"] and effectiveness["passed"]
     print(f"Analysis written to {args.run_dir / 'REPORT.md'}")
     print(f"Selected gate: {'PASS' if selected_passed else 'FAIL'}")
     if args.gate and not selected_passed:

@@ -36,7 +36,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 case "${STAGE}" in
-    prepare|sensitivity|train|eval|analyze|all) ;;
+    prepare|sensitivity|baseline|train|eval|analyze|all) ;;
     *) echo "Invalid stage: ${STAGE}" >&2; exit 2 ;;
 esac
 
@@ -54,7 +54,9 @@ fi
 
 RUN_DIR="${ROOT}/experiments/acc_validation/${RUN_ID}"
 MODEL_DIR="${RUN_DIR}/models"
-mkdir -p "${RUN_DIR}" "${MODEL_DIR}/static" "${MODEL_DIR}/train"
+NS3_BIN="${ROOT}/ns-3.33/build/scratch/copter-sim"
+NS3_LIB_DIR="${ROOT}/ns-3.33/build/lib"
+mkdir -p "${RUN_DIR}" "${MODEL_DIR}/sweep" "${MODEL_DIR}/train" "${RUN_DIR}/logs"
 
 validate_prepared_configs() {
     local expected_kmin_min="${KMIN_RANGE%%,*}" expected_kmin_max="${KMIN_RANGE#*,}"
@@ -91,6 +93,32 @@ validate_prepared_configs() {
                 echo "Run this run-id's prepare stage again with the same arguments." >&2
                 return 1
             fi
+
+            local profile profile_config expected_kmin expected_kmax expected_pmax
+            for profile in secn1 secn2; do
+                profile_config="${ROOT}/simulation/mix/acc_validation/${scenario}_seed${seed}_${profile}.conf"
+                [[ -f "${profile_config}" ]] || {
+                    echo "Missing ${profile_config}; run --stage prepare again" >&2
+                    return 1
+                }
+                if [[ "${profile}" == secn1 ]]; then
+                    expected_kmin="KMIN_MAP 2 10000000000 5 40000000000 5"
+                    expected_kmax="KMAX_MAP 2 10000000000 200 40000000000 200"
+                    expected_pmax="PMAX_MAP 2 10000000000 0.01 40000000000 0.01"
+                else
+                    expected_kmin="KMIN_MAP 2 10000000000 100 40000000000 100"
+                    expected_kmax="KMAX_MAP 2 10000000000 400 40000000000 400"
+                    expected_pmax="PMAX_MAP 2 10000000000 0.20 40000000000 0.20"
+                fi
+                if ! grep -Fxq "ENABLE_COPTER 0" "${profile_config}" ||
+                   ! grep -Fxq "${expected_kmin}" "${profile_config}" ||
+                   ! grep -Fxq "${expected_kmax}" "${profile_config}" ||
+                   ! grep -Fxq "${expected_pmax}" "${profile_config}"; then
+                    echo "Prepared paper baseline has unexpected parameters: ${profile_config}" >&2
+                    echo "Run --stage prepare again; do not reuse old static configs." >&2
+                    return 1
+                fi
+            done
         done
     done
 }
@@ -106,8 +134,9 @@ prepare() {
 }
 
 copy_outputs() {
-    local scenario="$1" seed="$2" destination="$3" metrics_file="$4"
-    local base="${ROOT}/simulation/output/acc_validation/${scenario}_seed${seed}"
+    local scenario="$1" seed="$2" output_name="$3" config_name="$4" destination="$5"
+    local metrics_file="${6:-}"
+    local base="${ROOT}/simulation/output/acc_validation/${output_name}"
     mkdir -p "${destination}"
     shopt -s nullglob
     local files=("${base}".*)
@@ -118,14 +147,14 @@ copy_outputs() {
     cp "${files[@]}" "${destination}/"
     cp "${ROOT}/simulation/mix/acc_validation/${scenario}_seed${seed}.flow" \
         "${destination}/input.flow"
-    cp "${ROOT}/simulation/mix/acc_validation/${scenario}_seed${seed}.conf" \
+    cp "${ROOT}/simulation/mix/acc_validation/${config_name}.conf" \
         "${destination}/input.conf"
     cp "${ROOT}/simulation/mix/acc_validation/${scenario}_seed${seed}.meta" \
         "${destination}/input.meta"
     shopt -u nullglob
-    if [[ -f "${metrics_file}" ]]; then
+    if [[ -n "${metrics_file}" && -f "${metrics_file}" ]]; then
         tail -n 1 "${metrics_file}" > "${destination}/metrics.json"
-    else
+    elif [[ -n "${metrics_file}" ]]; then
         echo "Metrics file not found: ${metrics_file}" >&2
         return 1
     fi
@@ -143,7 +172,7 @@ run_sensitivity() {
             for spec in "${action_specs[@]}"; do
                 local label="${spec%%:*}"
                 local action="${spec#*:}"
-                local exp="accval_static_${RUN_ID}_${scenario}_${label}_s${seed}"
+                local exp="accval_sweep_${RUN_ID}_${scenario}_${label}_s${seed}"
                 echo "[sensitivity] scenario=${scenario} seed=${seed} action=${label}(${action})"
                 bash "${ROOT}/run_training.sh" \
                     --one-shot \
@@ -155,13 +184,43 @@ run_sensitivity() {
                     --exp "${exp}" \
                     --buffer "${BUFFER_KB}" \
                     --reward-weights "${REWARD_WEIGHTS}" \
-                    --model-dir "${MODEL_DIR}/static" \
+                    --model-dir "${MODEL_DIR}/sweep" \
                     --episodes 1 \
                     --run-id "${RUN_ID}" \
                     --phase sensitivity
-                copy_outputs "${scenario}" "${seed}" \
+                copy_outputs "${scenario}" "${seed}" "${scenario}_seed${seed}" \
+                    "${scenario}_seed${seed}" \
                     "${RUN_DIR}/sensitivity/${scenario}/seed_${seed}/${label}" \
-                    "${MODEL_DIR}/static/${exp}_metrics.jsonl"
+                    "${MODEL_DIR}/sweep/${exp}_metrics.jsonl"
+            done
+        done
+    done
+}
+
+run_paper_baselines() {
+    if [[ ! -x "${NS3_BIN}" ]]; then
+        echo "ERROR: NS3 binary not found: ${NS3_BIN}" >&2
+        echo "Run bash build_ns3_copter.sh after pulling this change." >&2
+        return 1
+    fi
+    for scenario in ${SCENARIOS}; do
+        for seed in ${SEEDS}; do
+            for profile in secn1 secn2; do
+                local config_name="${scenario}_seed${seed}_${profile}"
+                local config="${ROOT}/simulation/mix/acc_validation/${config_name}.conf"
+                local destination="${RUN_DIR}/baseline/${scenario}/seed_${seed}/${profile}"
+                local log_file="${RUN_DIR}/logs/baseline_${scenario}_${profile}_s${seed}.log"
+                local output_base="${ROOT}/simulation/output/acc_validation/${config_name}"
+                echo "[baseline] scenario=${scenario} seed=${seed} profile=${profile}"
+                rm -f "${output_base}".*
+                (
+                    cd "${ROOT}/simulation"
+                    LD_LIBRARY_PATH="${NS3_LIB_DIR}:${LD_LIBRARY_PATH:-}" \
+                        "${NS3_BIN}" "${config}"
+                ) > "${log_file}" 2>&1
+                copy_outputs "${scenario}" "${seed}" "${config_name}" \
+                    "${config_name}" "${destination}"
+                cp "${log_file}" "${destination}/ns3.log"
             done
         done
     done
@@ -211,7 +270,8 @@ run_eval() {
                 --phase eval \
                 --acc-hidden-dims "${ACC_HIDDEN_DIMS}" \
                 --reward-weights "${REWARD_WEIGHTS}"
-            copy_outputs "${scenario}" "${seed}" \
+            copy_outputs "${scenario}" "${seed}" "${scenario}_seed${seed}" \
+                "${scenario}_seed${seed}" \
                 "${RUN_DIR}/eval/${scenario}/seed_${seed}/greedy" \
                 "${MODEL_DIR}/train/${exp}_metrics.jsonl"
         done
@@ -226,6 +286,7 @@ analyze() {
 
 [[ "${STAGE}" == prepare || "${STAGE}" == all ]] && prepare
 [[ "${STAGE}" == sensitivity || "${STAGE}" == all ]] && { validate_prepared_configs; run_sensitivity; }
+[[ "${STAGE}" == baseline || "${STAGE}" == all ]] && { validate_prepared_configs; run_paper_baselines; }
 [[ "${STAGE}" == train || "${STAGE}" == all ]] && { validate_prepared_configs; run_train; }
 [[ "${STAGE}" == eval || "${STAGE}" == all ]] && { validate_prepared_configs; run_eval; }
 [[ "${STAGE}" == analyze || "${STAGE}" == all ]] && analyze

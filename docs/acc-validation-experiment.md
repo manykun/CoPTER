@@ -16,6 +16,7 @@
 - `TraGen.py` 支持种子、输出目录、紧凑主机范围和关闭大 JSON 输出。
 - 新增三个流量场景、配置生成器、分阶段实验脚本和无第三方依赖的结果分析器。
 - ACC 网络宽度可通过命令行配置，用于最后的网络容量消融；默认仍为 `32,64,64,32`。
+- 新增论文静态专家基线：SECN_1=`[5 KB,200 KB,1%]`、SECN_2=`[100 KB,400 KB,20%]`。静态基线关闭 OpenGym，直接运行 ns-3 至 `SIMULATOR_STOP_TIME`。
 
 ## 2. 三个实验场景
 
@@ -27,7 +28,14 @@
 
 每个场景默认使用种子 `1 2 3`。比较方法时，流量场景、种子、buffer 和 ns-3 配置必须完全一致。
 
-固定动作灵敏度检查使用：
+论文对比使用以下静态专家配置。数值原样应用于 10/40 Gbps 端口；`@10 Gbps`、`@25 Gbps` 是来源论文的实验条件，不在缺乏依据时自动缩放：
+
+| 名称 | Kmin | Kmax | Pmax | 来源 |
+|---|---:|---:|---:|---|
+| `secn1` | 5 KB | 200 KB | 0.01 | DCQCN @ 10 Gbps |
+| `secn2` | 100 KB | 400 KB | 0.20 | HPCC @ 25 Gbps |
+
+以下三组只用于动作执行链路的灵敏度检查，不属于论文静态基线：
 
 | 名称 | 索引 | 默认物理含义 |
 |---|---|---|
@@ -61,7 +69,7 @@ git status --short
 
 ## 4. 先做烟雾测试
 
-烟雾测试只使用 `throughput` 的种子 1，并将流量确定性抽样到 2000 条，共运行三次固定动作：
+烟雾测试只使用 `throughput` 的种子 1，并将流量确定性抽样到 2000 条。先运行两组论文静态基线：
 
 ```bash
 cd /mnt/sdb1/xuduokun/projects/CoPTER
@@ -73,13 +81,14 @@ bash scripts/acc_validation/run_validation.sh \
   --smoke
 
 bash scripts/acc_validation/run_validation.sh \
-  --stage sensitivity \
+  --stage baseline \
   --run-id smoke_acc \
   --smoke
 
 python scripts/acc_validation/analyze_validation.py \
   --run-dir experiments/acc_validation/smoke_acc \
-  --stage sensitivity
+  --stage baseline \
+  --gate
 ```
 
 查看：
@@ -87,12 +96,12 @@ python scripts/acc_validation/analyze_validation.py \
 ```bash
 less experiments/acc_validation/smoke_acc/REPORT.md
 find experiments/acc_validation/smoke_acc -maxdepth 5 -type f | sort
-tail -n 80 copter/training_logs/training_accval_static_smoke_acc_throughput_balanced_s1_*.log
+tail -n 80 experiments/acc_validation/smoke_acc/logs/baseline_throughput_secn1_s1.log
 ```
 
 烟雾测试的目的只是确认流程可运行；单个种子不能形成实验结论。
 
-## 5. 第一阶段：验证动作是否有效
+## 5. 第一阶段：建立论文基线并验证动作是否有效
 
 生成 3 场景 × 3 种子的流量及 ns-3 配置：
 
@@ -105,7 +114,23 @@ bash scripts/acc_validation/run_validation.sh \
   --buffer-kb 400
 ```
 
-运行 27 次固定动作实验：
+先运行 18 次论文静态基线实验（3 场景 × 3 种子 × 2 配置）：
+
+```bash
+bash scripts/acc_validation/run_validation.sh \
+  --stage baseline \
+  --run-id accval_v1 \
+  --seeds "1 2 3" \
+  --scenarios "throughput incast mixed" \
+  --buffer-kb 400
+
+python scripts/acc_validation/analyze_validation.py \
+  --run-dir experiments/acc_validation/accval_v1 \
+  --stage baseline \
+  --gate
+```
+
+再运行 27 次人工动作 sweep，验证 ACC 动作是否真正影响网络：
 
 ```bash
 bash scripts/acc_validation/run_validation.sh \
@@ -164,13 +189,14 @@ python scripts/acc_validation/analyze_validation.py \
   --gate
 ```
 
-默认有效性门槛为：greedy ACC 的 p95 FCT 比 `balanced` 固定动作低至少 5%，并且不超过该场景最佳固定动作的 105%；至少三分之二场景、每个场景多数种子达到门槛。
+默认有效性门槛为：greedy ACC 的 p95 FCT 至少比 `SECN_1/SECN_2` 中一组低 5%，并且不超过两组论文基线中较优者的 105%；ACC 和两组基线完成率均须达到 99%。至少三分之二场景、每个场景多数种子达到门槛。
 
 主要结果文件：
 
 ```text
 experiments/acc_validation/accval_v1/
 ├── sensitivity/        # 三组固定动作的原始 FCT、队列、速率和奖励指标
+├── baseline/           # 论文 SECN_1/SECN_2 静态专家基线
 ├── eval/               # 冻结策略的评估结果
 ├── models/             # 训练状态、replay buffer 和模型
 ├── summary.csv         # 可用于画图的逐场景逐种子汇总
@@ -280,7 +306,7 @@ bash scripts/acc_validation/run_validation.sh \
   --acc-hidden-dims 64,128,128,64 --episodes 50
 ```
 
-随后分别使用相同 `run-id` 和相同 `--acc-hidden-dims` 执行 `--stage eval`。网络容量不改变固定动作基线，可复用 `accval_v1` 的 sensitivity 结果：
+随后分别使用相同 `run-id` 和相同 `--acc-hidden-dims` 执行 `--stage eval`。网络容量不改变静态专家配置，可复用 `accval_v1` 的 sensitivity 和 baseline 结果：
 
 ```bash
 python scripts/acc_validation/analyze_validation.py \
@@ -289,7 +315,7 @@ python scripts/acc_validation/analyze_validation.py \
   --stage effectiveness
 ```
 
-复用基线的前提是场景、seed、buffer 和 K 阈值范围完全一致。最终比较三个种子的 p95/p99 FCT，而不是只比较训练奖励。
+复用基线的前提是场景、seed、buffer、流量输入和仿真版本完全一致。最终比较三个种子的 p95/p99 FCT，而不是只比较训练奖励。
 
 ## 8. 推荐结论模板
 
@@ -297,7 +323,7 @@ python scripts/acc_validation/analyze_validation.py \
 
 1. 固定动作是否在至少两个场景产生大于 5% 的 p95 FCT 差异？
 2. 奖励排序是否与更低 FCT 一致？
-3. greedy ACC 是否优于 `balanced` 固定参数，并接近最佳固定动作？
+3. greedy ACC 是否优于至少一组论文静态基线，并接近 `SECN_1/SECN_2` 中的较优者？
 4. 结论是否在三个随机种子上稳定，而非由单次运行造成？
 5. buffer、K 阈值范围、奖励权重和网络容量中，哪个单因素改变了结论？
 

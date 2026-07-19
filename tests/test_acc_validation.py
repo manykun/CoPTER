@@ -75,13 +75,35 @@ class ACCValidationTests(unittest.TestCase):
                         "seed": seed, "method": method, "p95_fct_us": p95,
                         "completion_ratio": 1.0, "rollout_mean_reward": reward,
                     })
+                for method, p95 in (("secn1", 110.0), ("secn2", 100.0)):
+                    rows.append({
+                        "kind": "baseline", "scenario": scenario,
+                        "seed": seed, "method": method, "p95_fct_us": p95,
+                        "completion_ratio": 1.0, "rollout_mean_reward": None,
+                    })
                 rows.append({
                     "kind": "eval", "scenario": scenario, "seed": seed,
                     "method": "greedy", "p95_fct_us": 94.0,
                     "completion_ratio": 1.0, "rollout_mean_reward": 0.75,
                 })
         self.assertTrue(analysis.sensitivity_gate(rows, 0.05)["passed"])
+        self.assertTrue(analysis.baseline_gate(rows)["passed"])
         self.assertTrue(analysis.effectiveness_gate(rows, 0.05)["passed"])
+
+    def test_static_baseline_loader_does_not_require_agent_metrics(self):
+        analysis = load_analysis_module()
+        with tempfile.TemporaryDirectory() as directory:
+            method = Path(directory) / "throughput" / "seed_1" / "secn1"
+            method.mkdir(parents=True)
+            (method / "input.flow").write_text("1\n")
+            (method / "sample.fct").write_text(
+                "0 1 3 100 4000 2.000000000 1000 500\n"
+            )
+            runs = analysis.load_runs(Path(directory), "baseline")
+            rows = analysis.build_rows(runs)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["method"], "secn1")
+        self.assertIsNone(rows[0]["rollout_mean_reward"])
 
     def test_fct_parser_preserves_duplicate_flow_rows(self):
         analysis = load_analysis_module()
