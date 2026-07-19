@@ -68,14 +68,15 @@ for scenario in ${SCENARIOS}; do
         } > "${FLOW_DIR}/${name}.meta"
 
         render_config() {
-            local output_name="$1" enable_copter="$2"
-            local kmin_map="$3" kmax_map="$4" pmax_map="$5"
-            local destination="$6"
+            local output_name="$1" enable_copter="$2" stop_time="$3"
+            local kmin_map="$4" kmax_map="$5" pmax_map="$6"
+            local destination="$7"
             sed \
                 -e "s/@SCENARIO@/${scenario}/g" \
                 -e "s/@SEED@/${seed}/g" \
                 -e "s/@OUTPUT_NAME@/${output_name}/g" \
                 -e "s/@ENABLE_COPTER@/${enable_copter}/g" \
+                -e "s/@STOP_TIME@/${stop_time}/g" \
                 -e "s/@BUFFER_KB@/${BUFFER_KB}/g" \
                 -e "s/@KMIN_MIN@/${KMIN_MIN}/g" \
                 -e "s/@KMIN_MAX@/${KMIN_MAX}/g" \
@@ -89,7 +90,7 @@ for scenario in ${SCENARIOS}; do
 
         # Dynamic ACC configuration. The initial map is replaced by OpenGym
         # actions after the agent connects.
-        render_config "${name}" 1 \
+        render_config "${name}" 1 "4.00" \
             "2 10000000000 16 40000000000 64" \
             "2 10000000000 32 40000000000 128" \
             "2 10000000000 0.20 40000000000 0.20" \
@@ -98,12 +99,12 @@ for scenario in ${SCENARIOS}; do
         # Paper static expert baselines. Values are applied literally on both
         # link rates; the @10/@25 Gbps labels describe the source experiments,
         # not an undocumented scaling rule.
-        render_config "${name}_secn1" 0 \
+        render_config "${name}_secn1" 0 "2.25" \
             "2 10000000000 5 40000000000 5" \
             "2 10000000000 200 40000000000 200" \
             "2 10000000000 0.01 40000000000 0.01" \
             "${FLOW_DIR}/${name}_secn1.conf"
-        render_config "${name}_secn2" 0 \
+        render_config "${name}_secn2" 0 "2.25" \
             "2 10000000000 100 40000000000 100" \
             "2 10000000000 400 40000000000 400" \
             "2 10000000000 0.20 40000000000 0.20" \

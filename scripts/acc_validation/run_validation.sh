@@ -111,6 +111,7 @@ validate_prepared_configs() {
                     expected_pmax="PMAX_MAP 2 10000000000 0.20 40000000000 0.20"
                 fi
                 if ! grep -Fxq "ENABLE_COPTER 0" "${profile_config}" ||
+                   ! grep -Fxq "SIMULATOR_STOP_TIME 2.25" "${profile_config}" ||
                    ! grep -Fxq "${expected_kmin}" "${profile_config}" ||
                    ! grep -Fxq "${expected_kmax}" "${profile_config}" ||
                    ! grep -Fxq "${expected_pmax}" "${profile_config}"; then

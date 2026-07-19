@@ -22,6 +22,14 @@ def load_analysis_module():
 
 
 class ACCValidationTests(unittest.TestCase):
+    def test_config_template_has_explicit_stop_time(self):
+        template = (ROOT / "scripts" / "acc_validation" / "acc_validation.conf.in").read_text()
+        self.assertIn("SIMULATOR_STOP_TIME @STOP_TIME@", template)
+        prepare = (ROOT / "scripts" / "acc_validation" / "prepare_scenarios.sh").read_text()
+        self.assertIn('render_config "${name}" 1 "4.00"', prepare)
+        self.assertIn('render_config "${name}_secn1" 0 "2.25"', prepare)
+        self.assertIn('render_config "${name}_secn2" 0 "2.25"', prepare)
+
     def test_action_mapping(self):
         self.assertEqual(
             acc_action_from_indices((0, 0, 9)),
