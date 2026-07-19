@@ -35,7 +35,21 @@
 | `secn1` | 5 KB | 200 KB | 0.01 | DCQCN @ 10 Gbps |
 | `secn2` | 100 KB | 400 KB | 0.20 | HPCC @ 25 Gbps |
 
-三个场景的最后流注入时间不晚于 `2.08s`。静态基线默认在 `2.25s` 停止，提供至少 170 ms 的排空窗口，避免 SECN/PFC 事件在无业务区间一直计算到 `4.0s`。分析器仍要求 flow completion ratio 至少为 99%；若未达到，必须增加停止时间后重跑，不能比较被截断的 FCT。
+三个场景的最后流注入时间不晚于 `2.08s`。静态基线默认在 `2.25s` 停止，提供至少 170 ms 的排空窗口，避免 SECN/PFC 事件在无业务区间一直计算到 `4.0s`。分析器仍要求 flow completion ratio 至少为 99%；若未达到，使用 `--baseline-stop-time` 增加停止时间后只重跑失败场景，不能比较被截断的 FCT。例如：
+
+```bash
+bash scripts/acc_validation/run_validation.sh \
+  --stage prepare --run-id paper_baseline_s1 \
+  --seeds "1" --scenarios "incast mixed" \
+  --baseline-stop-time 2.50
+
+bash scripts/acc_validation/run_validation.sh \
+  --stage baseline --run-id paper_baseline_s1 \
+  --seeds "1" --scenarios "incast mixed" \
+  --baseline-stop-time 2.50
+```
+
+`prepare` 和 `baseline` 必须传入相同停止时间。每次运行复制的 `input.conf` 与 `summary.csv` 都会记录实际停止时间。
 
 以下三组只用于动作执行链路的灵敏度检查，不属于论文静态基线：
 

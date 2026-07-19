@@ -16,6 +16,7 @@ KMIN_RANGE="20000,50000"
 KMAX_RANGE="50000,100000"
 SMOKE=0
 MAX_FLOWS=0
+BASELINE_STOP_TIME="2.25"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -31,6 +32,7 @@ while [[ $# -gt 0 ]]; do
         --kmin-range) KMIN_RANGE="$2"; shift 2 ;;
         --kmax-range) KMAX_RANGE="$2"; shift 2 ;;
         --smoke)       SMOKE=1; shift ;;
+        --baseline-stop-time) BASELINE_STOP_TIME="$2"; shift 2 ;;
         *) echo "Unknown argument: $1" >&2; exit 2 ;;
     esac
 done
@@ -111,7 +113,7 @@ validate_prepared_configs() {
                     expected_pmax="PMAX_MAP 2 10000000000 0.20 40000000000 0.20"
                 fi
                 if ! grep -Fxq "ENABLE_COPTER 0" "${profile_config}" ||
-                   ! grep -Fxq "SIMULATOR_STOP_TIME 2.25" "${profile_config}" ||
+                   ! grep -Fxq "SIMULATOR_STOP_TIME ${BASELINE_STOP_TIME}" "${profile_config}" ||
                    ! grep -Fxq "${expected_kmin}" "${profile_config}" ||
                    ! grep -Fxq "${expected_kmax}" "${profile_config}" ||
                    ! grep -Fxq "${expected_pmax}" "${profile_config}"; then
@@ -131,7 +133,8 @@ prepare() {
         --buffer-kb "${BUFFER_KB}" \
         --kmin-range "${KMIN_RANGE}" \
         --kmax-range "${KMAX_RANGE}" \
-        --max-flows "${MAX_FLOWS}"
+        --max-flows "${MAX_FLOWS}" \
+        --baseline-stop-time "${BASELINE_STOP_TIME}"
 }
 
 copy_outputs() {

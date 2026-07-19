@@ -60,6 +60,21 @@ def read_metrics(directory):
     return json.loads(text) if text else {}
 
 
+def read_config_value(directory, key):
+    path = directory / "input.conf"
+    if not path.exists():
+        return None
+    with path.open() as handle:
+        for line in handle:
+            fields = line.split()
+            if len(fields) >= 2 and fields[0] == key:
+                try:
+                    return float(fields[1])
+                except ValueError:
+                    return fields[1]
+    return None
+
+
 def summarize(flows, expected, common_keys=None):
     selected = flows if common_keys is None else {key: flows[key] for key in common_keys}
     fcts = [value[0] / 1000.0 for value in selected.values()]
@@ -120,6 +135,7 @@ def build_rows(runs):
                 "scenario": scenario,
                 "seed": seed,
                 "method": method,
+                "simulator_stop_time": read_config_value(run["directory"], "SIMULATOR_STOP_TIME"),
                 **summarize(run["flows"], run["expected"], common),
             }
             metrics = run["metrics"]
@@ -291,20 +307,23 @@ def effectiveness_gate(rows, improvement):
 
 def write_report(path, rows, sensitivity, baselines, effectiveness):
     lines = ["# ACC validation report", "", "## Decision", ""]
-    lines.append(f"- Action sensitivity: **{'PASS' if sensitivity['passed'] else 'FAIL'}**")
-    lines.append(f"- Paper static baselines complete: **{'PASS' if baselines['passed'] else 'FAIL'}**")
-    lines.append(f"- Learned ACC effectiveness: **{'PASS' if effectiveness['passed'] else 'FAIL'}**")
+    kinds = {row["kind"] for row in rows}
+    def status(result, available):
+        return "NOT RUN" if not available else ("PASS" if result["passed"] else "FAIL")
+    lines.append(f"- Action sensitivity: **{status(sensitivity, 'sensitivity' in kinds)}**")
+    lines.append(f"- Paper static baselines complete: **{status(baselines, 'baseline' in kinds)}**")
+    lines.append(f"- Learned ACC effectiveness: **{status(effectiveness, 'eval' in kinds)}**")
     lines.extend(["", "The gate requires p95 FCT action sensitivity in at least two thirds of scenarios, "
                   "complete SECN_1/SECN_2 paper baselines, and greedy ACC to improve at least one paper "
                   "baseline by 5% while staying within 5% of the better paper baseline.", "", "## Measurements", "",
-                  "| Phase | Scenario | Seed | Method | Completion | p95 FCT (us) | p99 slowdown | Reward |",
-                  "|---|---|---:|---|---:|---:|---:|---:|"])
+                  "| Phase | Scenario | Seed | Method | Stop (s) | Completion | p95 FCT (us) | p99 slowdown | Reward |",
+                  "|---|---|---:|---|---:|---:|---:|---:|---:|"])
     for row in sorted(rows, key=lambda item: (item["kind"], item["scenario"], item["seed"], item["method"])):
         def fmt(value, digits=4):
             return "n/a" if value is None else f"{value:.{digits}f}"
         lines.append(
             f"| {row['kind']} | {row['scenario']} | {row['seed']} | {row['method']} | "
-            f"{fmt(row['completion_ratio'])} | {fmt(row['p95_fct_us'], 2)} | "
+            f"{fmt(row['simulator_stop_time'], 2)} | {fmt(row['completion_ratio'])} | {fmt(row['p95_fct_us'], 2)} | "
             f"{fmt(row['p99_slowdown'], 3)} | {fmt(row['rollout_mean_reward'])} |"
         )
     lines.extend(["", "## Gate details", "", "```json",
