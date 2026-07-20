@@ -9,7 +9,9 @@ BUFFER_KB=400
 KMIN_RANGE="20000,50000"
 KMAX_RANGE="50000,100000"
 MAX_FLOWS=0
-BASELINE_STOP_TIME="2.25"
+# Dynamic ACC configurations use 4.00 s; use the same default for paper
+# baselines so completion ratios are directly comparable.
+BASELINE_STOP_TIME="4.00"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in

@@ -5,7 +5,7 @@
 1. ACC 参数是否真的能改变网络性能？
 2. DDQN 是否能学到比固定参数更好的 ACC 策略？
 
-必须先回答问题 1，再开始长时间训练。若不同固定动作的 FCT 几乎相同，DDQN 无论加深多少层都没有可学习的控制信号。
+主实验先建立 SECN_1/SECN_2 静态基线，再训练和冻结评估 ACC。固定动作灵敏度、奖励、buffer、动作范围和网络容量属于主实验失败后的消融，不插入主实验流程。
 
 ## 1. 本次代码修改
 
@@ -35,7 +35,7 @@
 | `secn1` | 5 KB | 200 KB | 0.01 | DCQCN @ 10 Gbps |
 | `secn2` | 100 KB | 400 KB | 0.20 | HPCC @ 25 Gbps |
 
-三个场景的最后流注入时间不晚于 `2.08s`。静态基线默认在 `2.25s` 停止，提供至少 170 ms 的排空窗口，避免 SECN/PFC 事件在无业务区间一直计算到 `4.0s`。分析器仍要求 flow completion ratio 至少为 99%；若未达到，使用 `--baseline-stop-time` 增加停止时间后只重跑失败场景，不能比较被截断的 FCT。例如：
+三个场景的最后流注入时间不晚于 `2.08s`。静态基线与 ACC 默认都在 `4.00s` 停止，保证完成率处于同一观察窗口。完成率是有限观察窗口下的结果指标，不再用统一的 99% 阈值否决整组基线；p95/p99 只在待比较方法共同完成的流上计算，避免“困难流未完成反而让尾延迟更低”的幸存者偏差。
 
 ```bash
 bash scripts/acc_validation/run_validation.sh \
@@ -117,101 +117,73 @@ tail -n 80 experiments/acc_validation/smoke_acc/logs/baseline_throughput_secn1_s
 
 烟雾测试的目的只是确认流程可运行；单个种子不能形成实验结论。
 
-## 5. 第一阶段：建立论文基线并验证动作是否有效
+## 5. 主实验：静态参数与 ACC
 
-生成 3 场景 × 3 种子的流量及 ns-3 配置：
+使用全新的 `run-id=acc_study_v2`。先完成 seed 1 的静态、训练和评估闭环，再向相同目录追加 seed 2、3；seed 1 不重跑，且属于最终统计的一部分。
+
+每一批 seed 都严格按照以下顺序执行：
 
 ```bash
+# 将 SEEDS 设为 "1"；seed 1 结束后改为 "2 3"
+SEEDS="1"
+
 bash scripts/acc_validation/run_validation.sh \
-  --stage prepare \
-  --run-id accval_v1 \
-  --seeds "1 2 3" \
-  --scenarios "throughput incast mixed" \
-  --buffer-kb 400
+  --stage prepare --run-id acc_study_v2 \
+  --seeds "${SEEDS}" --scenarios "throughput mixed incast" \
+  --buffer-kb 400 --kmin-range 20000,50000 --kmax-range 50000,100000 \
+  --baseline-stop-time 4.00
+
+bash scripts/acc_validation/run_validation.sh \
+  --stage baseline --run-id acc_study_v2 \
+  --seeds "${SEEDS}" --scenarios "throughput mixed incast" \
+  --buffer-kb 400 --kmin-range 20000,50000 --kmax-range 50000,100000 \
+  --baseline-stop-time 4.00
+
+bash scripts/acc_validation/run_validation.sh \
+  --stage train --run-id acc_study_v2 \
+  --seeds "${SEEDS}" --scenarios "throughput mixed incast" \
+  --buffer-kb 400 --episodes 50 --eps-decay 5000 \
+  --acc-hidden-dims "32,64,64,32" --reward-weights "0.50,0.30,0.20" \
+  --kmin-range 20000,50000 --kmax-range 50000,100000 \
+  --baseline-stop-time 4.00
+
+bash scripts/acc_validation/run_validation.sh \
+  --stage eval --run-id acc_study_v2 \
+  --seeds "${SEEDS}" --scenarios "throughput mixed incast" \
+  --buffer-kb 400 --acc-hidden-dims "32,64,64,32" \
+  --reward-weights "0.50,0.30,0.20" \
+  --kmin-range 20000,50000 --kmax-range 50000,100000 \
+  --baseline-stop-time 4.00
 ```
 
-先运行 18 次论文静态基线实验（3 场景 × 3 种子 × 2 配置）：
+seed 1 完成后先运行一次分析。若流程正常，再令 `SEEDS="2 3"` 原样执行上述四步，最后重新分析同一目录：
 
 ```bash
-bash scripts/acc_validation/run_validation.sh \
-  --stage baseline \
-  --run-id accval_v1 \
-  --seeds "1 2 3" \
-  --scenarios "throughput incast mixed" \
-  --buffer-kb 400
-
 python scripts/acc_validation/analyze_validation.py \
-  --run-dir experiments/acc_validation/accval_v1 \
-  --stage baseline \
+  --run-dir experiments/acc_validation/acc_study_v2 \
+  --stage effectiveness \
+  --improvement-threshold 0.05 \
+  --completion-tolerance 0.01 \
   --gate
 ```
 
-再运行 27 次人工动作 sweep，验证 ACC 动作是否真正影响网络：
+默认有效性门槛为：在 SECN_1、SECN_2、greedy ACC 共同完成的流上，ACC 的 p95 FCT 至少比一组静态基线低 5%，并且不超过较优静态基线的 105%；同时 ACC 的全流完成率最多比完成率较高的静态基线低 1 个百分点。至少三分之二场景、每个场景多数种子达到门槛。
 
-```bash
-bash scripts/acc_validation/run_validation.sh \
-  --stage sensitivity \
-  --run-id accval_v1 \
-  --seeds "1 2 3" \
-  --scenarios "throughput incast mixed" \
-  --buffer-kb 400
-```
-
-分析并启用门槛检查：
+若静态结果和 ACC 结果使用不同的 `run-id`，通过 `--baseline-run-dir` 复用已经完成的静态实验，不要重新运行：
 
 ```bash
 python scripts/acc_validation/analyze_validation.py \
-  --run-dir experiments/acc_validation/accval_v1 \
-  --stage sensitivity \
-  --sensitivity-threshold 0.05 \
+  --run-dir experiments/acc_validation/acc_main_s1 \
+  --baseline-run-dir experiments/acc_validation/paper_baseline_s1 \
+  --stage effectiveness \
+  --completion-tolerance 0.01 \
   --gate
 ```
-
-判定标准：
-
-- 每种动作的 flow completion ratio 至少为 99%。否则优先检查仿真停止时间、流量强度和 buffer，不能只比较已完成流。
-- 同一场景和种子内，三种固定动作的 p95 FCT 相对跨度至少为 5%。至少三分之二的场景通过，才认为 ACC 执行链路具有可控性。
-- `reward_vs_lower_fct_spearman` 越接近 1，代表奖励越高时 p95 FCT 越低。若 FCT 有明显差异但该值接近 0 或负数，优先修奖励，不要加深网络。
-- 若 FCT 和奖励都没有差异，检查 C++ 是否收到动作、Kmin/Kmax 的物理范围、Pmax、拥塞程度及监控时间窗。
-
-## 6. 第二阶段：训练并冻结评估
-
-只有固定动作灵敏度通过后，才训练 DDQN：
-
-```bash
-bash scripts/acc_validation/run_validation.sh \
-  --stage train \
-  --run-id accval_v1 \
-  --seeds "1 2 3" \
-  --scenarios "throughput incast mixed" \
-  --buffer-kb 400 \
-  --episodes 50 \
-  --eps-decay 5000
-```
-
-训练完成后，以 `epsilon=0`、不写 replay buffer、不更新网络的方式评估：
-
-```bash
-bash scripts/acc_validation/run_validation.sh \
-  --stage eval \
-  --run-id accval_v1 \
-  --seeds "1 2 3" \
-  --scenarios "throughput incast mixed" \
-  --buffer-kb 400
-
-python scripts/acc_validation/analyze_validation.py \
-  --run-dir experiments/acc_validation/accval_v1 \
-  --stage all \
-  --gate
-```
-
-默认有效性门槛为：greedy ACC 的 p95 FCT 至少比 `SECN_1/SECN_2` 中一组低 5%，并且不超过两组论文基线中较优者的 105%；ACC 和两组基线完成率均须达到 99%。至少三分之二场景、每个场景多数种子达到门槛。
 
 主要结果文件：
 
 ```text
-experiments/acc_validation/accval_v1/
-├── sensitivity/        # 三组固定动作的原始 FCT、队列、速率和奖励指标
+experiments/acc_validation/acc_study_v2/
 ├── baseline/           # 论文 SECN_1/SECN_2 静态专家基线
 ├── eval/               # 冻结策略的评估结果
 ├── models/             # 训练状态、replay buffer 和模型
@@ -220,11 +192,11 @@ experiments/acc_validation/accval_v1/
 └── REPORT.md           # 人工阅读报告
 ```
 
-## 7. 逐项定位“ACC 无效”的原因
+## 6. 主实验失败后的消融
 
 每次只改变一个因素，并使用新的 `run-id`。不要同时改 buffer、奖励和网络，否则无法归因。
 
-### 7.1 Buffer 消融
+### 6.1 Buffer 消融
 
 依次完整执行 `prepare → sensitivity → analyze`：
 
@@ -244,7 +216,7 @@ python scripts/acc_validation/analyze_validation.py --run-dir experiments/acc_va
 
 注意：生成配置会覆盖 `simulation/mix/acc_validation/*.conf`，因此一个 buffer 的 sensitivity 必须紧跟该 buffer 的 prepare。原始输入配置会复制到各自实验目录，便于追溯。
 
-### 7.2 Kmin/Kmax 范围消融
+### 6.2 Kmin/Kmax 范围消融
 
 默认范围是 Kmin `20–50 KB`、Kmax `50–100 KB`。可测试更宽且保持 Kmin 小于 Kmax 的范围：
 
@@ -268,7 +240,7 @@ python scripts/acc_validation/analyze_validation.py \
 
 Pmax 的固定动作已覆盖 0.1、0.5 和 1.0。若 K 范围改变后 FCT 仍无差异，应从 agent 日志和 ns-3 日志确认动作是否实际进入交换机。
 
-### 7.3 奖励函数消融
+### 6.3 奖励函数消融
 
 当前权重为吞吐/队列/ECN=`0.50,0.30,0.20`。仅当固定动作能改变 FCT、但奖励排序与 FCT 排序不一致时，再测试吞吐优先权重：
 
@@ -301,7 +273,7 @@ python scripts/acc_validation/analyze_validation.py \
 
 训练和评估必须使用完全相同的奖励权重及网络结构。
 
-### 7.4 DDQN 网络容量消融
+### 6.4 DDQN 网络容量消融
 
 默认 ACC 网络已经有四个隐藏层 `32,64,64,32`，不能仅凭观察结果断言“网络太浅”。在状态/动作/奖励链路通过后，可比较：
 
@@ -322,18 +294,18 @@ bash scripts/acc_validation/run_validation.sh \
   --acc-hidden-dims 64,128,128,64 --episodes 50
 ```
 
-随后分别使用相同 `run-id` 和相同 `--acc-hidden-dims` 执行 `--stage eval`。网络容量不改变静态专家配置，可复用 `accval_v1` 的 sensitivity 和 baseline 结果：
+随后分别使用相同 `run-id` 和相同 `--acc-hidden-dims` 执行 `--stage eval`。网络容量不改变静态专家配置，可复用 `acc_study_v2` 的 baseline 结果：
 
 ```bash
 python scripts/acc_validation/analyze_validation.py \
   --run-dir experiments/acc_validation/accnet_large \
-  --baseline-run-dir experiments/acc_validation/accval_v1 \
+  --baseline-run-dir experiments/acc_validation/acc_study_v2 \
   --stage effectiveness
 ```
 
 复用基线的前提是场景、seed、buffer、流量输入和仿真版本完全一致。最终比较三个种子的 p95/p99 FCT，而不是只比较训练奖励。
 
-## 8. 推荐结论模板
+## 7. 推荐结论模板
 
 最终报告至少回答：
 

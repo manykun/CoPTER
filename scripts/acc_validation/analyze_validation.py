@@ -120,7 +120,13 @@ def build_rows(runs):
     rows = []
     grouped = defaultdict(list)
     for key in runs:
-        grouped[key[:3]].append(key)
+        kind, scenario, seed, _ = key
+        # Sensitivity is a separate fixed-action experiment.  Paper baselines
+        # and greedy ACC, however, must be compared on exactly the same set of
+        # completed flows; otherwise a method can appear to have a lower p95
+        # simply because its difficult flows did not complete.
+        family = "sensitivity" if kind == "sensitivity" else "effectiveness"
+        grouped[(family, scenario, seed)].append(key)
     for _, keys in grouped.items():
         common = None
         for key in keys:
@@ -236,12 +242,20 @@ def baseline_gate(rows):
             if candidate != scenario:
                 continue
             methods = {row["method"] for row in group}
-            complete = all((row["completion_ratio"] or 0.0) >= 0.99 for row in group)
+            measured = all(
+                row["p95_fct_us"] is not None and
+                row["completion_ratio"] is not None and
+                row["completion_ratio"] > 0.0
+                for row in group
+            )
             seed_results.append({
                 "seed": seed,
                 "methods": sorted(methods),
-                "complete": complete,
-                "passed": complete and methods == {"secn1", "secn2"},
+                "measured": measured,
+                "completion_ratios": {
+                    row["method"]: row["completion_ratio"] for row in group
+                },
+                "passed": measured and methods == {"secn1", "secn2"},
             })
         passes = sum(item["passed"] for item in seed_results)
         scenario_results[scenario] = {
@@ -254,7 +268,7 @@ def baseline_gate(rows):
             "scenarios": scenario_results}
 
 
-def effectiveness_gate(rows, improvement):
+def effectiveness_gate(rows, improvement, completion_tolerance=0.01):
     lookup = {(row["kind"], row["scenario"], row["seed"], row["method"]): row for row in rows}
     scenario_results = {}
     scenarios = sorted({row["scenario"] for row in rows if row["kind"] == "eval"})
@@ -274,9 +288,9 @@ def effectiveness_gate(rows, improvement):
                                      "reason": "missing SECN_1/SECN_2 baseline or evaluation"})
                 continue
             best = min(candidates, key=lambda row: row["p95_fct_us"])
-            complete = (greedy["completion_ratio"] or 0.0) >= 0.99 and all(
-                (row["completion_ratio"] or 0.0) >= 0.99 for row in candidates
-            )
+            baseline_completion = max(row["completion_ratio"] or 0.0 for row in candidates)
+            completion_floor = max(0.0, baseline_completion - completion_tolerance)
+            completion_safe = (greedy["completion_ratio"] or 0.0) >= completion_floor
             improves_any = any(
                 greedy["p95_fct_us"] <= row["p95_fct_us"] * (1.0 - improvement)
                 for row in candidates
@@ -289,10 +303,18 @@ def effectiveness_gate(rows, improvement):
                 "secn2_p95_fct_us": next(row["p95_fct_us"] for row in candidates if row["method"] == "secn2"),
                 "best_paper_baseline": best["method"],
                 "best_paper_baseline_p95_fct_us": best["p95_fct_us"],
-                "complete": complete,
+                "greedy_completion_ratio": greedy["completion_ratio"],
+                "secn1_completion_ratio": next(
+                    row["completion_ratio"] for row in candidates if row["method"] == "secn1"
+                ),
+                "secn2_completion_ratio": next(
+                    row["completion_ratio"] for row in candidates if row["method"] == "secn2"
+                ),
+                "completion_floor": completion_floor,
+                "completion_safe": completion_safe,
                 "improves_at_least_one_baseline": improves_any,
                 "near_best_paper_baseline": near_best,
-                "passed": complete and improves_any and near_best,
+                "passed": completion_safe and improves_any and near_best,
             })
         passes = sum(item["passed"] for item in seed_results)
         scenario_results[scenario] = {
@@ -311,11 +333,13 @@ def write_report(path, rows, sensitivity, baselines, effectiveness):
     def status(result, available):
         return "NOT RUN" if not available else ("PASS" if result["passed"] else "FAIL")
     lines.append(f"- Action sensitivity: **{status(sensitivity, 'sensitivity' in kinds)}**")
-    lines.append(f"- Paper static baselines complete: **{status(baselines, 'baseline' in kinds)}**")
+    lines.append(f"- Paper static baselines available: **{status(baselines, 'baseline' in kinds)}**")
     lines.append(f"- Learned ACC effectiveness: **{status(effectiveness, 'eval' in kinds)}**")
-    lines.extend(["", "The gate requires p95 FCT action sensitivity in at least two thirds of scenarios, "
-                  "complete SECN_1/SECN_2 paper baselines, and greedy ACC to improve at least one paper "
-                  "baseline by 5% while staying within 5% of the better paper baseline.", "", "## Measurements", "",
+    lines.extend(["", "The effectiveness comparison uses only flows completed by SECN_1, SECN_2, and "
+                  "greedy ACC. Completion ratio is still calculated over all offered flows. The gate requires "
+                  "both paper baselines, greedy ACC to improve at least one baseline by 5%, remain within 5% "
+                  "of the better baseline, and avoid reducing completion ratio by more than the configured "
+                  "tolerance.", "", "## Measurements", "",
                   "| Phase | Scenario | Seed | Method | Stop (s) | Completion | p95 FCT (us) | p99 slowdown | Reward |",
                   "|---|---|---:|---|---:|---:|---:|---:|---:|"])
     for row in sorted(rows, key=lambda item: (item["kind"], item["scenario"], item["seed"], item["method"])):
@@ -341,6 +365,8 @@ def main():
     parser.add_argument("--stage", choices=("sensitivity", "baseline", "effectiveness", "all"), default="all")
     parser.add_argument("--sensitivity-threshold", type=float, default=0.05)
     parser.add_argument("--improvement-threshold", type=float, default=0.05)
+    parser.add_argument("--completion-tolerance", type=float, default=0.01,
+                        help="Maximum absolute completion-ratio loss versus the better-completing baseline.")
     parser.add_argument("--gate", action="store_true", help="exit non-zero when the selected gate fails")
     args = parser.parse_args()
 
@@ -355,7 +381,9 @@ def main():
     rows = build_rows(runs)
     sensitivity = sensitivity_gate(rows, args.sensitivity_threshold)
     baselines = baseline_gate(rows)
-    effectiveness = effectiveness_gate(rows, args.improvement_threshold)
+    effectiveness = effectiveness_gate(
+        rows, args.improvement_threshold, args.completion_tolerance
+    )
 
     args.run_dir.mkdir(parents=True, exist_ok=True)
     if rows:

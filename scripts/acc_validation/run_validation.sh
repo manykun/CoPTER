@@ -16,7 +16,8 @@ KMIN_RANGE="20000,50000"
 KMAX_RANGE="50000,100000"
 SMOKE=0
 MAX_FLOWS=0
-BASELINE_STOP_TIME="2.25"
+# Keep static and learned-policy evaluation on the same observation horizon.
+BASELINE_STOP_TIME="4.00"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -61,6 +62,7 @@ NS3_LIB_DIR="${ROOT}/ns-3.33/build/lib"
 mkdir -p "${RUN_DIR}" "${MODEL_DIR}/sweep" "${MODEL_DIR}/train" "${RUN_DIR}/logs"
 
 validate_prepared_configs() {
+    local require_paper_baselines="${1:-0}"
     local expected_kmin_min="${KMIN_RANGE%%,*}" expected_kmin_max="${KMIN_RANGE#*,}"
     local expected_kmax_min="${KMAX_RANGE%%,*}" expected_kmax_max="${KMAX_RANGE#*,}"
     for scenario in ${SCENARIOS}; do
@@ -96,32 +98,34 @@ validate_prepared_configs() {
                 return 1
             fi
 
-            local profile profile_config expected_kmin expected_kmax expected_pmax
-            for profile in secn1 secn2; do
-                profile_config="${ROOT}/simulation/mix/acc_validation/${scenario}_seed${seed}_${profile}.conf"
-                [[ -f "${profile_config}" ]] || {
-                    echo "Missing ${profile_config}; run --stage prepare again" >&2
-                    return 1
-                }
-                if [[ "${profile}" == secn1 ]]; then
-                    expected_kmin="KMIN_MAP 2 10000000000 5 40000000000 5"
-                    expected_kmax="KMAX_MAP 2 10000000000 200 40000000000 200"
-                    expected_pmax="PMAX_MAP 2 10000000000 0.01 40000000000 0.01"
-                else
-                    expected_kmin="KMIN_MAP 2 10000000000 100 40000000000 100"
-                    expected_kmax="KMAX_MAP 2 10000000000 400 40000000000 400"
-                    expected_pmax="PMAX_MAP 2 10000000000 0.20 40000000000 0.20"
-                fi
-                if ! grep -Fxq "ENABLE_COPTER 0" "${profile_config}" ||
-                   ! grep -Fxq "SIMULATOR_STOP_TIME ${BASELINE_STOP_TIME}" "${profile_config}" ||
-                   ! grep -Fxq "${expected_kmin}" "${profile_config}" ||
-                   ! grep -Fxq "${expected_kmax}" "${profile_config}" ||
-                   ! grep -Fxq "${expected_pmax}" "${profile_config}"; then
-                    echo "Prepared paper baseline has unexpected parameters: ${profile_config}" >&2
-                    echo "Run --stage prepare again; do not reuse old static configs." >&2
-                    return 1
-                fi
-            done
+            if [[ "${require_paper_baselines}" -eq 1 ]]; then
+                local profile profile_config expected_kmin expected_kmax expected_pmax
+                for profile in secn1 secn2; do
+                    profile_config="${ROOT}/simulation/mix/acc_validation/${scenario}_seed${seed}_${profile}.conf"
+                    [[ -f "${profile_config}" ]] || {
+                        echo "Missing ${profile_config}; run --stage prepare again" >&2
+                        return 1
+                    }
+                    if [[ "${profile}" == secn1 ]]; then
+                        expected_kmin="KMIN_MAP 2 10000000000 5 40000000000 5"
+                        expected_kmax="KMAX_MAP 2 10000000000 200 40000000000 200"
+                        expected_pmax="PMAX_MAP 2 10000000000 0.01 40000000000 0.01"
+                    else
+                        expected_kmin="KMIN_MAP 2 10000000000 100 40000000000 100"
+                        expected_kmax="KMAX_MAP 2 10000000000 400 40000000000 400"
+                        expected_pmax="PMAX_MAP 2 10000000000 0.20 40000000000 0.20"
+                    fi
+                    if ! grep -Fxq "ENABLE_COPTER 0" "${profile_config}" ||
+                       ! grep -Fxq "SIMULATOR_STOP_TIME ${BASELINE_STOP_TIME}" "${profile_config}" ||
+                       ! grep -Fxq "${expected_kmin}" "${profile_config}" ||
+                       ! grep -Fxq "${expected_kmax}" "${profile_config}" ||
+                       ! grep -Fxq "${expected_pmax}" "${profile_config}"; then
+                        echo "Prepared paper baseline has unexpected parameters: ${profile_config}" >&2
+                        echo "Run --stage prepare again; do not reuse old static configs." >&2
+                        return 1
+                    fi
+                done
+            fi
         done
     done
 }
@@ -289,10 +293,10 @@ analyze() {
 }
 
 [[ "${STAGE}" == prepare || "${STAGE}" == all ]] && prepare
-[[ "${STAGE}" == sensitivity || "${STAGE}" == all ]] && { validate_prepared_configs; run_sensitivity; }
-[[ "${STAGE}" == baseline || "${STAGE}" == all ]] && { validate_prepared_configs; run_paper_baselines; }
-[[ "${STAGE}" == train || "${STAGE}" == all ]] && { validate_prepared_configs; run_train; }
-[[ "${STAGE}" == eval || "${STAGE}" == all ]] && { validate_prepared_configs; run_eval; }
+[[ "${STAGE}" == sensitivity || "${STAGE}" == all ]] && { validate_prepared_configs 0; run_sensitivity; }
+[[ "${STAGE}" == baseline || "${STAGE}" == all ]] && { validate_prepared_configs 1; run_paper_baselines; }
+[[ "${STAGE}" == train || "${STAGE}" == all ]] && { validate_prepared_configs 0; run_train; }
+[[ "${STAGE}" == eval || "${STAGE}" == all ]] && { validate_prepared_configs 0; run_eval; }
 [[ "${STAGE}" == analyze || "${STAGE}" == all ]] && analyze
 
 echo "ACC validation stage '${STAGE}' complete: ${RUN_DIR}"

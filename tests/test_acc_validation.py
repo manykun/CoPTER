@@ -26,10 +26,25 @@ class ACCValidationTests(unittest.TestCase):
         template = (ROOT / "scripts" / "acc_validation" / "acc_validation.conf.in").read_text()
         self.assertIn("SIMULATOR_STOP_TIME @STOP_TIME@", template)
         prepare = (ROOT / "scripts" / "acc_validation" / "prepare_scenarios.sh").read_text()
-        self.assertIn('BASELINE_STOP_TIME="2.25"', prepare)
+        self.assertIn('BASELINE_STOP_TIME="4.00"', prepare)
         self.assertIn('render_config "${name}" 1 "4.00"', prepare)
         self.assertIn('render_config "${name}_secn1" 0 "${BASELINE_STOP_TIME}"', prepare)
         self.assertIn('render_config "${name}_secn2" 0 "${BASELINE_STOP_TIME}"', prepare)
+
+    def test_only_baseline_stage_requires_static_config_validation(self):
+        runner = (ROOT / "scripts" / "acc_validation" / "run_validation.sh").read_text()
+        self.assertIn(
+            '[[ "${STAGE}" == baseline || "${STAGE}" == all ]] && { validate_prepared_configs 1;',
+            runner,
+        )
+        self.assertIn(
+            '[[ "${STAGE}" == train || "${STAGE}" == all ]] && { validate_prepared_configs 0;',
+            runner,
+        )
+        self.assertIn(
+            '[[ "${STAGE}" == eval || "${STAGE}" == all ]] && { validate_prepared_configs 0;',
+            runner,
+        )
 
     def test_action_mapping(self):
         self.assertEqual(
@@ -98,6 +113,48 @@ class ACCValidationTests(unittest.TestCase):
         self.assertTrue(analysis.sensitivity_gate(rows, 0.05)["passed"])
         self.assertTrue(analysis.baseline_gate(rows)["passed"])
         self.assertTrue(analysis.effectiveness_gate(rows, 0.05)["passed"])
+
+    def test_finite_horizon_baselines_and_completion_guard(self):
+        analysis = load_analysis_module()
+        rows = [
+            {"kind": "baseline", "scenario": "incast", "seed": 1,
+             "method": "secn1", "p95_fct_us": 110.0, "completion_ratio": 0.88},
+            {"kind": "baseline", "scenario": "incast", "seed": 1,
+             "method": "secn2", "p95_fct_us": 125.0, "completion_ratio": 0.82},
+            {"kind": "eval", "scenario": "incast", "seed": 1,
+             "method": "greedy", "p95_fct_us": 100.0, "completion_ratio": 0.87},
+        ]
+        self.assertTrue(analysis.baseline_gate(rows)["passed"])
+        self.assertTrue(analysis.effectiveness_gate(rows, 0.05, 0.01)["passed"])
+        rows[-1]["completion_ratio"] = 0.869
+        self.assertFalse(analysis.effectiveness_gate(rows, 0.05, 0.01)["passed"])
+
+    def test_effectiveness_uses_cross_method_common_flows(self):
+        analysis = load_analysis_module()
+        flow_a = ("a",)
+        flow_b = ("b",)
+        flow_c = ("c",)
+        runs = {
+            ("baseline", "incast", 1, "secn1"): {
+                "kind": "baseline", "directory": Path("missing"), "expected": 3,
+                "flows": {flow_a: (1000, 500), flow_b: (5000, 500), flow_c: (9000, 500)},
+                "metrics": {},
+            },
+            ("baseline", "incast", 1, "secn2"): {
+                "kind": "baseline", "directory": Path("missing"), "expected": 3,
+                "flows": {flow_a: (1200, 500), flow_b: (6000, 500)}, "metrics": {},
+            },
+            ("eval", "incast", 1, "greedy"): {
+                "kind": "eval", "directory": Path("missing"), "expected": 3,
+                "flows": {flow_a: (900, 500), flow_c: (8000, 500)}, "metrics": {},
+            },
+        }
+        rows = analysis.build_rows(runs)
+        self.assertEqual({row["matched_flows"] for row in rows}, {1})
+        self.assertEqual(
+            {row["method"]: row["p95_fct_us"] for row in rows},
+            {"secn1": 1.0, "secn2": 1.2, "greedy": 0.9},
+        )
 
     def test_static_baseline_loader_does_not_require_agent_metrics(self):
         analysis = load_analysis_module()
