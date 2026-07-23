@@ -43,9 +43,15 @@ class SORACC:
         self.ref_update_interval = ref_update_interval
         self.train_steps = 0
         self.device = torch.device("cpu")
-        self.policy_net = SORTripleHeadACC(self.p.state_dim, self.p.kmin_dim, self.p.kmax_dim, self.p.pmax_dim).to(self.device)
-        self.target_net = SORTripleHeadACC(self.p.state_dim, self.p.kmin_dim, self.p.kmax_dim, self.p.pmax_dim).to(self.device)
-        self.reference_net = SORTripleHeadACC(self.p.state_dim, self.p.kmin_dim, self.p.kmax_dim, self.p.pmax_dim).to(self.device)
+        network_args = (
+            self.p.state_dim,
+            self.p.kmin_dim,
+            self.p.kmax_dim,
+            self.p.pmax_dim,
+        )
+        self.policy_net = SORTripleHeadACC(*network_args, hidden_dims=self.p.hidden_dims).to(self.device)
+        self.target_net = SORTripleHeadACC(*network_args, hidden_dims=self.p.hidden_dims).to(self.device)
+        self.reference_net = SORTripleHeadACC(*network_args, hidden_dims=self.p.hidden_dims).to(self.device)
         self.target_net.load_state_dict(self.policy_net.state_dict())
         self.reference_net.load_state_dict(self.policy_net.state_dict())
         self.optimizer = torch.optim.Adam(self.policy_net.parameters(), lr=self.p.learning_rate)
@@ -123,14 +129,22 @@ class SORACC:
         loss_cons = torch.tensor(0.0, device=self.device)
         if prototypes is not None and cluster_ids is not None:
             prototype_rows = []
-            for cluster_id in cluster_ids:
+            valid_rows = []
+            for row_index, cluster_id in enumerate(cluster_ids):
                 proto = prototypes.get(int(cluster_id)) if hasattr(prototypes, "get") else None
-                if proto is None:
-                    proto = np.zeros(embeddings.shape[1], dtype=np.float32)
-                prototype_rows.append(proto)
-            prototype_t = torch.FloatTensor(np.asarray(prototype_rows, dtype=np.float32)).to(self.device)
-            loss_cons = torch.mean((embeddings - prototype_t) ** 2)
-            loss = loss + self.lambda_cons * loss_cons
+                if proto is not None:
+                    prototype_rows.append(proto)
+                    valid_rows.append(row_index)
+            # A missing prototype is an absence of supervision, not a target
+            # at the origin.  Pulling embeddings toward zero silently damages
+            # the representation after replay synchronization.
+            if valid_rows:
+                prototype_t = torch.FloatTensor(
+                    np.asarray(prototype_rows, dtype=np.float32)
+                ).to(self.device)
+                row_t = torch.LongTensor(valid_rows).to(self.device)
+                loss_cons = torch.mean((embeddings.index_select(0, row_t) - prototype_t) ** 2)
+                loss = loss + self.lambda_cons * loss_cons
 
         loss_reg = torch.tensor(0.0, device=self.device)
         if self.lambda_reg > 0 and drift_scores is not None and cluster_ids is not None:

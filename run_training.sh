@@ -65,6 +65,25 @@ RUN_ID=""
 PHASE=""
 ACC_HIDDEN_DIMS="32,64,64,32"
 REWARD_WEIGHTS="0.50,0.30,0.20"
+SOR_RECENT_SIZE=2000
+SOR_BOUNDARY_SIZE=20000
+SOR_MAX_CLUSTERS=32
+SOR_PROTOTYPE_DISTANCE=1.0
+SOR_PROTOTYPE_ETA=0.05
+SOR_BOUNDARY_THRESHOLD=0.5
+SOR_ALPHA_TD=1.0
+SOR_BETA_UNDER_SAMPLE=0.2
+SOR_GAMMA_DRIFT=0.5
+SOR_RHO_BOUNDARY=0.5
+SOR_TEMPERATURE=1.0
+SOR_LAMBDA_CONS=0.01
+SOR_LAMBDA_REG=0.001
+SOR_DRIFT_REG_THRESHOLD=0.5
+SOR_REF_UPDATE_INTERVAL=256
+SOR_SYNC_INTERVAL=8
+# Each episode is a separate Python process.  Formal continual-learning runs
+# must persist replay every episode or the old-task memory silently disappears.
+SOR_SAVE_BUFFER_EVERY=1
 
 # Multi-experiment: array of "config:exp" pairs
 EXP_LIST=()
@@ -96,6 +115,23 @@ while [[ $# -gt 0 ]]; do
         --phase)        PHASE="$2";           shift 2 ;;
         --acc-hidden-dims) ACC_HIDDEN_DIMS="$2"; shift 2 ;;
         --reward-weights) REWARD_WEIGHTS="$2"; shift 2 ;;
+        --sor-recent-size) SOR_RECENT_SIZE="$2"; shift 2 ;;
+        --sor-boundary-size) SOR_BOUNDARY_SIZE="$2"; shift 2 ;;
+        --sor-max-clusters) SOR_MAX_CLUSTERS="$2"; shift 2 ;;
+        --sor-prototype-distance) SOR_PROTOTYPE_DISTANCE="$2"; shift 2 ;;
+        --sor-prototype-eta) SOR_PROTOTYPE_ETA="$2"; shift 2 ;;
+        --sor-boundary-threshold) SOR_BOUNDARY_THRESHOLD="$2"; shift 2 ;;
+        --sor-alpha-td) SOR_ALPHA_TD="$2"; shift 2 ;;
+        --sor-beta-under-sample) SOR_BETA_UNDER_SAMPLE="$2"; shift 2 ;;
+        --sor-gamma-drift) SOR_GAMMA_DRIFT="$2"; shift 2 ;;
+        --sor-rho-boundary) SOR_RHO_BOUNDARY="$2"; shift 2 ;;
+        --sor-temperature) SOR_TEMPERATURE="$2"; shift 2 ;;
+        --sor-lambda-cons) SOR_LAMBDA_CONS="$2"; shift 2 ;;
+        --sor-lambda-reg) SOR_LAMBDA_REG="$2"; shift 2 ;;
+        --sor-drift-reg-threshold) SOR_DRIFT_REG_THRESHOLD="$2"; shift 2 ;;
+        --sor-ref-update-interval) SOR_REF_UPDATE_INTERVAL="$2"; shift 2 ;;
+        --sor-sync-interval) SOR_SYNC_INTERVAL="$2"; shift 2 ;;
+        --sor-save-buffer-every) SOR_SAVE_BUFFER_EVERY="$2"; shift 2 ;;
         --offline)      ONLINE=0;              shift ;;
         *)              echo "Unknown arg: $1"; exit 1 ;;
     esac
@@ -212,26 +248,67 @@ run_single_experiment() {
         fi
 
         log_local "Starting RL agent (output: ${LOG_DIR_LOCAL}/agent_ep${EPISODE}.log)..."
-        cd "${COPTER_ROOT}/copter"
+        local AGENT_WORKDIR="${COPTER_ROOT}/copter"
+        if [ "${MODE}" = "SOR" ]; then
+            AGENT_WORKDIR="${COPTER_ROOT}/sor"
+        fi
+        cd "${AGENT_WORKDIR}"
 
         local AGENT_EXIT=0
-        local AGENT_ARGS=(
-            python copter.py
-            -p "${NS3_PORT_LOCAL}"
-            -e "${EXP_NAME_LOCAL}"
-            -m "${MODE}"
-            -d "${MODEL_DIR}"
-            -s "${STATIC_STEPS}"
-            -i "${TRAIN_INTERVALS}"
-            -b "${SWITCH_BUFFER}"
-            --epsilon_start "${EPSILON_START}"
-            --epsilon_end "${EPSILON_END}"
-            --epsilon_decay_steps "${EPSILON_DECAY}"
-            --seed "${SEED}"
-            --tb_enable "${TB_ENABLE}"
-            --acc_hidden_dims "${ACC_HIDDEN_DIMS}"
-            --reward_weights "${REWARD_WEIGHTS}"
-        )
+        local AGENT_ARGS
+        if [ "${MODE}" = "SOR" ]; then
+            AGENT_ARGS=(
+                python sor_copter.py
+                -p "${NS3_PORT_LOCAL}"
+                -e "${EXP_NAME_LOCAL}"
+                -d "${MODEL_DIR}"
+                -s "${STATIC_STEPS}"
+                -i "${TRAIN_INTERVALS}"
+                -b "${SWITCH_BUFFER}"
+                --epsilon_start "${EPSILON_START}"
+                --epsilon_end "${EPSILON_END}"
+                --epsilon_decay_steps "${EPSILON_DECAY}"
+                --seed "${SEED}"
+                --tb_enable "${TB_ENABLE}"
+                --acc_hidden_dims "${ACC_HIDDEN_DIMS}"
+                --reward_weights "${REWARD_WEIGHTS}"
+                --sor_recent_size "${SOR_RECENT_SIZE}"
+                --sor_boundary_size "${SOR_BOUNDARY_SIZE}"
+                --sor_max_clusters "${SOR_MAX_CLUSTERS}"
+                --sor_prototype_distance "${SOR_PROTOTYPE_DISTANCE}"
+                --sor_prototype_eta "${SOR_PROTOTYPE_ETA}"
+                --sor_boundary_threshold "${SOR_BOUNDARY_THRESHOLD}"
+                --sor_alpha_td "${SOR_ALPHA_TD}"
+                --sor_beta_under_sample "${SOR_BETA_UNDER_SAMPLE}"
+                --sor_gamma_drift "${SOR_GAMMA_DRIFT}"
+                --sor_rho_boundary "${SOR_RHO_BOUNDARY}"
+                --sor_temperature "${SOR_TEMPERATURE}"
+                --sor_lambda_cons "${SOR_LAMBDA_CONS}"
+                --sor_lambda_reg "${SOR_LAMBDA_REG}"
+                --sor_drift_reg_threshold "${SOR_DRIFT_REG_THRESHOLD}"
+                --sor_ref_update_interval "${SOR_REF_UPDATE_INTERVAL}"
+                --sor_sync_interval "${SOR_SYNC_INTERVAL}"
+                --sor_save_buffer_every "${SOR_SAVE_BUFFER_EVERY}"
+            )
+        else
+            AGENT_ARGS=(
+                python copter.py
+                -p "${NS3_PORT_LOCAL}"
+                -e "${EXP_NAME_LOCAL}"
+                -m "${MODE}"
+                -d "${MODEL_DIR}"
+                -s "${STATIC_STEPS}"
+                -i "${TRAIN_INTERVALS}"
+                -b "${SWITCH_BUFFER}"
+                --epsilon_start "${EPSILON_START}"
+                --epsilon_end "${EPSILON_END}"
+                --epsilon_decay_steps "${EPSILON_DECAY}"
+                --seed "${SEED}"
+                --tb_enable "${TB_ENABLE}"
+                --acc_hidden_dims "${ACC_HIDDEN_DIMS}"
+                --reward_weights "${REWARD_WEIGHTS}"
+            )
+        fi
         [ "${ONLINE}" -eq 1 ] && AGENT_ARGS+=(--online)
         [ -n "${FMAP_DIR}" ] && AGENT_ARGS+=(-f "${FMAP_DIR}")
         [ -n "${FORCE_ACTION}" ] && AGENT_ARGS+=(--force_action "${FORCE_ACTION}")

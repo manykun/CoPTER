@@ -42,6 +42,9 @@ class SORAgentHelper:
         ref_update_interval: int = 256,
         sync_interval: int = 8,
         save_buffer_every: int = 5,
+        acc_hidden_dims=None,
+        run_id: str = None,
+        phase: str = None,
     ):
         self.node_number = node_number
         self.p = ahp
@@ -49,11 +52,21 @@ class SORAgentHelper:
         self.exp_name = exp_name
         self.online = online
         self.network_helper = network_helper
+        self.run_id = run_id
+        self.phase = phase
         self.sor_config = sor_config or SORReplayConfig(rb_size=ahp.rb_size, rb_size_global=ahp.rb_size_global)
+        self.acc_parameters = replace(
+            DEFAULT_SOR_ACC_PARAMETER,
+            hidden_dims=(
+                tuple(acc_hidden_dims)
+                if acc_hidden_dims
+                else DEFAULT_SOR_ACC_PARAMETER.hidden_dims
+            ),
+        )
         self.agent_pool = [
             SORACC(
                 f"{self.exp_name}_SORACC_{port_idx}",
-                DEFAULT_SOR_ACC_PARAMETER,
+                self.acc_parameters,
                 lambda_cons=lambda_cons,
                 lambda_reg=lambda_reg,
                 drift_reg_threshold=drift_reg_threshold,
@@ -137,8 +150,18 @@ class SORAgentHelper:
             return
         reward = self.network_helper.get_port_current_reward(port_idx=port_idx)
         embedding = self.agent_pool[port_idx].encode_state(state)
-        transition = self.rb_pool[port_idx].push(state, action, reward, next_state, embedding)
-        self.global_memory.push(state, action, reward, next_state, embedding, td_error=transition.td_error)
+        transition = self.rb_pool[port_idx].push(
+            state, action, reward, next_state, embedding, stream_id=port_idx
+        )
+        self.global_memory.push(
+            state,
+            action,
+            reward,
+            next_state,
+            embedding,
+            td_error=transition.td_error,
+            stream_id=port_idx,
+        )
         logger.info(
             f"SOR recorded port={port_idx} reward={reward:.3f} cluster={transition.cluster_id} boundary={transition.boundary}"
         )
@@ -228,6 +251,11 @@ class SORAgentHelper:
             # via maybe_sync() and triggered by train() rather than load(),
             # so startup latency stays bounded regardless of global buffer size.
         self._load_train_state()
+        # ref_update_interval is defined over continual training, not one
+        # short Python invocation/episode.  Restore its clock from the shared
+        # persistent counter so reference updates do not reset every epoch.
+        for agent in self.agent_pool:
+            agent.train_steps = self.global_train_step
         self.epoch += 1
 
     def save(self):
@@ -248,6 +276,8 @@ class SORAgentHelper:
             "mean_reward": mean_reward,
             "mean_loss": mean_loss,
             "global_buffer_size": len(self.global_memory),
+            "run_id": self.run_id,
+            "phase": self.phase,
         }
         if extra:
             record.update(extra)
@@ -270,7 +300,14 @@ class SORAgentHelper:
 
     def _save_train_state(self):
         os.makedirs(self.model_dir, exist_ok=True)
-        state = {"global_train_step": int(self.global_train_step), "global_env_step": int(self.global_env_step), "epsilon": float(self.epsilon), "epoch": int(self.epoch)}
+        state = {
+            "global_train_step": int(self.global_train_step),
+            "global_env_step": int(self.global_env_step),
+            "epsilon": float(self.epsilon),
+            "epoch": int(self.epoch),
+            "run_id": self.run_id,
+            "phase": self.phase,
+        }
         try:
             self._atomic_write_text(self._train_state_path(), json.dumps(state))
         except Exception as exc:
@@ -304,6 +341,10 @@ class SORAgentHelper:
             self.global_env_step = int(state.get("global_env_step", 0))
             self.epsilon = float(state.get("epsilon", self.p.epsilon_start))
             self.epoch = int(state.get("epoch", 0))
+            if self.run_id is None:
+                self.run_id = state.get("run_id")
+            if self.phase is None:
+                self.phase = state.get("phase")
         except Exception as exc:
             logger.warning(f"Failed to load SOR train_state {path}: {exc}")
 
