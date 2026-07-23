@@ -117,7 +117,6 @@ class NetworkHelper:
             else:
                 logger.error("未从NS3获取到port_identifiers，无法正确加载fmap")
                 logger.error(f"解析后的info中无port_identifiers，内容: {parsed_info}")
-            obs = np.array(obs)
         else:
             # 验证所有端口都设置了动作->执行动作->重置动作位图
             assert sum(self.action_port_bitmap) > self.n_port - 1, "Not all ports have actions set. Please check the configurator."
@@ -125,12 +124,26 @@ class NetworkHelper:
             # print(self.action)    
             self.action_port_bitmap = [0] * self.n_port  # Reset the action bitmap for the next step
 
-        # ns3-gym legitimately returns observation=None together with done=True
-        # for the terminal notification. Do not turn None into a 0-D object
-        # array and index it as a regular observation.
+        # ns3-gym normally returns observation=None together with done=True for
+        # the terminal notification.  Some ns-3.33/ns3-gym runs close the
+        # simulation socket first and incorrectly leave done=False in that
+        # final reply.  Once at least one environment step has completed there
+        # is no observation to process or action to send, so both variants are
+        # terminal.  Keep step 0 strict: a missing initial observation still
+        # means that the simulator failed to start correctly.
         if obs is None:
-            if done:
-                logger.info(f"Step {curr_step} - Terminal notification received without observation.")
+            if done or curr_step > 0:
+                if done:
+                    logger.info(
+                        f"Step {curr_step} - Terminal notification received "
+                        "without observation."
+                    )
+                else:
+                    logger.warning(
+                        f"Step {curr_step} - ns3-gym returned observation=None "
+                        "with done=False; treating the socket-close reply as "
+                        "terminal."
+                    )
                 return True
             raise RuntimeError(
                 f"ns3-gym returned observation=None while done={done} at step {curr_step}"
