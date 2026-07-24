@@ -58,6 +58,7 @@ def test_detects_acc_forgetting_and_sor_retention():
             min_p95_worsening = 0.10
             min_acquisition_reward_gain = 0.02
             min_acquisition_p95_gain = 0.05
+            completion_tolerance = 0.01
 
         acc = MODULE.method_analysis(root, "acc", "incast", "throughput", Args)
         sor = MODULE.method_analysis(root, "sor", "incast", "throughput", Args)

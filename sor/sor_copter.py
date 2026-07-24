@@ -45,6 +45,7 @@ def build_parser():
     parser.add_argument("-i", "--train_intervals", type=int, default=8)
     parser.add_argument("-b", "--switch_buffer", type=int, default=400)
     parser.add_argument("--max_steps", type=int, default=0)
+    parser.add_argument("--max_global_train_steps", type=int, default=0)
     parser.add_argument("--epsilon_start", type=float, default=1.0)
     parser.add_argument("--epsilon_end", type=float, default=0.05)
     parser.add_argument("--epsilon_decay_steps", type=int, default=50000)
@@ -287,6 +288,15 @@ def main():
                 if args.online and not args.eval_greedy and current_step % args.train_intervals == 0:
                     agent_helper.maybe_sync()
                     agent_helper.train(current_step)
+                    if (
+                        args.max_global_train_steps > 0
+                        and agent_helper.global_train_step >= args.max_global_train_steps
+                    ):
+                        logger.info(
+                            "Reached max_global_train_steps="
+                            f"{args.max_global_train_steps}; ending this phase."
+                        )
+                        break
 
             current_step += 1
             if done:

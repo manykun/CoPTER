@@ -4,7 +4,9 @@
 #
 # The same model and replay memory continue across task phases.  Evaluation is
 # greedy and frozen.  ACC and SOR receive identical traffic, action space,
-# reward, network width, epsilon schedule, switch buffer and training budget.
+# network width, phase-local epsilon schedule, switch buffer and optimizer-
+# update budget.  Task-specific rewards deliberately create a controlled
+# non-stationary objective; this is not claimed to be a natural traffic shift.
 
 set -euo pipefail
 
@@ -15,10 +17,12 @@ TASK_A="incast"
 TASK_B="throughput"
 SEED=1
 BUFFER_KB=400
-PHASE_EPOCHS=30
+PHASE_EPOCHS=100
+UPDATES_PER_TASK=600
 EPS_DECAY=2500
 ACC_HIDDEN_DIMS="32,64,64,32"
-REWARD_WEIGHTS="0.50,0.30,0.20"
+TASK_A_REWARD_WEIGHTS="0.25,0.55,0.20"
+TASK_B_REWARD_WEIGHTS="0.70,0.15,0.15"
 KMIN_RANGE="20000,50000"
 KMAX_RANGE="50000,100000"
 BASELINE_STOP_TIME="4.00"
@@ -34,6 +38,7 @@ Usage:
 
 Stages:
   prepare   Generate the fixed task flows/configs and write manifest.json
+  screen    Fixed-action conflict screen; must pass before long training
   acc       Run frozen evaluations and A->B continual training with ACC
   sor       Repeat the identical experiment with SOR
   analyze   Build REPORT.md and apply the registered gates
@@ -44,11 +49,13 @@ Important options:
   --task-a NAME
   --task-b NAME
   --seed N
-  --phase-epochs N
+  --updates-per-task N
+  --phase-epochs N       Safety cap; update count is the actual budget
   --buffer-kb N
   --eps-decay N
   --acc-hidden-dims CSV
-  --reward-weights CSV
+  --task-a-reward-weights CSV
+  --task-b-reward-weights CSV
   --port N
   --smoke
   --resume
@@ -64,9 +71,15 @@ while [[ $# -gt 0 ]]; do
         --seed) SEED="$2"; shift 2 ;;
         --buffer-kb) BUFFER_KB="$2"; shift 2 ;;
         --phase-epochs) PHASE_EPOCHS="$2"; shift 2 ;;
+        --updates-per-task) UPDATES_PER_TASK="$2"; shift 2 ;;
         --eps-decay) EPS_DECAY="$2"; shift 2 ;;
         --acc-hidden-dims) ACC_HIDDEN_DIMS="$2"; shift 2 ;;
-        --reward-weights) REWARD_WEIGHTS="$2"; shift 2 ;;
+        --task-a-reward-weights) TASK_A_REWARD_WEIGHTS="$2"; shift 2 ;;
+        --task-b-reward-weights) TASK_B_REWARD_WEIGHTS="$2"; shift 2 ;;
+        --reward-weights)
+            echo "--reward-weights was replaced by task-specific reward options." >&2
+            exit 2
+            ;;
         --kmin-range) KMIN_RANGE="$2"; shift 2 ;;
         --kmax-range) KMAX_RANGE="$2"; shift 2 ;;
         --baseline-stop-time) BASELINE_STOP_TIME="$2"; shift 2 ;;
@@ -79,7 +92,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 case "${STAGE}" in
-    prepare|acc|sor|analyze|all) ;;
+    prepare|screen|acc|sor|analyze|all) ;;
     *) echo "Invalid stage: ${STAGE}" >&2; exit 2 ;;
 esac
 [[ "${RUN_ID}" =~ ^[A-Za-z0-9_.-]+$ ]] || {
@@ -94,9 +107,33 @@ esac
     echo "phase-epochs must be a positive integer" >&2
     exit 2
 }
+[[ "${UPDATES_PER_TASK}" =~ ^[1-9][0-9]*$ ]] || {
+    echo "updates-per-task must be a positive integer" >&2
+    exit 2
+}
+python - "${TASK_A_REWARD_WEIGHTS}" "${TASK_B_REWARD_WEIGHTS}" <<'PY'
+import math
+import sys
+
+for label, raw in zip(("task A", "task B"), sys.argv[1:]):
+    try:
+        weights = [float(value) for value in raw.split(",")]
+    except ValueError as exc:
+        raise SystemExit(f"{label} reward weights are invalid: {exc}")
+    if (
+        len(weights) != 3
+        or any(value < 0 for value in weights)
+        or not math.isclose(sum(weights), 1.0, abs_tol=1e-6)
+    ):
+        raise SystemExit(
+            f"{label} reward weights must be three non-negative values "
+            f"summing to one: {raw}"
+        )
+PY
 
 if [[ "${SMOKE}" -eq 1 ]]; then
-    PHASE_EPOCHS=1
+    PHASE_EPOCHS=3
+    UPDATES_PER_TASK=10
     MAX_FLOWS=2000
 fi
 
@@ -108,20 +145,25 @@ mkdir -p "${RUN_DIR}"
 
 manifest_json() {
     python - "${RUN_ID}" "${TASK_A}" "${TASK_B}" "${SEED}" \
-        "${BUFFER_KB}" "${PHASE_EPOCHS}" "${EPS_DECAY}" \
-        "${ACC_HIDDEN_DIMS}" "${REWARD_WEIGHTS}" "${KMIN_RANGE}" \
+        "${BUFFER_KB}" "${PHASE_EPOCHS}" "${UPDATES_PER_TASK}" "${EPS_DECAY}" \
+        "${ACC_HIDDEN_DIMS}" "${TASK_A_REWARD_WEIGHTS}" \
+        "${TASK_B_REWARD_WEIGHTS}" "${KMIN_RANGE}" \
         "${KMAX_RANGE}" "${BASELINE_STOP_TIME}" "${MAX_FLOWS}" <<'PY'
 import json
 import sys
 
 keys = (
     "run_id", "task_a", "task_b", "seed", "buffer_kb", "phase_epochs",
-    "epsilon_decay_steps", "hidden_dims", "reward_weights", "kmin_range",
+    "updates_per_task", "epsilon_decay_steps", "hidden_dims",
+    "task_a_reward_weights", "task_b_reward_weights", "kmin_range",
     "kmax_range", "simulator_stop_time", "max_flows",
 )
 values = sys.argv[1:]
 record = dict(zip(keys, values))
-for key in ("seed", "buffer_kb", "phase_epochs", "epsilon_decay_steps", "max_flows"):
+for key in (
+    "seed", "buffer_kb", "phase_epochs", "updates_per_task",
+    "epsilon_decay_steps", "max_flows",
+):
     record[key] = int(record[key])
 record["methods"] = ["acc", "sor"]
 record["curriculum"] = [record["task_a"], record["task_b"]]
@@ -131,6 +173,8 @@ record["evaluation"] = {
     "old_task_comparison": ["after_a", "after_b"],
     "new_task_acquisition": ["after_a", "after_b"],
 }
+record["experiment_type"] = "controlled_nonstationary_objective"
+record["epsilon_schedule"] = "reset_per_task"
 print(json.dumps(record, indent=2, sort_keys=True))
 PY
 }
@@ -256,10 +300,24 @@ copy_eval_outputs() {
     [[ -z "${log_candidate}" ]] || cp "${log_candidate}" "${destination}/agent.log"
 }
 
+reward_for_task() {
+    local task="$1"
+    if [[ "${task}" == "${TASK_A}" ]]; then
+        echo "${TASK_A_REWARD_WEIGHTS}"
+    elif [[ "${task}" == "${TASK_B}" ]]; then
+        echo "${TASK_B_REWARD_WEIGHTS}"
+    else
+        echo "Unknown task: ${task}" >&2
+        return 1
+    fi
+}
+
 evaluate() {
     local method="$1" phase="$2" task="$3" exp="$4" model_dir="$5" port="$6"
     local name="${task}_seed${SEED}"
     local base="${OUTPUT_DIR}/${name}"
+    local reward_weights
+    reward_weights="$(reward_for_task "${task}")"
     rm -f "${base}".*
     echo "[${method}] frozen evaluation phase=${phase} task=${task}"
     bash "${ROOT}/run_training.sh" \
@@ -278,11 +336,76 @@ evaluate() {
         --eps-end 0.05 \
         --eps-decay "${EPS_DECAY}" \
         --acc-hidden-dims "${ACC_HIDDEN_DIMS}" \
-        --reward-weights "${REWARD_WEIGHTS}" \
+        --reward-weights "${reward_weights}" \
         --tb-enable false \
         --run-id "${RUN_ID}" \
         --phase "${phase}"
     copy_eval_outputs "${method}" "${phase}" "${task}" "${exp}" "${model_dir}"
+}
+
+copy_screen_outputs() {
+    local task="$1" label="$2" exp="$3" model_dir="$4"
+    local name="${task}_seed${SEED}"
+    local destination="${RUN_DIR}/screen/${task}/${label}"
+    local base="${OUTPUT_DIR}/${name}"
+    local metrics="${model_dir}/${exp}_metrics.jsonl"
+    mkdir -p "${destination}"
+    shopt -s nullglob
+    local files=("${base}".*)
+    [[ ${#files[@]} -gt 0 ]] || {
+        echo "No ns-3 outputs produced for conflict screen ${task}/${label}" >&2
+        return 1
+    }
+    cp "${files[@]}" "${destination}/"
+    shopt -u nullglob
+    cp "${FLOW_DIR}/${name}.flow" "${destination}/input.flow"
+    cp "${FLOW_DIR}/${name}.conf" "${destination}/input.conf"
+    cp "${FLOW_DIR}/${name}.meta" "${destination}/input.meta"
+    tail -n 1 "${metrics}" > "${destination}/metrics.json"
+}
+
+screen() {
+    check_manifest
+    validate_configs
+    local screen_dir="${RUN_DIR}/screen"
+    local model_dir="${screen_dir}/models"
+    local exp="continual_${RUN_ID}_screen_s${SEED}"
+    local task label action name base reward_weights
+    mkdir -p "${model_dir}"
+    for task in "${TASK_A}" "${TASK_B}"; do
+        reward_weights="$(reward_for_task "${task}")"
+        for specification in \
+            "aggressive:0,0,9" \
+            "balanced:2,1,4" \
+            "permissive:5,3,0"; do
+            label="${specification%%:*}"
+            action="${specification#*:}"
+            [[ -s "${screen_dir}/${task}/${label}/metrics.json" ]] && continue
+            name="${task}_seed${SEED}"
+            base="${OUTPUT_DIR}/${name}"
+            rm -f "${base}".*
+            echo "[screen] task=${task} action=${label}(${action}) reward=${reward_weights}"
+            bash "${ROOT}/run_training.sh" \
+                --one-shot --eval-greedy \
+                --force-action "${action}" \
+                --eval-tag "screen_${task}_${label}" \
+                --config "simulation/mix/acc_validation/${name}.conf" \
+                --exp "${exp}" --mode ACC --port "${PORT}" --seed "${SEED}" \
+                --buffer "${BUFFER_KB}" --model-dir "${model_dir}" --episodes 1 \
+                --acc-hidden-dims "${ACC_HIDDEN_DIMS}" \
+                --reward-weights "${reward_weights}" \
+                --tb-enable false --run-id "${RUN_ID}" --phase screen
+            copy_screen_outputs "${task}" "${label}" "${exp}" "${model_dir}"
+        done
+    done
+    python "${ROOT}/scripts/continual_validation/analyze_conflict.py" \
+        --run-dir "${RUN_DIR}" \
+        --min-reward-spread 0.05 \
+        --min-p95-spread 0.05 \
+        --completion-tolerance 0.01 \
+        --gate
+    mkdir -p "${screen_dir}/markers"
+    touch "${screen_dir}/markers/pass"
 }
 
 snapshot_models() {
@@ -305,6 +428,14 @@ train_method() {
 
     check_manifest
     validate_configs
+    [[ -f "${RUN_DIR}/screen/markers/pass" ]] || {
+        echo "Conflict screen has not passed. Run --stage screen first." >&2
+        return 1
+    }
+    if [[ "${method}" == "sor" && ! -f "${RUN_DIR}/acc/markers/continual_gate_pass" ]]; then
+        echo "ACC has not demonstrated acquisition plus forgetting; SOR is premature." >&2
+        return 1
+    fi
     mkdir -p "${model_dir}" "${method_dir}/checkpoints" "${method_dir}/markers"
     if [[ -f "${model_dir}/${exp}_train_state.json" &&
           "${RESUME}" -ne 1 &&
@@ -323,7 +454,7 @@ train_method() {
     fi
 
     if [[ ! -f "${method_dir}/markers/train_a" ]]; then
-        echo "[${method}] train task A=${TASK_A}, target epoch=${PHASE_EPOCHS}"
+        echo "[${method}] train task A=${TASK_A}, target updates=${UPDATES_PER_TASK}"
         bash "${ROOT}/run_training.sh" \
             --config "simulation/mix/acc_validation/${TASK_A}_seed${SEED}.conf" \
             --exp "${exp}" \
@@ -333,11 +464,12 @@ train_method() {
             --buffer "${BUFFER_KB}" \
             --model-dir "${model_dir}" \
             --episodes "${PHASE_EPOCHS}" \
+            --target-train-steps "${UPDATES_PER_TASK}" \
             --eps-start 1.0 \
             --eps-end 0.05 \
             --eps-decay "${EPS_DECAY}" \
             --acc-hidden-dims "${ACC_HIDDEN_DIMS}" \
-            --reward-weights "${REWARD_WEIGHTS}" \
+            --reward-weights "${TASK_A_REWARD_WEIGHTS}" \
             --tb-enable false \
             --run-id "${RUN_ID}" \
             --phase train_a \
@@ -351,10 +483,15 @@ train_method() {
         evaluate "${method}" after_a "${TASK_B}" "${exp}" "${model_dir}" "${method_port}"
         touch "${method_dir}/markers/eval_after_a"
     fi
+    python "${ROOT}/scripts/continual_validation/check_acquisition.py" \
+        --run-dir "${RUN_DIR}" --method "${method}" --task a \
+        --min-reward-gain 0.02 --min-p95-gain 0.05 \
+        --completion-tolerance 0.01 --gate
 
     if [[ ! -f "${method_dir}/markers/train_b" ]]; then
         local target_epoch=$((PHASE_EPOCHS * 2))
-        echo "[${method}] continue same model on task B=${TASK_B}, target epoch=${target_epoch}"
+        local target_updates=$((UPDATES_PER_TASK * 2))
+        echo "[${method}] continue same model on task B=${TASK_B}, target updates=${target_updates}"
         bash "${ROOT}/run_training.sh" \
             --config "simulation/mix/acc_validation/${TASK_B}_seed${SEED}.conf" \
             --exp "${exp}" \
@@ -364,11 +501,12 @@ train_method() {
             --buffer "${BUFFER_KB}" \
             --model-dir "${model_dir}" \
             --episodes "${target_epoch}" \
+            --target-train-steps "${target_updates}" \
             --eps-start 1.0 \
             --eps-end 0.05 \
             --eps-decay "${EPS_DECAY}" \
             --acc-hidden-dims "${ACC_HIDDEN_DIMS}" \
-            --reward-weights "${REWARD_WEIGHTS}" \
+            --reward-weights "${TASK_B_REWARD_WEIGHTS}" \
             --tb-enable false \
             --run-id "${RUN_ID}" \
             --phase train_b \
@@ -381,6 +519,17 @@ train_method() {
         evaluate "${method}" after_b "${TASK_A}" "${exp}" "${model_dir}" "${method_port}"
         evaluate "${method}" after_b "${TASK_B}" "${exp}" "${model_dir}" "${method_port}"
         touch "${method_dir}/markers/eval_after_b"
+    fi
+    python "${ROOT}/scripts/continual_validation/check_acquisition.py" \
+        --run-dir "${RUN_DIR}" --method "${method}" --task b \
+        --min-reward-gain 0.02 --min-p95-gain 0.05 \
+        --completion-tolerance 0.01 --gate
+    if [[ "${method}" == "acc" ]]; then
+        python "${ROOT}/scripts/continual_validation/analyze_forgetting.py" \
+            --run-dir "${RUN_DIR}" --method acc \
+            --min-reward-drop 0.10 --min-p95-worsening 0.10 \
+            --completion-tolerance 0.01 --gate-forgetting
+        touch "${method_dir}/markers/continual_gate_pass"
     fi
     touch "${method_dir}/markers/complete"
     echo "${method} A->B curriculum complete: ${method_dir}"
@@ -399,6 +548,7 @@ analyze() {
 }
 
 [[ "${STAGE}" == "prepare" || "${STAGE}" == "all" ]] && prepare
+[[ "${STAGE}" == "screen" || "${STAGE}" == "all" ]] && screen
 [[ "${STAGE}" == "acc" || "${STAGE}" == "all" ]] && train_method acc
 [[ "${STAGE}" == "sor" || "${STAGE}" == "all" ]] && train_method sor
 [[ "${STAGE}" == "analyze" || "${STAGE}" == "all" ]] && analyze

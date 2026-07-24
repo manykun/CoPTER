@@ -59,6 +59,7 @@ EVAL_TAG=""
 SEED=1
 WATCH_PORTS=""
 MAX_STEPS=0
+TARGET_TRAIN_STEPS=0
 TB_ENABLE="true"
 ONE_SHOT=0
 RUN_ID=""
@@ -109,6 +110,7 @@ while [[ $# -gt 0 ]]; do
         --seed)         SEED="$2";            shift 2 ;;
         --watch-ports)  WATCH_PORTS="$2";     shift 2 ;;
         --max-steps)    MAX_STEPS="$2";       shift 2 ;;
+        --target-train-steps) TARGET_TRAIN_STEPS="$2"; shift 2 ;;
         --tb-enable)    TB_ENABLE="$2";       shift 2 ;;
         --one-shot)     ONE_SHOT=1;            shift ;;
         --run-id)       RUN_ID="$2";          shift 2 ;;
@@ -193,6 +195,14 @@ run_single_experiment() {
         fi
     }
 
+    get_current_train_step() {
+        if [ -f "${STATE_FILE}" ]; then
+            python3 -c "import json; print(json.load(open('${STATE_FILE}')).get('global_train_step', 0))" 2>/dev/null || echo "0"
+        else
+            echo "0"
+        fi
+    }
+
     kill_ns3_processes_local() {
         local pid=$1
         if kill -0 ${pid} 2>/dev/null; then
@@ -213,6 +223,11 @@ run_single_experiment() {
     local EPISODE CONSECUTIVE_FAILURES=0 RUN_COUNT=0
     EPISODE=$(get_current_episode)
     log_local "Resuming from episode ${EPISODE}"
+    if [ "${TARGET_TRAIN_STEPS}" -gt 0 ] &&
+       [ "$(get_current_train_step)" -ge "${TARGET_TRAIN_STEPS}" ]; then
+        log_local "Target optimizer updates already reached: ${TARGET_TRAIN_STEPS}"
+        return 0
+    fi
 
     while { [ "${ONE_SHOT}" -eq 1 ] && [ "${RUN_COUNT}" -lt 1 ]; } || \
           { [ "${ONE_SHOT}" -eq 0 ] && [ "${EPISODE}" -lt "${MAX_EPISODES}" ]; }; do
@@ -316,6 +331,7 @@ run_single_experiment() {
         [ -n "${EVAL_TAG}" ] && AGENT_ARGS+=(--eval_tag "${EVAL_TAG}")
         [ -n "${WATCH_PORTS}" ] && AGENT_ARGS+=(--watch_ports "${WATCH_PORTS}")
         [ "${MAX_STEPS}" -gt 0 ] && AGENT_ARGS+=(--max_steps "${MAX_STEPS}")
+        [ "${TARGET_TRAIN_STEPS}" -gt 0 ] && AGENT_ARGS+=(--max_global_train_steps "${TARGET_TRAIN_STEPS}")
         [ -n "${RUN_ID}" ] && AGENT_ARGS+=(--run_id "${RUN_ID}")
         [ -n "${PHASE}" ] && AGENT_ARGS+=(--phase "${PHASE}")
         "${AGENT_ARGS[@]}" >> "${LOG_DIR_LOCAL}/agent_ep${EPISODE}.log" 2>&1 || AGENT_EXIT=$?
@@ -356,7 +372,15 @@ run_single_experiment() {
             break
         fi
 
-        if [ -f "${STATE_FILE}" ]; then
+        if [ "${TARGET_TRAIN_STEPS}" -gt 0 ] &&
+           [ "$(get_current_train_step)" -ge "${TARGET_TRAIN_STEPS}" ]; then
+            log_local "Reached target optimizer updates: ${TARGET_TRAIN_STEPS}"
+            break
+        fi
+
+        # A registered optimizer-update budget takes precedence over the
+        # heuristic convergence detector so both tasks receive equal compute.
+        if [ "${TARGET_TRAIN_STEPS}" -eq 0 ] && [ -f "${STATE_FILE}" ]; then
             local CONVERGED
             CONVERGED=$(python3 -c "
 import json, sys, numpy as np
@@ -396,6 +420,13 @@ else:
             sleep ${WAIT_BETWEEN_SEC}
         fi
     done
+
+    if [ "${TARGET_TRAIN_STEPS}" -gt 0 ] &&
+       [ "$(get_current_train_step)" -lt "${TARGET_TRAIN_STEPS}" ]; then
+        log_local "ERROR: Episode safety cap reached before optimizer-update target."
+        log_local "Current updates=$(get_current_train_step), target=${TARGET_TRAIN_STEPS}"
+        return 1
+    fi
 
     log_local ""
     log_local "=============================================="

@@ -132,6 +132,7 @@ class AgentHelper:
         # ---- Continuous-training state (cross-run persistence) ----
         self.global_train_step = 0           # number of agent_helper.train() calls completed (across runs)
         self.global_env_step = 0             # number of environment steps observed (across runs); drives epsilon decay
+        self.phase_env_step = 0              # environment steps in the current continual-learning phase
         self.epsilon = self.p.epsilon_start
         self.train_call_count = 0
         self._train_call_count_since_save = 0
@@ -176,13 +177,15 @@ class AgentHelper:
 
     # ---------- epsilon schedule ----------
     def get_current_epsilon(self) -> float:
-        # Decay by ENVIRONMENT steps (~98/epoch), not train-call count, so the
-        # schedule actually progresses within a realistic number of epochs.
+        # Exploration restarts at each continual-learning task boundary.  The
+        # global counter remains available for audit, while the phase-local
+        # counter makes task A and task B receive the same epsilon schedule.
         self.global_env_step += 1
+        self.phase_env_step += 1
         decay = self.p.epsilon_decay_steps
         if decay <= 0:
             return self.p.epsilon_end
-        frac = min(1.0, self.global_env_step / decay)
+        frac = min(1.0, self.phase_env_step / decay)
         eps = self.p.epsilon_start + (self.p.epsilon_end - self.p.epsilon_start) * frac
         self.epsilon = eps
         return eps
@@ -322,8 +325,21 @@ class AgentHelper:
                     ts = json.load(f)
                 self.global_train_step = int(ts.get("global_train_step", 0))
                 self.global_env_step = int(ts.get("global_env_step", 0))
+                saved_phase = ts.get("phase")
+                if self.phase is not None and saved_phase != self.phase:
+                    self.phase_env_step = 0
+                    self.epsilon = self.p.epsilon_start
+                    logger.info(
+                        f"Continual phase changed {saved_phase!r} -> {self.phase!r}; "
+                        "resetting the phase-local epsilon schedule."
+                    )
+                else:
+                    self.phase_env_step = int(
+                        ts.get("phase_env_step", ts.get("global_env_step", 0))
+                    )
                 self.train_call_count = int(ts.get("train_call_count", self.global_train_step))
-                self.epsilon = float(ts.get("epsilon", self.p.epsilon_start))
+                if self.phase is None or saved_phase == self.phase:
+                    self.epsilon = float(ts.get("epsilon", self.p.epsilon_start))
                 self.epoch = int(ts.get("epoch", 0))
                 if self.run_id is None:
                     self.run_id = ts.get("run_id")
@@ -363,6 +379,7 @@ class AgentHelper:
         ts = {
             "global_train_step": int(self.global_train_step),
             "global_env_step": int(self.global_env_step),
+            "phase_env_step": int(self.phase_env_step),
             "train_call_count": int(self.train_call_count),
             "epsilon": float(self.epsilon),
             "epoch": int(self.epoch),
@@ -401,6 +418,7 @@ class AgentHelper:
             "epoch": int(self.epoch),
             "global_train_step": int(self.global_train_step),
             "global_env_step": int(self.global_env_step),
+            "phase_env_step": int(self.phase_env_step),
             "train_call_count": int(self.train_call_count),
             "epsilon": float(self.epsilon),
             "mean_reward": mean_reward,

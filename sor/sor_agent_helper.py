@@ -85,6 +85,7 @@ class SORAgentHelper:
         self.global_memory = StructuredSORReplayBuffer(global_cfg)
         self.global_train_step = 0
         self.global_env_step = 0
+        self.phase_env_step = 0
         self.epsilon = self.p.epsilon_start
         self._train_call_count_since_save = 0
         self._recent_rewards = deque(maxlen=self.p.reward_window)
@@ -125,13 +126,15 @@ class SORAgentHelper:
         os.replace(tmp, path)
 
     def get_current_epsilon(self) -> float:
-        # Decay by ENVIRONMENT steps to match the ACC baseline schedule.
+        # Match ACC: restart exploration at task boundaries while retaining a
+        # global environment-step counter for diagnostics.
         self.global_env_step += 1
+        self.phase_env_step += 1
         decay = self.p.epsilon_decay_steps
         if decay <= 0:
             self.epsilon = self.p.epsilon_end
             return self.epsilon
-        frac = min(1.0, self.global_env_step / decay)
+        frac = min(1.0, self.phase_env_step / decay)
         self.epsilon = self.p.epsilon_start + (self.p.epsilon_end - self.p.epsilon_start) * frac
         return self.epsilon
 
@@ -303,6 +306,7 @@ class SORAgentHelper:
         state = {
             "global_train_step": int(self.global_train_step),
             "global_env_step": int(self.global_env_step),
+            "phase_env_step": int(self.phase_env_step),
             "epsilon": float(self.epsilon),
             "epoch": int(self.epoch),
             "run_id": self.run_id,
@@ -339,7 +343,19 @@ class SORAgentHelper:
                 state = json.load(handle)
             self.global_train_step = int(state.get("global_train_step", 0))
             self.global_env_step = int(state.get("global_env_step", 0))
-            self.epsilon = float(state.get("epsilon", self.p.epsilon_start))
+            saved_phase = state.get("phase")
+            if self.phase is not None and saved_phase != self.phase:
+                self.phase_env_step = 0
+                self.epsilon = self.p.epsilon_start
+                logger.info(
+                    f"Continual phase changed {saved_phase!r} -> {self.phase!r}; "
+                    "resetting the phase-local epsilon schedule."
+                )
+            else:
+                self.phase_env_step = int(
+                    state.get("phase_env_step", state.get("global_env_step", 0))
+                )
+                self.epsilon = float(state.get("epsilon", self.p.epsilon_start))
             self.epoch = int(state.get("epoch", 0))
             if self.run_id is None:
                 self.run_id = state.get("run_id")

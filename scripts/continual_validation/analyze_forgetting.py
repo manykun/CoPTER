@@ -139,12 +139,16 @@ def cross_method(left, right):
     }
 
 
-def acquisition_passed(result, reward_gain, p95_gain):
+def acquisition_passed(result, reward_gain, p95_gain, completion_tolerance):
     reward_change = result["reward_change"]
     p95_worsening = result["p95_fct_worsening"]
     reward_improved = reward_change is not None and reward_change >= reward_gain
     p95_improved = p95_worsening is not None and p95_worsening <= -p95_gain
-    return reward_improved or p95_improved
+    completion_safe = (
+        result["completion_drop"] is not None
+        and result["completion_drop"] <= completion_tolerance
+    )
+    return (reward_improved or p95_improved) and completion_safe
 
 
 def method_analysis(root, method, task_a, task_b, args):
@@ -172,13 +176,19 @@ def method_analysis(root, method, task_a, task_b, args):
         "task_a_acquisition": {
             **acquire_a,
             "passed": acquisition_passed(
-                acquire_a, args.min_acquisition_reward_gain, args.min_acquisition_p95_gain
+                acquire_a,
+                args.min_acquisition_reward_gain,
+                args.min_acquisition_p95_gain,
+                args.completion_tolerance,
             ),
         },
         "task_b_acquisition": {
             **acquire_b,
             "passed": acquisition_passed(
-                acquire_b, args.min_acquisition_reward_gain, args.min_acquisition_p95_gain
+                acquire_b,
+                args.min_acquisition_reward_gain,
+                args.min_acquisition_p95_gain,
+                args.completion_tolerance,
             ),
         },
         "forgetting": {
@@ -235,7 +245,8 @@ def write_report(path, manifest, analyses, comparison_result, decision, args):
         "",
         f"- Curriculum: **{task_a} → {task_b}**",
         f"- Seed: **{manifest['seed']}**",
-        f"- Training budget: **{manifest['phase_epochs']} epochs per task**",
+        f"- Training budget: **{manifest.get('updates_per_task', 'legacy')} "
+        "optimizer updates per task**",
         "- Evaluation: **greedy, frozen, identical task flow files**",
         "",
         "## Decision",
@@ -268,7 +279,8 @@ def write_report(path, manifest, analyses, comparison_result, decision, args):
             "Catastrophic forgetting is registered only when old-task reward drops "
             f"by at least {args.min_reward_drop:.0%} and common-flow p95 FCT worsens "
             f"by at least {args.min_p95_worsening:.0%}. A method must also demonstrate "
-            "task acquisition; retaining an untrained policy is not counted as success.",
+            "task acquisition without exceeding the completion-loss tolerance; "
+            "retaining an untrained or unsafe policy is not counted as success.",
             "",
             "## Measurements",
             "",
@@ -415,7 +427,11 @@ def main():
     selected_pass = (
         comparison_result["passed"]
         if comparison_result is not None
-        else acc_forgetting_pass
+        else (
+            acc_forgetting_pass
+            and analyses["acc"]["task_a_acquisition"]["passed"]
+            and analyses["acc"]["task_b_acquisition"]["passed"]
+        )
         if methods == ["acc"]
         else analyses["sor"]["task_a_acquisition"]["passed"]
         and analyses["sor"]["task_b_acquisition"]["passed"]
