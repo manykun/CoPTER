@@ -275,6 +275,7 @@ R = clip(R_raw, -1, 1)
 - reward spread ≥ 2%；
 - common-flow p95 spread ≥ 5%；
 - reward 最优动作完成率距离最高完成率不超过 1 个百分点；
+- reward 最优动作必须等于完成率安全集合中的 common-flow p95 最优动作；
 - mixed 与 incast 的 reward 最优动作不同。
 
 若失败：停止训练，只调整奖励结构，不放宽完成率门槛。

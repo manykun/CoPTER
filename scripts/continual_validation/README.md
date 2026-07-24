@@ -9,7 +9,8 @@ Therefore a detected change cannot be attributed to switching reward weights.
 
 The workflow has four registered gates:
 
-1. fixed actions must affect both tasks, and the reward-best action must differ;
+1. fixed actions must affect both tasks; reward-best must match the best
+   common-flow p95 action among completion-safe actions and differ across tasks;
 2. ACC must safely acquire task A;
 3. ACC must safely acquire task B and then forget task A;
 4. SOR must reduce forgetting while preserving task-B plasticity.

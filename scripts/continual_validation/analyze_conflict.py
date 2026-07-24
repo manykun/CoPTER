@@ -65,16 +65,28 @@ def main():
             ),
         )
         best_completion = max(completions)
+        safe_actions = [
+            name
+            for name, item in measurements.items()
+            if item["completion_ratio"]
+            >= best_completion - args.completion_tolerance
+        ]
+        best_safe_p95_action = min(
+            safe_actions,
+            key=lambda name: measurements[name]["p95_fct_us"],
+        )
         completion_safe = (
             measurements[best_action]["completion_ratio"]
             >= best_completion - args.completion_tolerance
         )
+        reward_aligned = best_action == best_safe_p95_action
         reward_spread = relative_spread(rewards)
         p95_spread = relative_spread(p95s)
         passed = (
             reward_spread >= args.min_reward_spread
             and p95_spread >= args.min_p95_spread
             and completion_safe
+            and reward_aligned
         )
         decision["tasks"][task] = {
             "passed": passed,
@@ -82,6 +94,8 @@ def main():
             "reward_spread": reward_spread,
             "p95_spread": p95_spread,
             "best_action_completion_safe": completion_safe,
+            "best_safe_p95_action": best_safe_p95_action,
+            "reward_aligned_with_safe_p95": reward_aligned,
             "measurements": measurements,
             "common_flows": len(common_flows),
         }
@@ -111,15 +125,17 @@ def main():
         f"- Overall: **{'PASS' if decision['passed'] else 'FAIL'}**",
         f"- Different reward-best actions: **{decision['different_best_actions']}**",
         "",
-        "| Task | Common flows | Best action | Reward spread | p95 spread | Completion safe | Gate |",
-        "|---|---:|---|---:|---:|---:|---:|",
+        "| Task | Common flows | Reward best | Safe-p95 best | Reward spread | p95 spread | Completion safe | Aligned | Gate |",
+        "|---|---:|---|---|---:|---:|---:|---:|---:|",
     ]
     for task in tasks:
         item = decision["tasks"][task]
         lines.append(
             f"| {task} | {item['common_flows']} | {item['best_reward_action']} | "
+            f"{item['best_safe_p95_action']} | "
             f"{item['reward_spread']:.2%} | {item['p95_spread']:.2%} | "
             f"{item['best_action_completion_safe']} | "
+            f"{item['reward_aligned_with_safe_p95']} | "
             f"{'PASS' if item['passed'] else 'FAIL'} |"
         )
     lines.extend(
