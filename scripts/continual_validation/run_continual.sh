@@ -544,7 +544,8 @@ analyze() {
         --min-p95-worsening 0.10 \
         --min-forgetting-reduction 0.30 \
         --new-task-p95-tolerance 0.05 \
-        --completion-tolerance 0.01
+        --completion-tolerance 0.01 \
+        --gate
 }
 
 [[ "${STAGE}" == "prepare" || "${STAGE}" == "all" ]] && prepare
