@@ -66,6 +66,9 @@ RUN_ID=""
 PHASE=""
 ACC_HIDDEN_DIMS="32,64,64,32"
 REWARD_WEIGHTS="0.50,0.30,0.20"
+REWARD_PROFILE="weighted"
+REWARD_QUEUE_LAMBDA=5.0
+REWARD_ECN_LAMBDA=5.0
 SOR_RECENT_SIZE=2000
 SOR_BOUNDARY_SIZE=20000
 SOR_MAX_CLUSTERS=32
@@ -117,6 +120,9 @@ while [[ $# -gt 0 ]]; do
         --phase)        PHASE="$2";           shift 2 ;;
         --acc-hidden-dims) ACC_HIDDEN_DIMS="$2"; shift 2 ;;
         --reward-weights) REWARD_WEIGHTS="$2"; shift 2 ;;
+        --reward-profile) REWARD_PROFILE="$2"; shift 2 ;;
+        --reward-queue-lambda) REWARD_QUEUE_LAMBDA="$2"; shift 2 ;;
+        --reward-ecn-lambda) REWARD_ECN_LAMBDA="$2"; shift 2 ;;
         --sor-recent-size) SOR_RECENT_SIZE="$2"; shift 2 ;;
         --sor-boundary-size) SOR_BOUNDARY_SIZE="$2"; shift 2 ;;
         --sor-max-clusters) SOR_MAX_CLUSTERS="$2"; shift 2 ;;
@@ -287,6 +293,9 @@ run_single_experiment() {
                 --tb_enable "${TB_ENABLE}"
                 --acc_hidden_dims "${ACC_HIDDEN_DIMS}"
                 --reward_weights "${REWARD_WEIGHTS}"
+                --reward_profile "${REWARD_PROFILE}"
+                --reward_queue_lambda "${REWARD_QUEUE_LAMBDA}"
+                --reward_ecn_lambda "${REWARD_ECN_LAMBDA}"
                 --sor_recent_size "${SOR_RECENT_SIZE}"
                 --sor_boundary_size "${SOR_BOUNDARY_SIZE}"
                 --sor_max_clusters "${SOR_MAX_CLUSTERS}"
@@ -322,6 +331,9 @@ run_single_experiment() {
                 --tb_enable "${TB_ENABLE}"
                 --acc_hidden_dims "${ACC_HIDDEN_DIMS}"
                 --reward_weights "${REWARD_WEIGHTS}"
+                --reward_profile "${REWARD_PROFILE}"
+                --reward_queue_lambda "${REWARD_QUEUE_LAMBDA}"
+                --reward_ecn_lambda "${REWARD_ECN_LAMBDA}"
             )
         fi
         [ "${ONLINE}" -eq 1 ] && AGENT_ARGS+=(--online)

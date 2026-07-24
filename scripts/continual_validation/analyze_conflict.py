@@ -35,11 +35,20 @@ def main():
     decision = {"tasks": {}}
     rows = []
     for task in tasks:
+        runs = {
+            action: load_eval(args.run_dir / "screen" / task / action)
+            for action in ACTIONS
+        }
+        common_flows = set.intersection(
+            *(set(run["flows"]) for run in runs.values())
+        )
         measurements = {}
         for action in ACTIONS:
-            result = summarize(
-                load_eval(args.run_dir / "screen" / task / action)
-            )
+            # Completion uses all offered flows; latency statistics use the
+            # identical flow intersection across every fixed action so a
+            # policy cannot look better merely because hard flows did not
+            # finish.
+            result = summarize(runs[action], common_flows)
             measurements[action] = result
             rows.append({"task": task, "action": action, **result})
         rewards = [item["reward"] for item in measurements.values()]
@@ -74,6 +83,7 @@ def main():
             "p95_spread": p95_spread,
             "best_action_completion_safe": completion_safe,
             "measurements": measurements,
+            "common_flows": len(common_flows),
         }
 
     best_actions = [
@@ -101,13 +111,13 @@ def main():
         f"- Overall: **{'PASS' if decision['passed'] else 'FAIL'}**",
         f"- Different reward-best actions: **{decision['different_best_actions']}**",
         "",
-        "| Task | Best action | Reward spread | p95 spread | Completion safe | Gate |",
-        "|---|---|---:|---:|---:|---:|",
+        "| Task | Common flows | Best action | Reward spread | p95 spread | Completion safe | Gate |",
+        "|---|---:|---|---:|---:|---:|---:|",
     ]
     for task in tasks:
         item = decision["tasks"][task]
         lines.append(
-            f"| {task} | {item['best_reward_action']} | "
+            f"| {task} | {item['common_flows']} | {item['best_reward_action']} | "
             f"{item['reward_spread']:.2%} | {item['p95_spread']:.2%} | "
             f"{item['best_action_completion_safe']} | "
             f"{'PASS' if item['passed'] else 'FAIL'} |"

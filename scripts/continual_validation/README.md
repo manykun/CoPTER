@@ -1,10 +1,11 @@
 # ACC catastrophic-forgetting and SOR validation
 
-This workflow is a controlled non-stationary-objective experiment. Task A uses
-a latency/queue-oriented reward (`0.25,0.55,0.20`), while task B uses a
-throughput-oriented reward (`0.70,0.15,0.15`). It is designed to test the
-forgetting mechanism; it must not be described as a purely natural traffic
-distribution shift.
+This workflow changes traffic from task A to task B while keeping one common
+tail-safe reward:
+
+`R = clip(throughput - 5 * combined_queue² - 5 * combined_ecn², -1, 1)`.
+
+Therefore a detected change cannot be attributed to switching reward weights.
 
 The workflow has four registered gates:
 
@@ -25,32 +26,41 @@ Run every command from the repository root:
 ```bash
 cd /mnt/sdb1/xuduokun/projects/CoPTER
 conda activate /mnt/sdb1/xuduokun/conda/envs/m3
-git pull origin exp/acc-validation
+git pull fork exp/acc-validation
 ```
 
 Use a new run id because the manifest is immutable:
 
 ```bash
-RUN_ID=controlled_mixed_incast_s1
-COMMON_ARGS="--run-id ${RUN_ID} --task-a mixed --task-b incast --seed 1 \
---buffer-kb 400 --updates-per-task 600 --phase-epochs 100 \
---eps-decay 2500 --acc-hidden-dims 32,64,64,32 \
---task-a-reward-weights 0.25,0.55,0.20 \
---task-b-reward-weights 0.70,0.15,0.15"
+RUN_ID=tailsafe_mixed_incast_s1
+COMMON_ARGS=(
+  --run-id "$RUN_ID"
+  --task-a mixed
+  --task-b incast
+  --seed 1
+  --buffer-kb 400
+  --updates-per-task 600
+  --phase-epochs 100
+  --eps-decay 2500
+  --acc-hidden-dims "32,64,64,32"
+  --reward-profile tail_safe
+  --reward-queue-lambda 5
+  --reward-ecn-lambda 5
+)
 ```
 
 Prepare fixed traffic and configs:
 
 ```bash
 bash scripts/continual_validation/run_continual.sh \
-  --stage prepare ${COMMON_ARGS}
+  --stage prepare "${COMMON_ARGS[@]}"
 ```
 
 Run the six-execution fixed-action screen:
 
 ```bash
 bash scripts/continual_validation/run_continual.sh \
-  --stage screen ${COMMON_ARGS}
+  --stage screen "${COMMON_ARGS[@]}"
 ```
 
 Inspect `experiments/continual_validation/${RUN_ID}/screen/REPORT.md`. Do not
@@ -61,15 +71,15 @@ task-B acquisition, completion safety, or forgetting gates fail:
 
 ```bash
 bash scripts/continual_validation/run_continual.sh \
-  --stage acc ${COMMON_ARGS}
+  --stage acc "${COMMON_ARGS[@]}"
 ```
 
-If ACC passes, run SOR with identical traffic, reward schedules, exploration,
+If ACC passes, run SOR with identical traffic, common reward, exploration,
 network width, and optimizer-update budgets:
 
 ```bash
 bash scripts/continual_validation/run_continual.sh \
-  --stage sor ${COMMON_ARGS}
+  --stage sor "${COMMON_ARGS[@]}"
 ```
 
 Build the final ACC/SOR comparison:

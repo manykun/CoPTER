@@ -52,6 +52,9 @@ if __name__ == "__main__":
     parser.add_argument("--epsilon_decay_steps", type=int, default=50000)
     parser.add_argument("--acc_hidden_dims", type=str, default="32,64,64,32", help="Comma-separated ACC hidden layer widths.")
     parser.add_argument("--reward_weights", type=str, default="0.50,0.30,0.20", help="Throughput,queue,ECN reward weights; must sum to 1.")
+    parser.add_argument("--reward_profile", choices=("weighted", "tail_safe"), default="weighted")
+    parser.add_argument("--reward_queue_lambda", type=float, default=5.0)
+    parser.add_argument("--reward_ecn_lambda", type=float, default=5.0)
     parser.add_argument("--state_save_interval", type=int, default=1)
     parser.add_argument("--seed", type=int, default=1, help="Random seed for Python, NumPy, and PyTorch.")
     parser.add_argument("--run_id", type=str, default=None, help="Optional run identifier stored with training state and metrics.")
@@ -82,6 +85,8 @@ if __name__ == "__main__":
     except ValueError as exc:
         raise SystemExit(f"--reward_weights is invalid: {exc}")
     set_random_seed(args.seed)
+    if args.reward_queue_lambda < 0 or args.reward_ecn_lambda < 0:
+        raise SystemExit("tail-safe reward lambdas must be non-negative")
 
     # Parse optional forced action (sanity-check for reward sensitivity).
     forced_action_idx = None
@@ -116,6 +121,9 @@ if __name__ == "__main__":
         reward_throughput_weight=reward_weights[0],
         reward_queue_weight=reward_weights[1],
         reward_ecn_weight=reward_weights[2],
+        reward_profile=args.reward_profile,
+        reward_queue_lambda=args.reward_queue_lambda,
+        reward_ecn_lambda=args.reward_ecn_lambda,
     )
     
     network_helper = NetworkHelper(ns3_socket=args.ns3_socket, nhp=network_helper_params)
@@ -178,7 +186,8 @@ if __name__ == "__main__":
     rollout_median_count = 0
     reward_component_keys = (
         "throughput", "queue", "ecn", "avg_tx_rate", "avg_queue",
-        "peak_queue", "avg_ecn", "peak_ecn",
+        "peak_queue", "avg_ecn", "peak_ecn", "combined_queue",
+        "combined_ecn", "queue_cost_sq", "ecn_cost_sq", "tail_safe_raw",
     )
     reward_component_sums = {key: 0.0 for key in reward_component_keys}
     reward_component_count = 0
@@ -371,6 +380,9 @@ if __name__ == "__main__":
                 "steps_this_epoch": current_step,
                 "eval_greedy": bool(args.eval_greedy),
                 "eval_tag": args.eval_tag,
+                "reward_profile": args.reward_profile,
+                "reward_queue_lambda": args.reward_queue_lambda,
+                "reward_ecn_lambda": args.reward_ecn_lambda,
                 # PRIMARY metric: top-30% congested-port reward. Robust to
                 # structurally-stuck ports (permanent bottlenecks) that would
                 # otherwise clamp a naive mean. Reflects policy's actual

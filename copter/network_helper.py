@@ -6,7 +6,12 @@ import numpy as np
 import json
 from collections import deque
 from loguru import logger
-from structures import NetworkHelperParameters, DCQCNParameters, PortObservation
+from structures import (
+    NetworkHelperParameters,
+    DCQCNParameters,
+    PortObservation,
+    calculate_tail_safe_reward,
+)
 
 
 class NetworkHelper:
@@ -220,7 +225,7 @@ class NetworkHelper:
         2. Meaningful reward gradient ONLY on congested/active ports.
         3. Values bounded in a stable numeric range.
 
-        Reward components (each in [0, 1]):
+        Legacy reward components (each in [0, 1]):
           - r_throughput: link utilization (tx_rate clamped to [0, 1]).
           - r_queue    : penalises queue build-up via exp(-k * combined_qlen).
                          Combined_qlen mixes 70% peak + 30% average so bursts
@@ -265,14 +270,34 @@ class NetworkHelper:
         else:
             r_ecn = float(np.exp(-7.0 * (avg_ecn - ideal_ecn)))
 
-        # Weighted sum. Throughput gets the highest weight: the force-action
-        # sanity study (2026-07) showed r_queue/r_ecn are nearly flat across
-        # good/bad parameter settings in our scenarios, while r_throughput is
-        # the component whose ordering matches the measured FCT ordering.
-        W_THROUGHPUT = self.nhp.reward_throughput_weight
-        W_QUEUE      = self.nhp.reward_queue_weight
-        W_ECN        = self.nhp.reward_ecn_weight
-        reward = W_THROUGHPUT * r_throughput + W_QUEUE * r_queue + W_ECN * r_ecn
+        # The original weighted profile remains available for reproducing
+        # earlier ACC experiments.  The continual-learning experiment uses a
+        # common tail-safe objective for both traffic tasks.  Squared queue
+        # and ECN costs are deliberately weak at low load and increasingly
+        # strong during bursts, allowing the same objective to prefer a
+        # permissive action in mixed traffic and a safer balanced action in
+        # incast traffic.
+        tail_safe = calculate_tail_safe_reward(
+            r_throughput,
+            avg_qlen,
+            peak_qlen,
+            avg_ecn,
+            peak_ecn,
+            self.nhp.reward_queue_lambda,
+            self.nhp.reward_ecn_lambda,
+        )
+        if self.nhp.reward_profile == "tail_safe":
+            reward = tail_safe["reward"]
+        elif self.nhp.reward_profile == "weighted":
+            reward = (
+                self.nhp.reward_throughput_weight * r_throughput
+                + self.nhp.reward_queue_weight * r_queue
+                + self.nhp.reward_ecn_weight * r_ecn
+            )
+        else:
+            raise ValueError(
+                f"unsupported reward profile: {self.nhp.reward_profile!r}"
+            )
 
         return {
             "reward": float(reward),
@@ -284,6 +309,11 @@ class NetworkHelper:
             "peak_queue": float(peak_qlen),
             "avg_ecn": float(avg_ecn),
             "peak_ecn": float(peak_ecn),
+            "combined_queue": float(tail_safe["combined_queue"]),
+            "combined_ecn": float(tail_safe["combined_ecn"]),
+            "queue_cost_sq": float(tail_safe["queue_cost_sq"]),
+            "ecn_cost_sq": float(tail_safe["ecn_cost_sq"]),
+            "tail_safe_raw": float(tail_safe["raw"]),
         }
 
     def get_port_current_reward(self, port_idx):

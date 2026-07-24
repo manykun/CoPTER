@@ -10,6 +10,38 @@ class NetworkHelperParameters:
     reward_throughput_weight: float = 0.50
     reward_queue_weight: float = 0.30
     reward_ecn_weight: float = 0.20
+    reward_profile: str = "weighted"
+    reward_queue_lambda: float = 5.0
+    reward_ecn_lambda: float = 5.0
+
+
+def calculate_tail_safe_reward(
+    throughput,
+    avg_queue,
+    peak_queue,
+    avg_ecn,
+    peak_ecn,
+    queue_lambda=5.0,
+    ecn_lambda=5.0,
+):
+    """Return the common nonlinear reward and its auditable components."""
+    combined_queue = 0.3 * avg_queue + 0.7 * peak_queue
+    combined_ecn = 0.3 * avg_ecn + 0.7 * peak_ecn
+    queue_cost_sq = combined_queue ** 2
+    ecn_cost_sq = combined_ecn ** 2
+    raw = (
+        throughput
+        - queue_lambda * queue_cost_sq
+        - ecn_lambda * ecn_cost_sq
+    )
+    return {
+        "reward": max(-1.0, min(1.0, raw)),
+        "raw": raw,
+        "combined_queue": combined_queue,
+        "combined_ecn": combined_ecn,
+        "queue_cost_sq": queue_cost_sq,
+        "ecn_cost_sq": ecn_cost_sq,
+    }
 
 
 @dataclass

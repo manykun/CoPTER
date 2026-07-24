@@ -21,3 +21,8 @@ and analysis tools, see [docs/code-study/README.md](docs/code-study/README.md).
 For the reproducible three-scenario ACC effectiveness workflow, fixed-action
 sanity checks, ablations, commands, and decision gates, see
 [docs/acc-validation-experiment.md](docs/acc-validation-experiment.md).
+
+For the Chinese research-progress report covering paper baselines, ACC
+effectiveness, the negative continual-learning result, reward diagnosis,
+tail-safe reward redesign, registered gates, and next objectives, see
+[docs/research-progress-acc-sor.md](docs/research-progress-acc-sor.md).

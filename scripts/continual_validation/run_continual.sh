@@ -5,8 +5,8 @@
 # The same model and replay memory continue across task phases.  Evaluation is
 # greedy and frozen.  ACC and SOR receive identical traffic, action space,
 # network width, phase-local epsilon schedule, switch buffer and optimizer-
-# update budget.  Task-specific rewards deliberately create a controlled
-# non-stationary objective; this is not claimed to be a natural traffic shift.
+# update budget and one common tail-safe reward.  Only the traffic task changes
+# at the A->B boundary, so forgetting cannot be attributed to reward switching.
 
 set -euo pipefail
 
@@ -21,8 +21,10 @@ PHASE_EPOCHS=100
 UPDATES_PER_TASK=600
 EPS_DECAY=2500
 ACC_HIDDEN_DIMS="32,64,64,32"
-TASK_A_REWARD_WEIGHTS="0.25,0.55,0.20"
-TASK_B_REWARD_WEIGHTS="0.70,0.15,0.15"
+REWARD_PROFILE="tail_safe"
+REWARD_QUEUE_LAMBDA="5.0"
+REWARD_ECN_LAMBDA="5.0"
+REWARD_WEIGHTS="0.50,0.30,0.20"
 KMIN_RANGE="20000,50000"
 KMAX_RANGE="50000,100000"
 BASELINE_STOP_TIME="4.00"
@@ -54,8 +56,9 @@ Important options:
   --buffer-kb N
   --eps-decay N
   --acc-hidden-dims CSV
-  --task-a-reward-weights CSV
-  --task-b-reward-weights CSV
+  --reward-profile NAME
+  --reward-queue-lambda X
+  --reward-ecn-lambda X
   --port N
   --smoke
   --resume
@@ -74,12 +77,9 @@ while [[ $# -gt 0 ]]; do
         --updates-per-task) UPDATES_PER_TASK="$2"; shift 2 ;;
         --eps-decay) EPS_DECAY="$2"; shift 2 ;;
         --acc-hidden-dims) ACC_HIDDEN_DIMS="$2"; shift 2 ;;
-        --task-a-reward-weights) TASK_A_REWARD_WEIGHTS="$2"; shift 2 ;;
-        --task-b-reward-weights) TASK_B_REWARD_WEIGHTS="$2"; shift 2 ;;
-        --reward-weights)
-            echo "--reward-weights was replaced by task-specific reward options." >&2
-            exit 2
-            ;;
+        --reward-profile) REWARD_PROFILE="$2"; shift 2 ;;
+        --reward-queue-lambda) REWARD_QUEUE_LAMBDA="$2"; shift 2 ;;
+        --reward-ecn-lambda) REWARD_ECN_LAMBDA="$2"; shift 2 ;;
         --kmin-range) KMIN_RANGE="$2"; shift 2 ;;
         --kmax-range) KMAX_RANGE="$2"; shift 2 ;;
         --baseline-stop-time) BASELINE_STOP_TIME="$2"; shift 2 ;;
@@ -111,24 +111,19 @@ esac
     echo "updates-per-task must be a positive integer" >&2
     exit 2
 }
-python - "${TASK_A_REWARD_WEIGHTS}" "${TASK_B_REWARD_WEIGHTS}" <<'PY'
-import math
+python - "${REWARD_PROFILE}" "${REWARD_QUEUE_LAMBDA}" "${REWARD_ECN_LAMBDA}" <<'PY'
 import sys
 
-for label, raw in zip(("task A", "task B"), sys.argv[1:]):
+profile = sys.argv[1]
+if profile not in ("weighted", "tail_safe"):
+    raise SystemExit(f"unsupported reward profile: {profile}")
+for label, raw in zip(("queue", "ECN"), sys.argv[2:]):
     try:
-        weights = [float(value) for value in raw.split(",")]
+        value = float(raw)
     except ValueError as exc:
-        raise SystemExit(f"{label} reward weights are invalid: {exc}")
-    if (
-        len(weights) != 3
-        or any(value < 0 for value in weights)
-        or not math.isclose(sum(weights), 1.0, abs_tol=1e-6)
-    ):
-        raise SystemExit(
-            f"{label} reward weights must be three non-negative values "
-            f"summing to one: {raw}"
-        )
+        raise SystemExit(f"{label} lambda is invalid: {exc}")
+    if value < 0:
+        raise SystemExit(f"{label} lambda must be non-negative")
 PY
 
 if [[ "${SMOKE}" -eq 1 ]]; then
@@ -146,8 +141,8 @@ mkdir -p "${RUN_DIR}"
 manifest_json() {
     python - "${RUN_ID}" "${TASK_A}" "${TASK_B}" "${SEED}" \
         "${BUFFER_KB}" "${PHASE_EPOCHS}" "${UPDATES_PER_TASK}" "${EPS_DECAY}" \
-        "${ACC_HIDDEN_DIMS}" "${TASK_A_REWARD_WEIGHTS}" \
-        "${TASK_B_REWARD_WEIGHTS}" "${KMIN_RANGE}" \
+        "${ACC_HIDDEN_DIMS}" "${REWARD_PROFILE}" \
+        "${REWARD_QUEUE_LAMBDA}" "${REWARD_ECN_LAMBDA}" "${KMIN_RANGE}" \
         "${KMAX_RANGE}" "${BASELINE_STOP_TIME}" "${MAX_FLOWS}" <<'PY'
 import json
 import sys
@@ -155,7 +150,7 @@ import sys
 keys = (
     "run_id", "task_a", "task_b", "seed", "buffer_kb", "phase_epochs",
     "updates_per_task", "epsilon_decay_steps", "hidden_dims",
-    "task_a_reward_weights", "task_b_reward_weights", "kmin_range",
+    "reward_profile", "reward_queue_lambda", "reward_ecn_lambda", "kmin_range",
     "kmax_range", "simulator_stop_time", "max_flows",
 )
 values = sys.argv[1:]
@@ -165,6 +160,8 @@ for key in (
     "epsilon_decay_steps", "max_flows",
 ):
     record[key] = int(record[key])
+for key in ("reward_queue_lambda", "reward_ecn_lambda"):
+    record[key] = float(record[key])
 record["methods"] = ["acc", "sor"]
 record["curriculum"] = [record["task_a"], record["task_b"]]
 record["evaluation"] = {
@@ -173,7 +170,7 @@ record["evaluation"] = {
     "old_task_comparison": ["after_a", "after_b"],
     "new_task_acquisition": ["after_a", "after_b"],
 }
-record["experiment_type"] = "controlled_nonstationary_objective"
+record["experiment_type"] = "traffic_shift_common_objective"
 record["epsilon_schedule"] = "reset_per_task"
 print(json.dumps(record, indent=2, sort_keys=True))
 PY
@@ -300,24 +297,10 @@ copy_eval_outputs() {
     [[ -z "${log_candidate}" ]] || cp "${log_candidate}" "${destination}/agent.log"
 }
 
-reward_for_task() {
-    local task="$1"
-    if [[ "${task}" == "${TASK_A}" ]]; then
-        echo "${TASK_A_REWARD_WEIGHTS}"
-    elif [[ "${task}" == "${TASK_B}" ]]; then
-        echo "${TASK_B_REWARD_WEIGHTS}"
-    else
-        echo "Unknown task: ${task}" >&2
-        return 1
-    fi
-}
-
 evaluate() {
     local method="$1" phase="$2" task="$3" exp="$4" model_dir="$5" port="$6"
     local name="${task}_seed${SEED}"
     local base="${OUTPUT_DIR}/${name}"
-    local reward_weights
-    reward_weights="$(reward_for_task "${task}")"
     rm -f "${base}".*
     echo "[${method}] frozen evaluation phase=${phase} task=${task}"
     bash "${ROOT}/run_training.sh" \
@@ -336,7 +319,10 @@ evaluate() {
         --eps-end 0.05 \
         --eps-decay "${EPS_DECAY}" \
         --acc-hidden-dims "${ACC_HIDDEN_DIMS}" \
-        --reward-weights "${reward_weights}" \
+        --reward-weights "${REWARD_WEIGHTS}" \
+        --reward-profile "${REWARD_PROFILE}" \
+        --reward-queue-lambda "${REWARD_QUEUE_LAMBDA}" \
+        --reward-ecn-lambda "${REWARD_ECN_LAMBDA}" \
         --tb-enable false \
         --run-id "${RUN_ID}" \
         --phase "${phase}"
@@ -370,10 +356,9 @@ screen() {
     local screen_dir="${RUN_DIR}/screen"
     local model_dir="${screen_dir}/models"
     local exp="continual_${RUN_ID}_screen_s${SEED}"
-    local task label action name base reward_weights
+    local task label action name base
     mkdir -p "${model_dir}"
     for task in "${TASK_A}" "${TASK_B}"; do
-        reward_weights="$(reward_for_task "${task}")"
         for specification in \
             "aggressive:0,0,9" \
             "balanced:2,1,4" \
@@ -384,7 +369,7 @@ screen() {
             name="${task}_seed${SEED}"
             base="${OUTPUT_DIR}/${name}"
             rm -f "${base}".*
-            echo "[screen] task=${task} action=${label}(${action}) reward=${reward_weights}"
+            echo "[screen] task=${task} action=${label}(${action}) reward=${REWARD_PROFILE}"
             bash "${ROOT}/run_training.sh" \
                 --one-shot --eval-greedy \
                 --force-action "${action}" \
@@ -393,14 +378,17 @@ screen() {
                 --exp "${exp}" --mode ACC --port "${PORT}" --seed "${SEED}" \
                 --buffer "${BUFFER_KB}" --model-dir "${model_dir}" --episodes 1 \
                 --acc-hidden-dims "${ACC_HIDDEN_DIMS}" \
-                --reward-weights "${reward_weights}" \
+                --reward-weights "${REWARD_WEIGHTS}" \
+                --reward-profile "${REWARD_PROFILE}" \
+                --reward-queue-lambda "${REWARD_QUEUE_LAMBDA}" \
+                --reward-ecn-lambda "${REWARD_ECN_LAMBDA}" \
                 --tb-enable false --run-id "${RUN_ID}" --phase screen
             copy_screen_outputs "${task}" "${label}" "${exp}" "${model_dir}"
         done
     done
     python "${ROOT}/scripts/continual_validation/analyze_conflict.py" \
         --run-dir "${RUN_DIR}" \
-        --min-reward-spread 0.05 \
+        --min-reward-spread 0.02 \
         --min-p95-spread 0.05 \
         --completion-tolerance 0.01 \
         --gate
@@ -469,7 +457,10 @@ train_method() {
             --eps-end 0.05 \
             --eps-decay "${EPS_DECAY}" \
             --acc-hidden-dims "${ACC_HIDDEN_DIMS}" \
-            --reward-weights "${TASK_A_REWARD_WEIGHTS}" \
+            --reward-weights "${REWARD_WEIGHTS}" \
+            --reward-profile "${REWARD_PROFILE}" \
+            --reward-queue-lambda "${REWARD_QUEUE_LAMBDA}" \
+            --reward-ecn-lambda "${REWARD_ECN_LAMBDA}" \
             --tb-enable false \
             --run-id "${RUN_ID}" \
             --phase train_a \
@@ -506,7 +497,10 @@ train_method() {
             --eps-end 0.05 \
             --eps-decay "${EPS_DECAY}" \
             --acc-hidden-dims "${ACC_HIDDEN_DIMS}" \
-            --reward-weights "${TASK_B_REWARD_WEIGHTS}" \
+            --reward-weights "${REWARD_WEIGHTS}" \
+            --reward-profile "${REWARD_PROFILE}" \
+            --reward-queue-lambda "${REWARD_QUEUE_LAMBDA}" \
+            --reward-ecn-lambda "${REWARD_ECN_LAMBDA}" \
             --tb-enable false \
             --run-id "${RUN_ID}" \
             --phase train_b \

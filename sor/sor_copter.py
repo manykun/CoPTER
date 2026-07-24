@@ -61,6 +61,9 @@ def build_parser():
         default="0.50,0.30,0.20",
         help="Throughput,queue,ECN weights; must sum to 1.",
     )
+    parser.add_argument("--reward_profile", choices=("weighted", "tail_safe"), default="weighted")
+    parser.add_argument("--reward_queue_lambda", type=float, default=5.0)
+    parser.add_argument("--reward_ecn_lambda", type=float, default=5.0)
     parser.add_argument("--state_save_interval", type=int, default=1)
     parser.add_argument("--seed", type=int, default=1)
     parser.add_argument("--run_id", type=str, default=None)
@@ -111,6 +114,8 @@ def main():
     except ValueError as exc:
         raise SystemExit(f"--reward_weights is invalid: {exc}")
     set_random_seed(args.seed)
+    if args.reward_queue_lambda < 0 or args.reward_ecn_lambda < 0:
+        raise SystemExit("tail-safe reward lambdas must be non-negative")
     logger.info(f"Parsed arguments: {args}")
     logger.info(f"Random seed fixed to {args.seed}")
     logger.add(args.exp_name + "_log/sor_copter_{time}.log", level="INFO", rotation="5 MB")
@@ -123,6 +128,9 @@ def main():
         reward_throughput_weight=reward_weights[0],
         reward_queue_weight=reward_weights[1],
         reward_ecn_weight=reward_weights[2],
+        reward_profile=args.reward_profile,
+        reward_queue_lambda=args.reward_queue_lambda,
+        reward_ecn_lambda=args.reward_ecn_lambda,
     )
     network_helper = NetworkHelper(ns3_socket=args.ns3_socket, nhp=network_helper_params)
     agent_helper_params = AgentHelperParameters(
@@ -192,7 +200,8 @@ def main():
     congested_step_count = 0
     reward_component_keys = (
         "throughput", "queue", "ecn", "avg_tx_rate", "avg_queue",
-        "peak_queue", "avg_ecn", "peak_ecn",
+        "peak_queue", "avg_ecn", "peak_ecn", "combined_queue",
+        "combined_ecn", "queue_cost_sq", "ecn_cost_sq", "tail_safe_raw",
     )
     reward_component_sums = {key: 0.0 for key in reward_component_keys}
     reward_component_count = 0
@@ -318,6 +327,9 @@ def main():
                 "steps_this_epoch": current_step,
                 "eval_greedy": bool(args.eval_greedy),
                 "eval_tag": args.eval_tag,
+                "reward_profile": args.reward_profile,
+                "reward_queue_lambda": args.reward_queue_lambda,
+                "reward_ecn_lambda": args.reward_ecn_lambda,
                 "rollout_mean_reward": (
                     rollout_top30_sum / rollout_top30_count
                     if rollout_top30_count > 0 else None
