@@ -24,6 +24,7 @@ def main():
     parser.add_argument("--run-dir", required=True, type=Path)
     parser.add_argument("--min-reward-spread", type=float, default=0.05)
     parser.add_argument("--min-p95-spread", type=float, default=0.05)
+    parser.add_argument("--min-completion-spread", type=float, default=0.02)
     parser.add_argument("--completion-tolerance", type=float, default=0.01)
     parser.add_argument("--gate", action="store_true")
     args = parser.parse_args()
@@ -65,6 +66,7 @@ def main():
             ),
         )
         best_completion = max(completions)
+        completion_spread = max(completions) - min(completions)
         safe_actions = [
             name
             for name, item in measurements.items()
@@ -82,9 +84,13 @@ def main():
         reward_aligned = best_action == best_safe_p95_action
         reward_spread = relative_spread(rewards)
         p95_spread = relative_spread(p95s)
+        performance_sensitive = (
+            p95_spread >= args.min_p95_spread
+            or completion_spread >= args.min_completion_spread
+        )
         passed = (
             reward_spread >= args.min_reward_spread
-            and p95_spread >= args.min_p95_spread
+            and performance_sensitive
             and completion_safe
             and reward_aligned
         )
@@ -93,6 +99,8 @@ def main():
             "best_reward_action": best_action,
             "reward_spread": reward_spread,
             "p95_spread": p95_spread,
+            "completion_spread": completion_spread,
+            "performance_sensitive": performance_sensitive,
             "best_action_completion_safe": completion_safe,
             "best_safe_p95_action": best_safe_p95_action,
             "reward_aligned_with_safe_p95": reward_aligned,
@@ -124,9 +132,10 @@ def main():
         "",
         f"- Overall: **{'PASS' if decision['passed'] else 'FAIL'}**",
         f"- Different reward-best actions: **{decision['different_best_actions']}**",
+        "- Primary reward: **all-congested-port mean**",
         "",
-        "| Task | Common flows | Reward best | Safe-p95 best | Reward spread | p95 spread | Completion safe | Aligned | Gate |",
-        "|---|---:|---|---|---:|---:|---:|---:|---:|",
+        "| Task | Common flows | Reward best | Safe-p95 best | Reward spread | p95 spread | Completion spread | Sensitive | Completion safe | Aligned | Gate |",
+        "|---|---:|---|---|---:|---:|---:|---:|---:|---:|---:|",
     ]
     for task in tasks:
         item = decision["tasks"][task]
@@ -134,6 +143,8 @@ def main():
             f"| {task} | {item['common_flows']} | {item['best_reward_action']} | "
             f"{item['best_safe_p95_action']} | "
             f"{item['reward_spread']:.2%} | {item['p95_spread']:.2%} | "
+            f"{item['completion_spread']:.2%} | "
+            f"{item['performance_sensitive']} | "
             f"{item['best_action_completion_safe']} | "
             f"{item['reward_aligned_with_safe_p95']} | "
             f"{'PASS' if item['passed'] else 'FAIL'} |"

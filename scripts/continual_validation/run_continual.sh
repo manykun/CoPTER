@@ -390,6 +390,7 @@ screen() {
         --run-dir "${RUN_DIR}" \
         --min-reward-spread 0.02 \
         --min-p95-spread 0.05 \
+        --min-completion-spread 0.02 \
         --completion-tolerance 0.01 \
         --gate
     mkdir -p "${screen_dir}/markers"

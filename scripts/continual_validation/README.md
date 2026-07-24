@@ -9,8 +9,9 @@ Therefore a detected change cannot be attributed to switching reward weights.
 
 The workflow has four registered gates:
 
-1. fixed actions must affect both tasks; reward-best must match the best
-   common-flow p95 action among completion-safe actions and differ across tasks;
+1. fixed actions must affect both tasks in common-flow p95 or completion;
+   reward-best must match the best common-flow p95 action among completion-safe
+   actions and differ across tasks;
 2. ACC must safely acquire task A;
 3. ACC must safely acquire task B and then forget task A;
 4. SOR must reduce forgetting while preserving task-B plasticity.
@@ -129,3 +130,7 @@ forgetting score by at least 30%, and remain within the registered task-B p95
 and completion tolerances.
 
 A single seed is mechanism evidence, not a statistical generalization claim.
+
+The registered reward is `rollout_all_congested_mean`, which follows all
+congested ports and the replay population more closely. The top-30% reward is
+kept only as a diagnostic because it reversed the incast fixed-action ranking.

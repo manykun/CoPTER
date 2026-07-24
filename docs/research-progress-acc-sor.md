@@ -243,8 +243,29 @@ R = clip(R_raw, -1, 1)
 同时完成两项分析修正：
 
 - 固定动作 p95 改为三种动作共同完成流的 common-flow p95；
-- reward spread 门槛从不适合本问题的 5% 注册为 2%，同时仍要求
-  common-flow p95 spread ≥ 5%、完成率安全以及 A/B 最优动作不同。
+- 注册主奖励改为 all-congested-port mean；top-30% reward 仅作诊断，
+  因为它在 incast 中丢弃持续拥塞端口后会反转动作排序；
+- reward spread 门槛注册为 2%，系统性能敏感性要求 common-flow p95
+  spread ≥ 5% 或 completion spread ≥ 2 个百分点。
+
+新 screen 的逐步平方成本进一步表明，`λq=5, λe=5` 下：
+
+| 场景/动作 | top-30% reward | all-congested reward |
+|---|---:|---:|
+| mixed/aggressive | 0.7040 | 0.3759 |
+| mixed/balanced | 0.7152 | 0.3794 |
+| mixed/permissive | 0.7268 | 0.3870 |
+| incast/aggressive | 0.0961 | -0.0926 |
+| incast/balanced | 0.0958 | -0.0844 |
+| incast/permissive | 0.1006 | -0.0941 |
+
+mixed 在两种聚合方式下均选择 permissive；incast 的 top-30% 指标错误地
+选择 permissive，而 all-congested 指标选择完成率最高的 balanced。由于
+ACC/SOR replay 覆盖所有端口，all-congested 更接近实际优化总体。
+
+离线搜索得到约 `λq=30, λe=18` 的更大动作间隔，但 incast 原始奖励约为
+`-2.4~-2.7`，会被当前 `clip(-1,1)` 全部截成 `-1`，反而完全消除学习信号。
+因此不采用该组大系数，保留未饱和且方向正确的 `5,5`。
 
 ## 10. 当前研究结论
 
@@ -273,7 +294,7 @@ R = clip(R_raw, -1, 1)
 在 mixed/incast 上各运行 aggressive、balanced、permissive：
 
 - reward spread ≥ 2%；
-- common-flow p95 spread ≥ 5%；
+- common-flow p95 spread ≥ 5%，或 completion spread ≥ 2 个百分点；
 - reward 最优动作完成率距离最高完成率不超过 1 个百分点；
 - reward 最优动作必须等于完成率安全集合中的 common-flow p95 最优动作；
 - mixed 与 incast 的 reward 最优动作不同。

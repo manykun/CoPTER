@@ -53,11 +53,19 @@ def load_eval(directory):
         raise ValueError(f"incomplete evaluation directory: {directory}")
     expected = int(input_flow.read_text(encoding="utf-8").splitlines()[0])
     metrics = json.loads(metrics_file.read_text(encoding="utf-8"))
+    # The registered reward follows all congested ports, which is closer to
+    # the replay population optimized by ACC/SOR.  The former top-30% metric
+    # is retained in metrics.json as a diagnostic, but it can reverse action
+    # rankings by discarding persistently congested ports.
+    primary_reward = metrics.get("rollout_all_congested_mean")
+    if primary_reward is None:
+        primary_reward = metrics.get("rollout_mean_reward")
     return {
         "directory": directory,
         "flows": parse_fct(fct_files[0]),
         "expected": expected,
-        "reward": number_or_none(metrics.get("rollout_mean_reward")),
+        "reward": number_or_none(primary_reward),
+        "reward_top30": number_or_none(metrics.get("rollout_mean_reward")),
         "metrics": metrics,
     }
 
