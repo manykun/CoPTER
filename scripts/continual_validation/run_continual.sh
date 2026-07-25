@@ -32,6 +32,7 @@ PORT=5756
 MAX_FLOWS=0
 SMOKE=0
 RESUME=0
+REPORT_ONLY=0
 
 usage() {
     cat <<'EOF'
@@ -62,6 +63,7 @@ Important options:
   --port N
   --smoke
   --resume
+  --report-only          Record all measurements without PASS/FAIL gating
 EOF
 }
 
@@ -86,6 +88,7 @@ while [[ $# -gt 0 ]]; do
         --port) PORT="$2"; shift 2 ;;
         --smoke) SMOKE=1; shift ;;
         --resume) RESUME=1; shift ;;
+        --report-only) REPORT_ONLY=1; shift ;;
         -h|--help) usage; exit 0 ;;
         *) echo "Unknown argument: $1" >&2; usage >&2; exit 2 ;;
     esac
@@ -386,15 +389,22 @@ screen() {
             copy_screen_outputs "${task}" "${label}" "${exp}" "${model_dir}"
         done
     done
+    local screen_gate_args=()
+    if [[ "${REPORT_ONLY}" -eq 1 ]]; then
+        screen_gate_args+=(--report-only)
+    else
+        screen_gate_args+=(--gate)
+    fi
     python "${ROOT}/scripts/continual_validation/analyze_conflict.py" \
         --run-dir "${RUN_DIR}" \
         --min-reward-spread 0.02 \
         --min-p95-spread 0.05 \
         --min-completion-spread 0.02 \
         --completion-tolerance 0.01 \
-        --gate
+        "${screen_gate_args[@]}"
     mkdir -p "${screen_dir}/markers"
-    touch "${screen_dir}/markers/pass"
+    touch "${screen_dir}/markers/complete"
+    [[ "${REPORT_ONLY}" -eq 1 ]] || touch "${screen_dir}/markers/pass"
 }
 
 snapshot_models() {
@@ -417,13 +427,28 @@ train_method() {
 
     check_manifest
     validate_configs
-    [[ -f "${RUN_DIR}/screen/markers/pass" ]] || {
-        echo "Conflict screen has not passed. Run --stage screen first." >&2
-        return 1
-    }
-    if [[ "${method}" == "sor" && ! -f "${RUN_DIR}/acc/markers/continual_gate_pass" ]]; then
-        echo "ACC has not demonstrated acquisition plus forgetting; SOR is premature." >&2
-        return 1
+    if [[ "${REPORT_ONLY}" -eq 1 ]]; then
+        [[ -f "${RUN_DIR}/screen/markers/complete" ||
+           -f "${RUN_DIR}/screen/markers/pass" ]] || {
+            echo "Conflict screen is incomplete. Run --stage screen first." >&2
+            return 1
+        }
+    else
+        [[ -f "${RUN_DIR}/screen/markers/pass" ]] || {
+            echo "Conflict screen has not passed. Run --stage screen first." >&2
+            return 1
+        }
+    fi
+    if [[ "${method}" == "sor" ]]; then
+        if [[ "${REPORT_ONLY}" -eq 1 ]]; then
+            [[ -f "${RUN_DIR}/acc/markers/complete" ]] || {
+                echo "ACC measurements are incomplete. Finish --stage acc first." >&2
+                return 1
+            }
+        elif [[ ! -f "${RUN_DIR}/acc/markers/continual_gate_pass" ]]; then
+            echo "ACC has not demonstrated acquisition plus forgetting; SOR is premature." >&2
+            return 1
+        fi
     fi
     mkdir -p "${model_dir}" "${method_dir}/checkpoints" "${method_dir}/markers"
     if [[ -f "${model_dir}/${exp}_train_state.json" &&
@@ -475,10 +500,16 @@ train_method() {
         evaluate "${method}" after_a "${TASK_B}" "${exp}" "${model_dir}" "${method_port}"
         touch "${method_dir}/markers/eval_after_a"
     fi
+    local acquisition_mode_args=()
+    if [[ "${REPORT_ONLY}" -eq 1 ]]; then
+        acquisition_mode_args+=(--report-only)
+    else
+        acquisition_mode_args+=(--gate)
+    fi
     python "${ROOT}/scripts/continual_validation/check_acquisition.py" \
         --run-dir "${RUN_DIR}" --method "${method}" --task a \
         --min-reward-gain 0.02 --min-p95-gain 0.05 \
-        --completion-tolerance 0.01 --gate
+        --completion-tolerance 0.01 "${acquisition_mode_args[@]}"
 
     if [[ ! -f "${method_dir}/markers/train_b" ]]; then
         local target_epoch=$((PHASE_EPOCHS * 2))
@@ -518,13 +549,21 @@ train_method() {
     python "${ROOT}/scripts/continual_validation/check_acquisition.py" \
         --run-dir "${RUN_DIR}" --method "${method}" --task b \
         --min-reward-gain 0.02 --min-p95-gain 0.05 \
-        --completion-tolerance 0.01 --gate
+        --completion-tolerance 0.01 "${acquisition_mode_args[@]}"
     if [[ "${method}" == "acc" ]]; then
+        local forgetting_mode_args=()
+        if [[ "${REPORT_ONLY}" -eq 1 ]]; then
+            forgetting_mode_args+=(--report-only)
+        else
+            forgetting_mode_args+=(--gate-forgetting)
+        fi
         python "${ROOT}/scripts/continual_validation/analyze_forgetting.py" \
             --run-dir "${RUN_DIR}" --method acc \
             --min-reward-drop 0.10 --min-p95-worsening 0.10 \
-            --completion-tolerance 0.01 --gate-forgetting
-        touch "${method_dir}/markers/continual_gate_pass"
+            --completion-tolerance 0.01 "${forgetting_mode_args[@]}"
+        touch "${method_dir}/markers/analysis_complete"
+        [[ "${REPORT_ONLY}" -eq 1 ]] ||
+            touch "${method_dir}/markers/continual_gate_pass"
     fi
     touch "${method_dir}/markers/complete"
     echo "${method} A->B curriculum complete: ${method_dir}"
@@ -532,6 +571,12 @@ train_method() {
 
 analyze() {
     check_manifest
+    local analysis_mode_args=()
+    if [[ "${REPORT_ONLY}" -eq 1 ]]; then
+        analysis_mode_args+=(--report-only)
+    else
+        analysis_mode_args+=(--gate)
+    fi
     python "${ROOT}/scripts/continual_validation/analyze_forgetting.py" \
         --run-dir "${RUN_DIR}" \
         --compare acc,sor \
@@ -540,7 +585,7 @@ analyze() {
         --min-forgetting-reduction 0.30 \
         --new-task-p95-tolerance 0.05 \
         --completion-tolerance 0.01 \
-        --gate
+        "${analysis_mode_args[@]}"
 }
 
 [[ "${STAGE}" == "prepare" || "${STAGE}" == "all" ]] && prepare

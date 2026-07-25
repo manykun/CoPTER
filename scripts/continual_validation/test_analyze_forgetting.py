@@ -1,4 +1,5 @@
 import importlib.util
+import json
 import sys
 import tempfile
 from pathlib import Path
@@ -83,6 +84,25 @@ def test_detects_acc_forgetting_and_sor_retention():
         assert (root / "CONTINUAL_REPORT.md").exists()
         decision = (root / "continual_analysis.json").read_text(encoding="utf-8")
         assert '"selected_pass": true' in decision
+
+        try:
+            sys.argv = [
+                str(MODULE_PATH),
+                "--run-dir", str(root),
+                "--compare", "acc,sor",
+                "--report-only",
+            ]
+            MODULE.main()
+        finally:
+            sys.argv = original_argv
+        descriptive = json.loads(
+            (root / "continual_analysis.json").read_text(encoding="utf-8")
+        )
+        assert descriptive["evaluation_mode"] == "descriptive"
+        assert descriptive["selected_pass"] is None
+        assert descriptive["methods"]["acc"]["forgetting"]["detected"] is None
+        report = (root / "CONTINUAL_REPORT.md").read_text(encoding="utf-8")
+        assert "no PASS/FAIL gate is applied" in report
 
 
 if __name__ == "__main__":

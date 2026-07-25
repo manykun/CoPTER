@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Gate a cheap fixed-action screen before continual-learning training."""
+"""Analyze a cheap fixed-action screen, optionally applying a gate."""
 
 import argparse
 import csv
@@ -27,7 +27,14 @@ def main():
     parser.add_argument("--min-completion-spread", type=float, default=0.02)
     parser.add_argument("--completion-tolerance", type=float, default=0.01)
     parser.add_argument("--gate", action="store_true")
+    parser.add_argument(
+        "--report-only",
+        action="store_true",
+        help="Report measurements without assigning or enforcing PASS/FAIL",
+    )
     args = parser.parse_args()
+    if args.gate and args.report_only:
+        parser.error("--gate and --report-only are mutually exclusive")
 
     manifest = json.loads(
         (args.run_dir / "manifest.json").read_text(encoding="utf-8")
@@ -95,7 +102,7 @@ def main():
             and reward_aligned
         )
         decision["tasks"][task] = {
-            "passed": passed,
+            "passed": None if args.report_only else passed,
             "best_reward_action": best_action,
             "reward_spread": reward_spread,
             "p95_spread": p95_spread,
@@ -113,8 +120,15 @@ def main():
     ]
     decision["different_best_actions"] = len(set(best_actions)) == len(tasks)
     decision["passed"] = (
-        all(decision["tasks"][task]["passed"] for task in tasks)
-        and decision["different_best_actions"]
+        None
+        if args.report_only
+        else (
+            all(decision["tasks"][task]["passed"] for task in tasks)
+            and decision["different_best_actions"]
+        )
+    )
+    decision["evaluation_mode"] = (
+        "descriptive" if args.report_only else "gated"
     )
 
     screen_dir = args.run_dir / "screen"
@@ -130,25 +144,47 @@ def main():
     lines = [
         "# Controlled conflict screen",
         "",
-        f"- Overall: **{'PASS' if decision['passed'] else 'FAIL'}**",
+        (
+            "- Evaluation mode: **descriptive measurements only; no PASS/FAIL "
+            "gate is applied**"
+            if args.report_only
+            else f"- Overall: **{'PASS' if decision['passed'] else 'FAIL'}**"
+        ),
         f"- Different reward-best actions: **{decision['different_best_actions']}**",
         "- Primary reward: **all-congested-port mean**",
         "",
-        "| Task | Common flows | Reward best | Safe-p95 best | Reward spread | p95 spread | Completion spread | Sensitive | Completion safe | Aligned | Gate |",
-        "|---|---:|---|---|---:|---:|---:|---:|---:|---:|---:|",
+        (
+            "| Task | Common flows | Reward best | Safe-p95 best | Reward spread | "
+            "p95 spread | Completion spread |"
+            if args.report_only
+            else "| Task | Common flows | Reward best | Safe-p95 best | Reward "
+            "spread | p95 spread | Completion spread | Sensitive | Completion "
+            "safe | Aligned | Gate |"
+        ),
+        (
+            "|---|---:|---|---|---:|---:|---:|"
+            if args.report_only
+            else "|---|---:|---|---|---:|---:|---:|---:|---:|---:|---:|"
+        ),
     ]
     for task in tasks:
         item = decision["tasks"][task]
-        lines.append(
+        prefix = (
             f"| {task} | {item['common_flows']} | {item['best_reward_action']} | "
             f"{item['best_safe_p95_action']} | "
             f"{item['reward_spread']:.2%} | {item['p95_spread']:.2%} | "
-            f"{item['completion_spread']:.2%} | "
-            f"{item['performance_sensitive']} | "
-            f"{item['best_action_completion_safe']} | "
-            f"{item['reward_aligned_with_safe_p95']} | "
-            f"{'PASS' if item['passed'] else 'FAIL'} |"
+            f"{item['completion_spread']:.2%}"
         )
+        if args.report_only:
+            lines.append(prefix + " |")
+        else:
+            lines.append(
+                prefix
+                + f" | {item['performance_sensitive']} | "
+                f"{item['best_action_completion_safe']} | "
+                f"{item['reward_aligned_with_safe_p95']} | "
+                f"{'PASS' if item['passed'] else 'FAIL'} |"
+            )
     lines.extend(
         [
             "",
@@ -159,7 +195,10 @@ def main():
     )
     (screen_dir / "REPORT.md").write_text("\n".join(lines), encoding="utf-8")
     print(f"Conflict-screen analysis written to {screen_dir / 'REPORT.md'}")
-    print(f"Selected gate: {'PASS' if decision['passed'] else 'FAIL'}")
+    if args.report_only:
+        print("Evaluation mode: descriptive results (no PASS/FAIL gate)")
+    else:
+        print(f"Selected gate: {'PASS' if decision['passed'] else 'FAIL'}")
     if args.gate and not decision["passed"]:
         raise SystemExit(1)
 

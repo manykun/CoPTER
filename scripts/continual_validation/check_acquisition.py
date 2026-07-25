@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fail fast when a task was not acquired safely."""
+"""Measure task acquisition, optionally applying a fail-fast gate."""
 
 import argparse
 import json
@@ -17,7 +17,14 @@ def main():
     parser.add_argument("--min-p95-gain", type=float, default=0.05)
     parser.add_argument("--completion-tolerance", type=float, default=0.01)
     parser.add_argument("--gate", action="store_true")
+    parser.add_argument(
+        "--report-only",
+        action="store_true",
+        help="Write measurements without assigning or enforcing PASS/FAIL",
+    )
     args = parser.parse_args()
+    if args.gate and args.report_only:
+        parser.error("--gate and --report-only are mutually exclusive")
 
     manifest = json.loads(
         (args.run_dir / "manifest.json").read_text(encoding="utf-8")
@@ -32,13 +39,18 @@ def main():
         before = load_eval(base / "after_a" / task_name)
         after = load_eval(base / "after_b" / task_name)
     result = comparison(before, after)
-    result["passed"] = acquisition_passed(
-        result,
-        args.min_reward_gain,
-        args.min_p95_gain,
-        args.completion_tolerance,
+    result["passed"] = (
+        None
+        if args.report_only
+        else acquisition_passed(
+            result,
+            args.min_reward_gain,
+            args.min_p95_gain,
+            args.completion_tolerance,
+        )
     )
     output = {
+        "evaluation_mode": "descriptive" if args.report_only else "gated",
         "method": args.method,
         "task_phase": args.task,
         "task_name": task_name,
@@ -51,10 +63,12 @@ def main():
     }
     path = args.run_dir / args.method / f"acquisition_{args.task}.json"
     path.write_text(json.dumps(output, indent=2), encoding="utf-8")
-    print(
-        f"{args.method.upper()} task {args.task.upper()} acquisition: "
-        f"{'PASS' if result['passed'] else 'FAIL'}"
+    status = (
+        "RECORDED (descriptive, no gate)"
+        if args.report_only
+        else ("PASS" if result["passed"] else "FAIL")
     )
+    print(f"{args.method.upper()} task {args.task.upper()} acquisition: {status}")
     print(
         f"reward_change={result['reward_change']:.4f}, "
         f"p95_worsening={result['p95_fct_worsening']:.4f}, "

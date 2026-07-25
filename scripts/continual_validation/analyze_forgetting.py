@@ -160,6 +160,7 @@ def acquisition_passed(result, reward_gain, p95_gain, completion_tolerance):
 
 
 def method_analysis(root, method, task_a, task_b, args):
+    report_only = getattr(args, "report_only", False)
     base = root / "eval" / method
     initial_a = load_eval(base / "initial" / task_a)
     after_a_a = load_eval(base / "after_a" / task_a)
@@ -183,25 +184,33 @@ def method_analysis(root, method, task_a, task_b, args):
         "method": method,
         "task_a_acquisition": {
             **acquire_a,
-            "passed": acquisition_passed(
-                acquire_a,
-                args.min_acquisition_reward_gain,
-                args.min_acquisition_p95_gain,
-                args.completion_tolerance,
+            "passed": (
+                None
+                if report_only
+                else acquisition_passed(
+                    acquire_a,
+                    args.min_acquisition_reward_gain,
+                    args.min_acquisition_p95_gain,
+                    args.completion_tolerance,
+                )
             ),
         },
         "task_b_acquisition": {
             **acquire_b,
-            "passed": acquisition_passed(
-                acquire_b,
-                args.min_acquisition_reward_gain,
-                args.min_acquisition_p95_gain,
-                args.completion_tolerance,
+            "passed": (
+                None
+                if report_only
+                else acquisition_passed(
+                    acquire_b,
+                    args.min_acquisition_reward_gain,
+                    args.min_acquisition_p95_gain,
+                    args.completion_tolerance,
+                )
             ),
         },
         "forgetting": {
             **forgetting,
-            "detected": forgetting_detected,
+            "detected": None if report_only else forgetting_detected,
             "score": score,
         },
         "_after_b_b": after_b_b,
@@ -246,6 +255,7 @@ def flatten_rows(analyses):
 def write_report(path, manifest, analyses, comparison_result, decision, args):
     task_a = manifest["task_a"]
     task_b = manifest["task_b"]
+    decision_heading = "Results" if args.report_only else "Decision"
     lines = [
         "# ACC/SOR continual-learning report",
         "",
@@ -257,12 +267,17 @@ def write_report(path, manifest, analyses, comparison_result, decision, args):
         "optimizer updates per task**",
         "- Evaluation: **greedy, frozen, identical task flow files**",
         "",
-        "## Decision",
+        f"## {decision_heading}",
         "",
     ]
     acc = analyses.get("acc")
     sor = analyses.get("sor")
-    if acc:
+    if args.report_only:
+        lines.append(
+            "- Evaluation mode: **descriptive measurements only; no PASS/FAIL "
+            "gate is applied**"
+        )
+    elif acc:
         lines.append(
             "- ACC catastrophic forgetting: "
             f"**{'PASS' if acc['forgetting']['detected'] else 'FAIL'}**"
@@ -271,12 +286,12 @@ def write_report(path, manifest, analyses, comparison_result, decision, args):
             "- ACC learned both tasks: "
             f"**{'PASS' if acc['task_a_acquisition']['passed'] and acc['task_b_acquisition']['passed'] else 'FAIL'}**"
         )
-    if sor:
+    if sor and not args.report_only:
         lines.append(
             "- SOR learned both tasks: "
             f"**{'PASS' if sor['task_a_acquisition']['passed'] and sor['task_b_acquisition']['passed'] else 'FAIL'}**"
         )
-    if comparison_result:
+    if comparison_result and not args.report_only:
         lines.append(
             "- SOR retention/plasticity gate: "
             f"**{'PASS' if comparison_result['passed'] else 'FAIL'}**"
@@ -284,11 +299,18 @@ def write_report(path, manifest, analyses, comparison_result, decision, args):
     lines.extend(
         [
             "",
-            "Catastrophic forgetting is registered only when old-task reward drops "
-            f"by at least {args.min_reward_drop:.0%} and common-flow p95 FCT worsens "
-            f"by at least {args.min_p95_worsening:.0%}. A method must also demonstrate "
-            "task acquisition without exceeding the completion-loss tolerance; "
-            "retaining an untrained or unsafe policy is not counted as success.",
+            (
+                "The tables below report the observed reward, common-flow p95 FCT, "
+                "completion, and ACC/SOR changes without converting them to a "
+                "PASS/FAIL conclusion."
+                if args.report_only
+                else "Catastrophic forgetting is registered only when old-task "
+                f"reward drops by at least {args.min_reward_drop:.0%} and common-flow "
+                f"p95 FCT worsens by at least {args.min_p95_worsening:.0%}. A method "
+                "must also demonstrate task acquisition without exceeding the "
+                "completion-loss tolerance; retaining an untrained or unsafe policy "
+                "is not counted as success."
+            ),
             "",
             "## Measurements",
             "",
@@ -308,24 +330,43 @@ def write_report(path, manifest, analyses, comparison_result, decision, args):
             f"{fmt(row['completion_before'])} | {fmt(row['completion_after'])} |"
         )
     if comparison_result:
+        lines.extend(["", "## ACC vs SOR", ""])
+        if args.report_only:
+            lines.extend(
+                [
+                    f"- Observed forgetting-score reduction: "
+                    f"**{fmt(comparison_result['forgetting_reduction'])}**",
+                    f"- Observed SOR/ACC task-B p95 ratio: "
+                    f"**{fmt(comparison_result['new_task_p95_ratio'])}**",
+                ]
+            )
+        else:
+            lines.extend(
+                [
+                    f"- Forgetting reduction: "
+                    f"**{fmt(comparison_result['forgetting_reduction'])}** "
+                    f"(required ≥ {args.min_forgetting_reduction:.0%})",
+                    f"- SOR new-task p95 / ACC new-task p95: "
+                    f"**{fmt(comparison_result['new_task_p95_ratio'])}** "
+                    f"(required ≤ {1 + args.new_task_p95_tolerance:.2f})",
+                ]
+            )
         lines.extend(
             [
-                "",
-                "## ACC vs SOR",
-                "",
-                f"- Forgetting reduction: **{fmt(comparison_result['forgetting_reduction'])}** "
-                f"(required ≥ {args.min_forgetting_reduction:.0%})",
-                f"- SOR new-task p95 / ACC new-task p95: "
-                f"**{fmt(comparison_result['new_task_p95_ratio'])}** "
-                f"(required ≤ {1 + args.new_task_p95_tolerance:.2f})",
-                f"- SOR new-task completion: **{fmt(comparison_result['new_task']['sor']['completion_ratio'])}**",
-                f"- ACC new-task completion: **{fmt(comparison_result['new_task']['acc']['completion_ratio'])}**",
+                f"- SOR new-task completion: "
+                f"**{fmt(comparison_result['new_task']['sor']['completion_ratio'])}**",
+                f"- ACC new-task completion: "
+                f"**{fmt(comparison_result['new_task']['acc']['completion_ratio'])}**",
             ]
         )
     lines.extend(
         [
             "",
-            "## Registered thresholds",
+            (
+                "## Reference parameters (not applied as gates)"
+                if args.report_only
+                else "## Registered thresholds"
+            ),
             "",
             "```json",
             json.dumps(
@@ -371,7 +412,14 @@ def main():
     parser.add_argument("--completion-tolerance", type=float, default=0.01)
     parser.add_argument("--gate-forgetting", action="store_true")
     parser.add_argument("--gate", action="store_true")
+    parser.add_argument(
+        "--report-only",
+        action="store_true",
+        help="Report measurements without assigning or enforcing PASS/FAIL",
+    )
     args = parser.parse_args()
+    if args.report_only and (args.gate or args.gate_forgetting):
+        parser.error("--report-only cannot be combined with a gate option")
 
     manifest_path = args.run_dir / "manifest.json"
     if not manifest_path.exists():
@@ -410,21 +458,35 @@ def main():
         )
         comparison_result = {
             "forgetting_reduction": reduction,
-            "retention_passed": reduction >= args.min_forgetting_reduction,
+            "retention_passed": (
+                None
+                if args.report_only
+                else reduction >= args.min_forgetting_reduction
+            ),
             "new_task": new_task,
             "new_task_p95_ratio": p95_ratio,
-            "new_task_p95_safe": p95_ratio <= 1.0 + args.new_task_p95_tolerance,
-            "new_task_completion_safe": completion_safe,
+            "new_task_p95_safe": (
+                None
+                if args.report_only
+                else p95_ratio <= 1.0 + args.new_task_p95_tolerance
+            ),
+            "new_task_completion_safe": (
+                None if args.report_only else completion_safe
+            ),
         }
         comparison_result["passed"] = (
-            acc["forgetting"]["detected"]
-            and acc["task_a_acquisition"]["passed"]
-            and acc["task_b_acquisition"]["passed"]
-            and sor["task_a_acquisition"]["passed"]
-            and sor["task_b_acquisition"]["passed"]
-            and comparison_result["retention_passed"]
-            and comparison_result["new_task_p95_safe"]
-            and completion_safe
+            None
+            if args.report_only
+            else (
+                acc["forgetting"]["detected"]
+                and acc["task_a_acquisition"]["passed"]
+                and acc["task_b_acquisition"]["passed"]
+                and sor["task_a_acquisition"]["passed"]
+                and sor["task_b_acquisition"]["passed"]
+                and comparison_result["retention_passed"]
+                and comparison_result["new_task_p95_safe"]
+                and completion_safe
+            )
         )
     else:
         analyses[methods[0]].pop("_after_b_b")
@@ -432,7 +494,7 @@ def main():
     acc_forgetting_pass = (
         analyses.get("acc", {}).get("forgetting", {}).get("detected", False)
     )
-    selected_pass = (
+    selected_pass = None if args.report_only else (
         comparison_result["passed"]
         if comparison_result is not None
         else (
@@ -445,6 +507,7 @@ def main():
         and analyses["sor"]["task_b_acquisition"]["passed"]
     )
     decision = {
+        "evaluation_mode": "descriptive" if args.report_only else "gated",
         "selected_pass": selected_pass,
         "acc_forgetting_pass": acc_forgetting_pass,
         "comparison": comparison_result,
@@ -471,7 +534,10 @@ def main():
         args,
     )
     print(f"Analysis written to {args.run_dir / 'CONTINUAL_REPORT.md'}")
-    print(f"Selected gate: {'PASS' if selected_pass else 'FAIL'}")
+    if args.report_only:
+        print("Evaluation mode: descriptive results (no PASS/FAIL gate)")
+    else:
+        print(f"Selected gate: {'PASS' if selected_pass else 'FAIL'}")
     if (args.gate or args.gate_forgetting) and not selected_pass:
         raise SystemExit(1)
 

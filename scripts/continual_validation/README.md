@@ -7,7 +7,8 @@ tail-safe reward:
 
 Therefore a detected change cannot be attributed to switching reward weights.
 
-The workflow has four registered gates:
+The workflow can run either with four registered gates or in descriptive
+`--report-only` mode:
 
 1. fixed actions must affect both tasks in common-flow p95 or completion;
    reward-best must match the best common-flow p95 action among completion-safe
@@ -76,12 +77,21 @@ bash scripts/continual_validation/run_continual.sh \
   --stage acc "${COMMON_ARGS[@]}"
 ```
 
+To record the complete A→B trajectory without judging PASS/FAIL or stopping at
+an acquisition/forgetting threshold, append `--report-only`. This mode still
+writes every reward, common-flow FCT, completion, and forgetting measurement:
+
+```bash
+bash scripts/continual_validation/run_continual.sh \
+  --stage acc "${COMMON_ARGS[@]}" --report-only --resume
+```
+
 If ACC passes, run SOR with identical traffic, common reward, exploration,
 network width, and optimizer-update budgets:
 
 ```bash
 bash scripts/continual_validation/run_continual.sh \
-  --stage sor "${COMMON_ARGS[@]}"
+  --stage sor "${COMMON_ARGS[@]}" --report-only
 ```
 
 Build the final ACC/SOR comparison:
@@ -95,7 +105,7 @@ python scripts/continual_validation/analyze_forgetting.py \
   --min-forgetting-reduction 0.30 \
   --new-task-p95-tolerance 0.05 \
   --completion-tolerance 0.01 \
-  --gate
+  --report-only
 ```
 
 The main outputs are `screen/REPORT.md`, `CONTINUAL_REPORT.md`,
