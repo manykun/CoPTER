@@ -33,6 +33,7 @@ MAX_FLOWS=0
 SMOKE=0
 RESUME=0
 REPORT_ONLY=0
+SHARED_REPLAY="true"
 
 usage() {
     cat <<'EOF'
@@ -64,6 +65,7 @@ Important options:
   --smoke
   --resume
   --report-only          Record all measurements without PASS/FAIL gating
+  --shared-replay BOOL   ACC cross-port global replay: true (default) or false
 EOF
 }
 
@@ -89,6 +91,7 @@ while [[ $# -gt 0 ]]; do
         --smoke) SMOKE=1; shift ;;
         --resume) RESUME=1; shift ;;
         --report-only) REPORT_ONLY=1; shift ;;
+        --shared-replay) SHARED_REPLAY="$2"; shift 2 ;;
         -h|--help) usage; exit 0 ;;
         *) echo "Unknown argument: $1" >&2; usage >&2; exit 2 ;;
     esac
@@ -114,6 +117,10 @@ esac
     echo "updates-per-task must be a positive integer" >&2
     exit 2
 }
+case "${SHARED_REPLAY}" in
+    true|false) ;;
+    *) echo "shared-replay must be true or false" >&2; exit 2 ;;
+esac
 python - "${REWARD_PROFILE}" "${REWARD_QUEUE_LAMBDA}" "${REWARD_ECN_LAMBDA}" <<'PY'
 import sys
 
@@ -138,7 +145,8 @@ fi
 RUN_DIR="${ROOT}/experiments/continual_validation/${RUN_ID}"
 MANIFEST="${RUN_DIR}/manifest.json"
 FLOW_DIR="${ROOT}/simulation/mix/acc_validation"
-OUTPUT_DIR="${ROOT}/simulation/output/acc_validation"
+RUN_OUTPUT_DIR="${RUN_DIR}/ns3_output"
+RUNTIME_CONFIG_DIR="${RUN_DIR}/runtime"
 mkdir -p "${RUN_DIR}"
 
 manifest_json() {
@@ -146,7 +154,8 @@ manifest_json() {
         "${BUFFER_KB}" "${PHASE_EPOCHS}" "${UPDATES_PER_TASK}" "${EPS_DECAY}" \
         "${ACC_HIDDEN_DIMS}" "${REWARD_PROFILE}" \
         "${REWARD_QUEUE_LAMBDA}" "${REWARD_ECN_LAMBDA}" "${KMIN_RANGE}" \
-        "${KMAX_RANGE}" "${BASELINE_STOP_TIME}" "${MAX_FLOWS}" <<'PY'
+        "${KMAX_RANGE}" "${BASELINE_STOP_TIME}" "${MAX_FLOWS}" \
+        "${SHARED_REPLAY}" <<'PY'
 import json
 import sys
 
@@ -156,7 +165,7 @@ keys = (
     "reward_profile", "reward_queue_lambda", "reward_ecn_lambda", "kmin_range",
     "kmax_range", "simulator_stop_time", "max_flows",
 )
-values = sys.argv[1:]
+values = sys.argv[1:-1]
 record = dict(zip(keys, values))
 for key in (
     "seed", "buffer_kb", "phase_epochs", "updates_per_task",
@@ -175,8 +184,53 @@ record["evaluation"] = {
 }
 record["experiment_type"] = "traffic_shift_common_objective"
 record["epsilon_schedule"] = "reset_per_task"
+if sys.argv[-1] == "false":
+    # Omit the default true value so manifests created before this ablation
+    # remain byte-for-byte compatible with the expected record.
+    record["shared_replay"] = False
 print(json.dumps(record, indent=2, sort_keys=True))
 PY
+}
+
+runtime_config_path() {
+    local task="$1"
+    echo "${RUNTIME_CONFIG_DIR}/${task}_seed${SEED}.conf"
+}
+
+output_base() {
+    local task="$1"
+    echo "${RUN_OUTPUT_DIR}/${task}_seed${SEED}"
+}
+
+ensure_runtime_configs() {
+    # Every run receives immutable input flows plus a private NS-3 output
+    # prefix. Separate socket ports alone are insufficient: without this,
+    # parallel evaluations overwrite the same .fct/.pfc/.queue files.
+    mkdir -p "${RUNTIME_CONFIG_DIR}" "${RUN_OUTPUT_DIR}"
+    local task source destination flow base tmp
+    for task in "${TASK_A}" "${TASK_B}"; do
+        source="${RUN_DIR}/tasks/${task}/input.conf"
+        flow="${RUN_DIR}/tasks/${task}/input.flow"
+        destination="$(runtime_config_path "${task}")"
+        base="$(output_base "${task}")"
+        tmp="${destination}.tmp"
+        [[ -s "${source}" && -s "${flow}" ]] || {
+            echo "Missing frozen task input for ${task}" >&2
+            return 1
+        }
+        awk -v flow="${flow}" -v base="${base}" '
+            $1 == "FLOW_FILE" { print "FLOW_FILE " flow; next }
+            $1 == "TRACE_OUTPUT_FILE" { print "TRACE_OUTPUT_FILE " base ".tr"; next }
+            $1 == "FCT_OUTPUT_FILE" { print "FCT_OUTPUT_FILE " base ".fct"; next }
+            $1 == "PFC_OUTPUT_FILE" { print "PFC_OUTPUT_FILE " base ".pfc"; next }
+            $1 == "QLEN_MONITOR_FILE" { print "QLEN_MONITOR_FILE " base ".queue"; next }
+            $1 == "RATE_MONITOR_FILE" { print "RATE_MONITOR_FILE " base ".rate"; next }
+            $1 == "THROUGHPUT_OUTPUT_FILE" { print "THROUGHPUT_OUTPUT_FILE " base ".throughput"; next }
+            $1 == "QLEN_MON_FILE" { print "QLEN_MON_FILE " base ".qlen"; next }
+            { print }
+        ' "${source}" > "${tmp}"
+        mv "${tmp}" "${destination}"
+    done
 }
 
 check_manifest() {
@@ -245,6 +299,7 @@ prepare() {
         fi
         check_manifest
         validate_configs
+        ensure_runtime_configs
         echo "Prepared run already matches requested arguments; keeping fixed files."
         return 0
     fi
@@ -268,6 +323,7 @@ prepare() {
     manifest_json > "${MANIFEST}.tmp"
     mv "${MANIFEST}.tmp" "${MANIFEST}"
     validate_configs
+    ensure_runtime_configs
     echo "Continual-learning manifest written to ${MANIFEST}"
 }
 
@@ -275,7 +331,8 @@ copy_eval_outputs() {
     local method="$1" phase="$2" task="$3" exp="$4" model_dir="$5"
     local name="${task}_seed${SEED}"
     local destination="${RUN_DIR}/eval/${method}/${phase}/${task}"
-    local base="${OUTPUT_DIR}/${name}"
+    local base
+    base="$(output_base "${task}")"
     local metrics="${model_dir}/${exp}_metrics.jsonl"
     mkdir -p "${destination}"
     shopt -s nullglob
@@ -286,9 +343,9 @@ copy_eval_outputs() {
     fi
     cp "${files[@]}" "${destination}/"
     shopt -u nullglob
-    cp "${FLOW_DIR}/${name}.flow" "${destination}/input.flow"
-    cp "${FLOW_DIR}/${name}.conf" "${destination}/input.conf"
-    cp "${FLOW_DIR}/${name}.meta" "${destination}/input.meta"
+    cp "${RUN_DIR}/tasks/${task}/input.flow" "${destination}/input.flow"
+    cp "$(runtime_config_path "${task}")" "${destination}/input.conf"
+    cp "${RUN_DIR}/tasks/${task}/input.meta" "${destination}/input.meta"
     [[ -s "${metrics}" ]] || {
         echo "Metrics not produced: ${metrics}" >&2
         return 1
@@ -303,14 +360,15 @@ copy_eval_outputs() {
 evaluate() {
     local method="$1" phase="$2" task="$3" exp="$4" model_dir="$5" port="$6"
     local name="${task}_seed${SEED}"
-    local base="${OUTPUT_DIR}/${name}"
+    local base
+    base="$(output_base "${task}")"
     rm -f "${base}".*
     echo "[${method}] frozen evaluation phase=${phase} task=${task}"
     bash "${ROOT}/run_training.sh" \
         --one-shot \
         --eval-greedy \
         --eval-tag "${phase}_${task}" \
-        --config "simulation/mix/acc_validation/${name}.conf" \
+        --config "$(runtime_config_path "${task}")" \
         --exp "${exp}" \
         --mode "${method^^}" \
         --port "${port}" \
@@ -326,6 +384,7 @@ evaluate() {
         --reward-profile "${REWARD_PROFILE}" \
         --reward-queue-lambda "${REWARD_QUEUE_LAMBDA}" \
         --reward-ecn-lambda "${REWARD_ECN_LAMBDA}" \
+        --shared-replay "${SHARED_REPLAY}" \
         --tb-enable false \
         --run-id "${RUN_ID}" \
         --phase "${phase}"
@@ -336,7 +395,8 @@ copy_screen_outputs() {
     local task="$1" label="$2" exp="$3" model_dir="$4"
     local name="${task}_seed${SEED}"
     local destination="${RUN_DIR}/screen/${task}/${label}"
-    local base="${OUTPUT_DIR}/${name}"
+    local base
+    base="$(output_base "${task}")"
     local metrics="${model_dir}/${exp}_metrics.jsonl"
     mkdir -p "${destination}"
     shopt -s nullglob
@@ -347,15 +407,16 @@ copy_screen_outputs() {
     }
     cp "${files[@]}" "${destination}/"
     shopt -u nullglob
-    cp "${FLOW_DIR}/${name}.flow" "${destination}/input.flow"
-    cp "${FLOW_DIR}/${name}.conf" "${destination}/input.conf"
-    cp "${FLOW_DIR}/${name}.meta" "${destination}/input.meta"
+    cp "${RUN_DIR}/tasks/${task}/input.flow" "${destination}/input.flow"
+    cp "$(runtime_config_path "${task}")" "${destination}/input.conf"
+    cp "${RUN_DIR}/tasks/${task}/input.meta" "${destination}/input.meta"
     tail -n 1 "${metrics}" > "${destination}/metrics.json"
 }
 
 screen() {
     check_manifest
     validate_configs
+    ensure_runtime_configs
     local screen_dir="${RUN_DIR}/screen"
     local model_dir="${screen_dir}/models"
     local exp="continual_${RUN_ID}_screen_s${SEED}"
@@ -370,14 +431,14 @@ screen() {
             action="${specification#*:}"
             [[ -s "${screen_dir}/${task}/${label}/metrics.json" ]] && continue
             name="${task}_seed${SEED}"
-            base="${OUTPUT_DIR}/${name}"
+            base="$(output_base "${task}")"
             rm -f "${base}".*
             echo "[screen] task=${task} action=${label}(${action}) reward=${REWARD_PROFILE}"
             bash "${ROOT}/run_training.sh" \
                 --one-shot --eval-greedy \
                 --force-action "${action}" \
                 --eval-tag "screen_${task}_${label}" \
-                --config "simulation/mix/acc_validation/${name}.conf" \
+                --config "$(runtime_config_path "${task}")" \
                 --exp "${exp}" --mode ACC --port "${PORT}" --seed "${SEED}" \
                 --buffer "${BUFFER_KB}" --model-dir "${model_dir}" --episodes 1 \
                 --acc-hidden-dims "${ACC_HIDDEN_DIMS}" \
@@ -385,6 +446,7 @@ screen() {
                 --reward-profile "${REWARD_PROFILE}" \
                 --reward-queue-lambda "${REWARD_QUEUE_LAMBDA}" \
                 --reward-ecn-lambda "${REWARD_ECN_LAMBDA}" \
+                --shared-replay "${SHARED_REPLAY}" \
                 --tb-enable false --run-id "${RUN_ID}" --phase screen
             copy_screen_outputs "${task}" "${label}" "${exp}" "${model_dir}"
         done
@@ -427,6 +489,7 @@ train_method() {
 
     check_manifest
     validate_configs
+    ensure_runtime_configs
     if [[ "${REPORT_ONLY}" -eq 1 ]]; then
         [[ -f "${RUN_DIR}/screen/markers/complete" ||
            -f "${RUN_DIR}/screen/markers/pass" ]] || {
@@ -470,7 +533,7 @@ train_method() {
     if [[ ! -f "${method_dir}/markers/train_a" ]]; then
         echo "[${method}] train task A=${TASK_A}, target updates=${UPDATES_PER_TASK}"
         bash "${ROOT}/run_training.sh" \
-            --config "simulation/mix/acc_validation/${TASK_A}_seed${SEED}.conf" \
+            --config "$(runtime_config_path "${TASK_A}")" \
             --exp "${exp}" \
             --mode "${method^^}" \
             --port "${method_port}" \
@@ -487,6 +550,7 @@ train_method() {
             --reward-profile "${REWARD_PROFILE}" \
             --reward-queue-lambda "${REWARD_QUEUE_LAMBDA}" \
             --reward-ecn-lambda "${REWARD_ECN_LAMBDA}" \
+            --shared-replay "${SHARED_REPLAY}" \
             --tb-enable false \
             --run-id "${RUN_ID}" \
             --phase train_a \
@@ -516,7 +580,7 @@ train_method() {
         local target_updates=$((UPDATES_PER_TASK * 2))
         echo "[${method}] continue same model on task B=${TASK_B}, target updates=${target_updates}"
         bash "${ROOT}/run_training.sh" \
-            --config "simulation/mix/acc_validation/${TASK_B}_seed${SEED}.conf" \
+            --config "$(runtime_config_path "${TASK_B}")" \
             --exp "${exp}" \
             --mode "${method^^}" \
             --port "${method_port}" \
@@ -533,6 +597,7 @@ train_method() {
             --reward-profile "${REWARD_PROFILE}" \
             --reward-queue-lambda "${REWARD_QUEUE_LAMBDA}" \
             --reward-ecn-lambda "${REWARD_ECN_LAMBDA}" \
+            --shared-replay "${SHARED_REPLAY}" \
             --tb-enable false \
             --run-id "${RUN_ID}" \
             --phase train_b \

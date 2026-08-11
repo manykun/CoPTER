@@ -265,6 +265,8 @@ def write_report(path, manifest, analyses, comparison_result, decision, args):
         f"- Seed: **{manifest['seed']}**",
         f"- Training budget: **{manifest.get('updates_per_task', 'legacy')} "
         "optimizer updates per task**",
+        "- ACC shared/global replay: "
+        f"**{'enabled' if manifest.get('shared_replay', True) else 'disabled (local FIFO only)'}**",
         "- Evaluation: **greedy, frozen, identical task flow files**",
         "",
         f"## {decision_heading}",
@@ -508,6 +510,7 @@ def main():
     )
     decision = {
         "evaluation_mode": "descriptive" if args.report_only else "gated",
+        "shared_replay": manifest.get("shared_replay", True),
         "selected_pass": selected_pass,
         "acc_forgetting_pass": acc_forgetting_pass,
         "comparison": comparison_result,

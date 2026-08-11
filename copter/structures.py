@@ -51,6 +51,7 @@ class AgentHelperParameters:
     sync_down_size: int = 256
     rb_size: int = 1000
     rb_size_global: int = 100000
+    shared_replay_enabled: bool = True
     target_update_interval: int = 16
     # ---- Continuous training: epsilon schedule + persistence ----
     epsilon_start: float = 1.0

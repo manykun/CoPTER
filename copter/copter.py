@@ -56,6 +56,12 @@ if __name__ == "__main__":
     parser.add_argument("--reward_queue_lambda", type=float, default=5.0)
     parser.add_argument("--reward_ecn_lambda", type=float, default=5.0)
     parser.add_argument("--state_save_interval", type=int, default=1)
+    parser.add_argument(
+        "--shared_replay",
+        choices=("true", "false"),
+        default="true",
+        help="Enable ACC cross-port shared/global replay. false keeps only per-port FIFO replay.",
+    )
     parser.add_argument("--seed", type=int, default=1, help="Random seed for Python, NumPy, and PyTorch.")
     parser.add_argument("--run_id", type=str, default=None, help="Optional run identifier stored with training state and metrics.")
     parser.add_argument("--phase", type=str, default=None, help="Optional training phase stored with training state and metrics.")
@@ -133,6 +139,7 @@ if __name__ == "__main__":
         epsilon_end=args.epsilon_end,
         epsilon_decay_steps=args.epsilon_decay_steps,
         state_save_interval=args.state_save_interval,
+        shared_replay_enabled=args.shared_replay == "true",
     )
 
     config_hash = hashlib.sha256(
@@ -383,6 +390,7 @@ if __name__ == "__main__":
                 "reward_profile": args.reward_profile,
                 "reward_queue_lambda": args.reward_queue_lambda,
                 "reward_ecn_lambda": args.reward_ecn_lambda,
+                "shared_replay_enabled": args.shared_replay == "true",
                 # PRIMARY metric: top-30% congested-port reward. Robust to
                 # structurally-stuck ports (permanent bottlenecks) that would
                 # otherwise clamp a naive mean. Reflects policy's actual

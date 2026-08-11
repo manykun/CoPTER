@@ -128,6 +128,15 @@ class AgentHelper:
             self.rb_pool.append(ReplayBuffer(capacity=self.p.rb_size))
 
         self.shared_rb = deque(maxlen=self.p.rb_size_global)
+        logger.info(
+            "ACC shared replay is {} (local={}, global={}, sync_up={}, "
+            "sync_down={})",
+            "enabled" if self.p.shared_replay_enabled else "disabled",
+            self.p.rb_size,
+            self.p.rb_size_global,
+            self.p.sync_up_size,
+            self.p.sync_down_size,
+        )
 
         # ---- Continuous-training state (cross-run persistence) ----
         self.global_train_step = 0           # number of agent_helper.train() calls completed (across runs)
@@ -305,7 +314,9 @@ class AgentHelper:
 
         # ---- Load shared replay buffer ----
         shared_rb_path = self._shared_rb_path()
-        if os.path.exists(shared_rb_path):
+        if not self.p.shared_replay_enabled:
+            logger.info("Shared replay disabled; not loading {}", shared_rb_path)
+        elif os.path.exists(shared_rb_path):
             try:
                 with open(shared_rb_path, "rb") as f:
                     shared_data = pickle.load(f)
@@ -369,12 +380,14 @@ class AgentHelper:
                 self._atomic_write_bytes(self._rb_path(i), data)
             except Exception as e:
                 logger.warning(f"Failed to save replay buffer for port {i}: {e}")
-        # Shared replay buffer
-        try:
-            data = pickle.dumps(list(self.shared_rb), protocol=pickle.HIGHEST_PROTOCOL)
-            self._atomic_write_bytes(self._shared_rb_path(), data)
-        except Exception as e:
-            logger.warning(f"Failed to save shared replay buffer: {e}")
+        # Shared replay buffer. Local-only ablations deliberately never read or
+        # write this file, preventing stale global experience from leaking in.
+        if self.p.shared_replay_enabled:
+            try:
+                data = pickle.dumps(list(self.shared_rb), protocol=pickle.HIGHEST_PROTOCOL)
+                self._atomic_write_bytes(self._shared_rb_path(), data)
+            except Exception as e:
+                logger.warning(f"Failed to save shared replay buffer: {e}")
         # Train state
         ts = {
             "global_train_step": int(self.global_train_step),
@@ -389,6 +402,7 @@ class AgentHelper:
             "node_number": self.node_number,
             "replay_size_per_port": [len(rb) for rb in self.rb_pool],
             "shared_replay_size": len(self.shared_rb),
+            "shared_replay_enabled": bool(self.p.shared_replay_enabled),
         }
         ts.update({
             key: value for key, value in {
@@ -485,6 +499,11 @@ class AgentHelper:
        
     # 共享经验池和本地经验池的上传和下载
     def sync(self):
+        if not self.p.shared_replay_enabled:
+            # Keep the normal record -> train cadence, but train each port only
+            # from its own FIFO replay. This isolates the effect of cross-port
+            # global experience sharing without clearing local task-A memory.
+            return
         # Sync up: Sample local replay buffer to shared replay buffer
         sync_up_size = min(len(self.rb_pool[0]), self.p.sync_up_size)
         for i, agent in enumerate(self.agent_pool):

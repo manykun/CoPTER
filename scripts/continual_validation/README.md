@@ -22,6 +22,15 @@ the same number of episodes. Epsilon resets to `1.0` at each task boundary and
 decays with a phase-local environment-step counter. The network and replay
 memory do not reset between tasks.
 
+ACC normally uses per-port FIFO replay plus cross-port shared/global replay.
+Pass `--shared-replay false` for the local-only ablation: per-port FIFO replay
+continues across A→B, while global upload/download and persistence are disabled.
+This changes one replay factor without clearing task-A local memory.
+
+Each run uses frozen flow/config inputs and a private `ns3_output/` prefix.
+Two continual runs can therefore execute in parallel when they also use
+different ns3-gym ports; their FCT/PFC/queue files do not overwrite one another.
+
 ## Server workflow
 
 Run every command from the repository root:
@@ -116,6 +125,56 @@ The main outputs are `screen/REPORT.md`, `CONTINUAL_REPORT.md`,
 
 Append `--resume` to an interrupted stage with the exact same arguments. A
 different argument set requires a new run id.
+
+## Parallel ACC local-only and SOR experiment
+
+The completed shared-replay ACC run can be reused. Prepare one new run for the
+local-only ablation, then reuse its fixed-action screen because forced-action
+evaluation never records or samples replay:
+
+```bash
+BASE_ID=tailsafe_mixed_incast_s1
+LOCAL_ID=tailsafe_mixed_incast_localonly_s1
+
+bash scripts/continual_validation/run_continual.sh \
+  --stage prepare --run-id "$LOCAL_ID" --task-a mixed --task-b incast \
+  --seed 1 --buffer-kb 400 --updates-per-task 600 --phase-epochs 100 \
+  --eps-decay 2500 --acc-hidden-dims "32,64,64,32" \
+  --reward-profile tail_safe --reward-queue-lambda 5 \
+  --reward-ecn-lambda 5 --shared-replay false
+
+mkdir -p "experiments/continual_validation/${LOCAL_ID}/screen"
+cp -a "experiments/continual_validation/${BASE_ID}/screen/." \
+  "experiments/continual_validation/${LOCAL_ID}/screen/"
+echo "reused_from=${BASE_ID}" \
+  > "experiments/continual_validation/${LOCAL_ID}/screen/REUSED_FROM"
+```
+
+Run both drivers with different ports. SOR adds 100 to its base port, so the
+commands below use ports 5956 and 5856:
+
+```bash
+nohup bash scripts/continual_validation/run_continual.sh \
+  --stage acc --run-id "$LOCAL_ID" --task-a mixed --task-b incast \
+  --seed 1 --buffer-kb 400 --updates-per-task 600 --phase-epochs 100 \
+  --eps-decay 2500 --acc-hidden-dims "32,64,64,32" \
+  --reward-profile tail_safe --reward-queue-lambda 5 \
+  --reward-ecn-lambda 5 --shared-replay false --port 5956 \
+  --report-only --resume \
+  > "experiments/continual_validation/${LOCAL_ID}/driver.log" 2>&1 &
+
+nohup bash scripts/continual_validation/run_continual.sh \
+  --stage sor --run-id "$BASE_ID" --task-a mixed --task-b incast \
+  --seed 1 --buffer-kb 400 --updates-per-task 600 --phase-epochs 100 \
+  --eps-decay 2500 --acc-hidden-dims "32,64,64,32" \
+  --reward-profile tail_safe --reward-queue-lambda 5 \
+  --reward-ecn-lambda 5 --shared-replay true --port 5756 \
+  --report-only --resume \
+  > "experiments/continual_validation/${BASE_ID}/sor_driver.log" 2>&1 &
+```
+
+Do not run two experiments with the same port. Monitor them using `jobs -l`
+and `tail -f`; each run remains independently resumable.
 
 For pipeline validation only:
 

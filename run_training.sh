@@ -69,6 +69,7 @@ REWARD_WEIGHTS="0.50,0.30,0.20"
 REWARD_PROFILE="weighted"
 REWARD_QUEUE_LAMBDA=5.0
 REWARD_ECN_LAMBDA=5.0
+SHARED_REPLAY="true"
 SOR_RECENT_SIZE=2000
 SOR_BOUNDARY_SIZE=20000
 SOR_MAX_CLUSTERS=32
@@ -123,6 +124,7 @@ while [[ $# -gt 0 ]]; do
         --reward-profile) REWARD_PROFILE="$2"; shift 2 ;;
         --reward-queue-lambda) REWARD_QUEUE_LAMBDA="$2"; shift 2 ;;
         --reward-ecn-lambda) REWARD_ECN_LAMBDA="$2"; shift 2 ;;
+        --shared-replay) SHARED_REPLAY="$2"; shift 2 ;;
         --sor-recent-size) SOR_RECENT_SIZE="$2"; shift 2 ;;
         --sor-boundary-size) SOR_BOUNDARY_SIZE="$2"; shift 2 ;;
         --sor-max-clusters) SOR_MAX_CLUSTERS="$2"; shift 2 ;;
@@ -144,6 +146,11 @@ while [[ $# -gt 0 ]]; do
         *)              echo "Unknown arg: $1"; exit 1 ;;
     esac
 done
+
+case "${SHARED_REPLAY}" in
+    true|false) ;;
+    *) echo "--shared-replay must be true or false" >&2; exit 2 ;;
+esac
 
 # ==================== Resolve Experiment List ====================
 # If --experiments was used, EXP_LIST has entries. Otherwise single (config, exp).
@@ -334,6 +341,7 @@ run_single_experiment() {
                 --reward_profile "${REWARD_PROFILE}"
                 --reward_queue_lambda "${REWARD_QUEUE_LAMBDA}"
                 --reward_ecn_lambda "${REWARD_ECN_LAMBDA}"
+                --shared_replay "${SHARED_REPLAY}"
             )
         fi
         [ "${ONLINE}" -eq 1 ] && AGENT_ARGS+=(--online)

@@ -1,6 +1,6 @@
 # CoPTER：ACC 有效性、灾难性遗忘与 SOR 研究进展
 
-> 更新日期：2026-07-24
+> 更新日期：2026-08-11
 > 实验平台：256 主机三层 Fat-Tree，10 Gbps 主机链路，40 Gbps
 > Agg-Core 链路，32 机柜、2 Pod，每 Pod 16 个 ToR-Agg 组
 > 当前结论适用范围：单流量种子下的机制证据，不构成跨随机种子的统计结论
@@ -288,6 +288,12 @@ ACC/SOR replay 覆盖所有端口，all-congested 更接近实际优化总体。
 - 新奖励的离线估计不能代替固定动作和训练验证。
 
 ## 11. 后续目标与决策门槛
+
+当前持续学习主实验采用描述性报告，不再用阈值中止训练。新增 ACC
+`--shared-replay false` 单因素消融：关闭跨端口全局经验上传/下载，但保留每端口
+FIFO replay，并与已有 shared-replay ACC 及 SOR 使用相同 flow、seed、奖励、
+网络和每任务 600 updates 对比。不同 run 使用独立 NS-3 输出目录与端口，可安全
+并行运行 local-only ACC 和 SOR。
 
 ### 目标 1：验证新奖励
 
