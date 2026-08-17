@@ -29,8 +29,16 @@ if SOR_DIR not in sys.path:
     sys.path.insert(0, SOR_DIR)
 
 from network_helper import NetworkHelper
-from port_metrics import PortMetricTracker, parse_watch_ports
-from structures import AgentHelperParameters, NetworkHelperParameters
+from port_metrics import (
+    PortMetricTracker,
+    parse_forced_port_action,
+    parse_watch_ports,
+)
+from structures import (
+    AgentHelperParameters,
+    DCQCNParameters,
+    NetworkHelperParameters,
+)
 from sor_agent_helper import SORAgentHelper
 from sor_replay import SORReplayConfig
 
@@ -73,6 +81,7 @@ def build_parser():
     parser.add_argument("--eval_tag", type=str, default="", help="Optional tag recorded into metrics (e.g. phase/task name).")
     parser.add_argument("--watch_ports", type=str, default="", help="Comma-separated port indices to measure explicitly.")
     parser.add_argument("--watch_trace_file", type=str, default="", help="Optional JSONL path for per-step metrics of --watch_ports.")
+    parser.add_argument("--force_port_action", type=str, default="", help="Frozen local sweep: PORT,KMIN_NORM,KMAX_NORM,PMAX.")
     parser.add_argument("--tb_enable", type=str, default="true")
     parser.add_argument("--tb_log_dir", type=str, default="tb_logs")
     parser.add_argument("--tb_flush_secs", type=int, default=30)
@@ -123,6 +132,12 @@ def main():
         watch_ports = parse_watch_ports(args.watch_ports)
     except ValueError as exc:
         raise SystemExit(f"invalid --watch_ports: {exc}")
+    try:
+        forced_port_action = parse_forced_port_action(args.force_port_action)
+    except ValueError as exc:
+        raise SystemExit(f"invalid --force_port_action: {exc}")
+    if forced_port_action is not None and not args.eval_greedy:
+        raise SystemExit("--force_port_action is allowed only with --eval_greedy")
     logger.info(f"Parsed arguments: {args}")
     logger.info(f"Random seed fixed to {args.seed}")
     logger.add(args.exp_name + "_log/sor_copter_{time}.log", level="INFO", rotation="5 MB")
@@ -145,6 +160,14 @@ def main():
         port_metric_tracker.validate(network_helper.get_n_port())
     except ValueError as exc:
         raise SystemExit(str(exc))
+    if (
+        forced_port_action is not None
+        and forced_port_action[0] >= network_helper.get_n_port()
+    ):
+        raise SystemExit(
+            f"forced port {forced_port_action[0]} is outside "
+            f"[0, {network_helper.get_n_port() - 1}]"
+        )
     agent_helper_params = AgentHelperParameters(
         epsilon_start=args.epsilon_start,
         epsilon_end=args.epsilon_end,
@@ -231,6 +254,10 @@ def main():
                 port_states = [network_helper.get_port_current_state_list(port_idx) for port_idx in range(network_helper.get_n_port())]
                 current_epsilon = 0.0 if args.eval_greedy else agent_helper.get_current_epsilon()
                 paras, actions = agent_helper.decide(port_states, epsi=current_epsilon)
+                if forced_port_action is not None:
+                    port, kmin_norm, kmax_norm, pmax = forced_port_action
+                    paras[port] = DCQCNParameters(kmin_norm, kmax_norm, pmax)
+                    actions[port] = (kmin_norm, kmax_norm, pmax)
                 for action in actions:
                     key = ",".join(str(index) for index in action)
                     action_histogram[key] = action_histogram.get(key, 0) + 1
@@ -365,6 +392,10 @@ def main():
                     if congested_step_count > 0 else 0.0
                 ),
                 "action_histogram": action_histogram,
+                "forced_port_action": (
+                    list(forced_port_action)
+                    if forced_port_action is not None else None
+                ),
                 "watch_ports_reward": {
                     port: (round(value, 6) if value is not None else None)
                     for port, value in port_metric_tracker.legacy_rewards().items()

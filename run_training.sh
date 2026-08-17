@@ -54,6 +54,7 @@ EPSILON_DECAY=50000
 WAIT_NS3_SEC=3
 WAIT_BETWEEN_SEC=5
 FORCE_ACTION=""
+FORCE_PORT_ACTION=""
 EVAL_GREEDY=0
 EVAL_TAG=""
 SEED=1
@@ -110,6 +111,7 @@ while [[ $# -gt 0 ]]; do
         --eps-end)      EPSILON_END="$2";     shift 2 ;;
         --eps-decay)    EPSILON_DECAY="$2";   shift 2 ;;
         --force-action) FORCE_ACTION="$2";    shift 2 ;;
+        --force-port-action) FORCE_PORT_ACTION="$2"; shift 2 ;;
         --eval-greedy)  EVAL_GREEDY=1; ONE_SHOT=1; shift ;;
         --eval-tag)     EVAL_TAG="$2";        shift 2 ;;
         --seed)         SEED="$2";            shift 2 ;;
@@ -349,6 +351,7 @@ run_single_experiment() {
         [ "${ONLINE}" -eq 1 ] && AGENT_ARGS+=(--online)
         [ -n "${FMAP_DIR}" ] && AGENT_ARGS+=(-f "${FMAP_DIR}")
         [ -n "${FORCE_ACTION}" ] && AGENT_ARGS+=(--force_action "${FORCE_ACTION}")
+        [ -n "${FORCE_PORT_ACTION}" ] && AGENT_ARGS+=(--force_port_action "${FORCE_PORT_ACTION}")
         [ "${EVAL_GREEDY}" -eq 1 ] && AGENT_ARGS+=(--eval_greedy)
         [ -n "${EVAL_TAG}" ] && AGENT_ARGS+=(--eval_tag "${EVAL_TAG}")
         [ -n "${WATCH_PORTS}" ] && AGENT_ARGS+=(--watch_ports "${WATCH_PORTS}")

@@ -247,3 +247,44 @@ Read `path_intervention/PATH_INTERVENTION_REPORT.md`. Compare targeted restores
 with their same-size random controls. A larger old-task recovery together with
 small incast cost supports path-localized functional forgetting; parameter
 drift alone is not sufficient evidence.
+
+## One-port continuous midpoint sweep
+
+Before replacing discrete ACC/SOR with SAC or TD3, run a frozen local response
+test. The sweep keeps the after-B checkpoint and all non-target ports greedy,
+then overrides only port 323 with the midpoint between its dominant action and
+each adjacent grid value. Continuous overrides are accepted only in greedy
+evaluation, so they cannot enter discrete replay.
+
+```bash
+BASE_ID=tailsafe_mixed_incast_localonly_s1
+
+bash scripts/continual_validation/run_continuous_sweep.sh \
+  --stage baseline --base-run-id "$BASE_ID" \
+  --target-port 323 --link-gbps 40 --port 6056
+
+bash scripts/continual_validation/run_continuous_sweep.sh \
+  --stage prepare --base-run-id "$BASE_ID" \
+  --target-port 323 --link-gbps 40
+
+bash scripts/continual_validation/run_continuous_sweep.sh \
+  --stage sweep --base-run-id "$BASE_ID" \
+  --target-port 323 --link-gbps 40 --port 6056
+
+bash scripts/continual_validation/run_continuous_sweep.sh \
+  --stage analyze --base-run-id "$BASE_ID" \
+  --target-port 323 --link-gbps 40
+```
+
+The default sweep has at most seven fixed-action points: the dominant grid
+point plus one lower and one upper midpoint per parameter. Add
+`--include-grid-neighbors` consistently to `prepare` and `sweep` for an
+endpoint+midpoint sweep of at most 13 points. Read
+`continuous_sweep_port323/CONTINUOUS_SWEEP_REPORT.md`.
+
+- A midpoint that improves mixed while preserving incast supports continuous
+  control inside the current range.
+- Monotonic improvement toward the outer point motivates a range ablation.
+- Indistinguishable midpoints mean finer discretization is unlikely to help.
+- The dominant-action fraction must be reported: a small fraction means the
+  fixed local sweep characterizes one common action, not the full policy.

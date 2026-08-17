@@ -38,6 +38,27 @@ def parse_watch_ports(value):
     return ports
 
 
+def parse_forced_port_action(value):
+    """Parse PORT,KMIN_NORM,KMAX_NORM,PMAX for frozen local sweeps."""
+    if not value:
+        return None
+    fields = [item.strip() for item in value.split(",")]
+    if len(fields) != 4:
+        raise ValueError(
+            "forced port action must be PORT,KMIN_NORM,KMAX_NORM,PMAX"
+        )
+    try:
+        port = int(fields[0])
+        values = tuple(float(item) for item in fields[1:])
+    except ValueError as exc:
+        raise ValueError("forced port action contains a non-numeric value") from exc
+    if port < 0:
+        raise ValueError("forced port must be non-negative")
+    if any(not 0.0 <= value <= 1.0 for value in values):
+        raise ValueError("normalized Kmin, Kmax, and Pmax must be in [0, 1]")
+    return (port, *values)
+
+
 class PortMetricTracker:
     """Collect all-step, active-step, and congested-step metrics for fixed ports."""
 

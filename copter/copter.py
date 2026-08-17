@@ -9,9 +9,14 @@ import numpy as np
 from loguru import logger
 from network_helper import NetworkHelper
 from agent_helper import AgentHelper
-from port_metrics import PortMetricTracker, parse_watch_ports
+from port_metrics import (
+    PortMetricTracker,
+    parse_forced_port_action,
+    parse_watch_ports,
+)
 from structures import (
     AgentHelperParameters,
+    DCQCNParameters,
     NetworkHelperParameters,
     acc_action_from_indices,
     validate_acc_action_indices,
@@ -71,6 +76,7 @@ if __name__ == "__main__":
     parser.add_argument("--eval_greedy", action="store_true", help="Pure greedy evaluation: epsilon=0, no recording/training/saving.")
     parser.add_argument("--eval_tag", type=str, default="", help="Optional tag recorded into metrics (e.g. phase/task name).")
     parser.add_argument("--force_action", type=str, default="", help="Sanity-check: force a fixed action index triple 'kmin_idx,kmax_idx,pmax_idx' for ALL ports/steps (overrides the policy). Used to test reward sensitivity to actions.")
+    parser.add_argument("--force_port_action", type=str, default="", help="Frozen local sweep: override one port with PORT,KMIN_NORM,KMAX_NORM,PMAX while all other ports remain greedy.")
     parser.add_argument("--watch_ports", type=str, default="", help="Comma-separated port indices to track explicitly. Their per-epoch rollout reward (EMA) is written to metrics jsonl and TensorBoard (rollout/reward_port{p}) so a fixed port's reward trajectory can be plotted across epochs.")
     parser.add_argument("--watch_trace_file", type=str, default="", help="Optional JSONL path for per-step metrics of --watch_ports.")
     # ---- tensorboard ----
@@ -103,6 +109,14 @@ if __name__ == "__main__":
             forced_action_idx = validate_acc_action_indices(args.force_action.split(","))
         except Exception as exc:
             raise SystemExit(f"--force_action must be 'kmin_idx,kmax_idx,pmax_idx'; got {args.force_action!r} ({exc})")
+    try:
+        forced_port_action = parse_forced_port_action(args.force_port_action)
+    except ValueError as exc:
+        raise SystemExit(f"invalid --force_port_action: {exc}")
+    if forced_action_idx is not None and forced_port_action is not None:
+        raise SystemExit("--force_action and --force_port_action are mutually exclusive")
+    if forced_port_action is not None and not args.eval_greedy:
+        raise SystemExit("--force_port_action is allowed only with --eval_greedy")
 
     # Parse optional watch-port list (fixed ports whose reward we track across epochs).
     try:
@@ -138,6 +152,14 @@ if __name__ == "__main__":
         port_metric_tracker.validate(network_helper.get_n_port())
     except ValueError as exc:
         raise SystemExit(str(exc))
+    if (
+        forced_port_action is not None
+        and forced_port_action[0] >= network_helper.get_n_port()
+    ):
+        raise SystemExit(
+            f"forced port {forced_port_action[0]} is outside "
+            f"[0, {network_helper.get_n_port() - 1}]"
+        )
     
     agent_helper_params = AgentHelperParameters(
         epsilon_start=args.epsilon_start,
@@ -237,6 +259,14 @@ if __name__ == "__main__":
                     actions = [forced_action_idx for _ in range(n_port)]
                 else:
                     paras, actions = agent_helper.decide(port_states, epsi=current_epsilon)
+
+                if forced_port_action is not None:
+                    port, kmin_norm, kmax_norm, pmax = forced_port_action
+                    paras[port] = DCQCNParameters(kmin_norm, kmax_norm, pmax)
+                    # Evaluation never records this action into replay. Keeping
+                    # the applied continuous values in `actions` makes traces
+                    # and action histograms auditable.
+                    actions[port] = (kmin_norm, kmax_norm, pmax)
 
                 for action in actions:
                     action_key = ",".join(str(index) for index in action)
@@ -411,6 +441,10 @@ if __name__ == "__main__":
                 "congested_step_ratio": (congested_step_count / current_step) if current_step > 0 else 0.0,
                 "avg_congested_ports_per_step": (congested_port_count_sum / congested_step_count) if congested_step_count > 0 else 0.0,
                 "forced_action": list(forced_action_idx) if forced_action_idx is not None else None,
+                "forced_port_action": (
+                    list(forced_port_action)
+                    if forced_port_action is not None else None
+                ),
                 "action_histogram": action_histogram,
                 **{
                     f"reward_{key}_mean": (

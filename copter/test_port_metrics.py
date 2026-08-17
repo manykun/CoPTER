@@ -6,7 +6,11 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from port_metrics import PortMetricTracker, parse_watch_ports
+from port_metrics import (
+    PortMetricTracker,
+    parse_forced_port_action,
+    parse_watch_ports,
+)
 
 
 class FakeNetwork:
@@ -44,6 +48,12 @@ class PortMetricTrackerTests(unittest.TestCase):
             parse_watch_ports("1,1")
         with self.assertRaises(ValueError):
             PortMetricTracker([4]).validate(4)
+        self.assertEqual(
+            parse_forced_port_action("323,0.5,0.75,0.2"),
+            (323, 0.5, 0.75, 0.2),
+        )
+        with self.assertRaises(ValueError):
+            parse_forced_port_action("323,0.5,1.2,0.2")
 
     def test_summary_and_trace(self):
         with tempfile.TemporaryDirectory() as temporary:
