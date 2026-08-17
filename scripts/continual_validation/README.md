@@ -203,3 +203,47 @@ A single seed is mechanism evidence, not a statistical generalization claim.
 The registered reward is `rollout_all_congested_mean`, which follows all
 congested ports and the replay population more closely. The top-30% reward is
 kept only as a diagnostic because it reversed the incast fixed-action ranking.
+
+## Path-level checkpoint intervention
+
+After a completed ACC A→B run, use frozen checkpoint intervention to test
+whether forgetting is concentrated on the observed mixed→incast path. This
+does not retrain either task. It copies the after-B checkpoint, restores only
+selected ports' `policy` and `target` weights from after-A, and evaluates both
+tasks with greedy actions and identical flow files.
+
+```bash
+bash scripts/continual_validation/run_path_intervention.sh \
+  --stage all \
+  --base-run-id tailsafe_mixed_incast_localonly_s1 \
+  --port 5956
+```
+
+The default experiment measures single ports 323 and 371, the four-port core
+set, the eight-port rack set, and same-size random controls. The watched set is
+`190,191,200,201,323,371,379,380,403,404,422,423`. Each watched port records
+reward and unclipped `tail_safe_raw` means over all, active, and congested
+steps, action histograms, physical identifier, and a per-step JSONL trace.
+
+Long evaluations can be split and resumed without rerunning completed cases:
+
+```bash
+bash scripts/continual_validation/run_path_intervention.sh \
+  --stage prepare --base-run-id tailsafe_mixed_incast_localonly_s1
+
+bash scripts/continual_validation/run_path_intervention.sh \
+  --stage eval --base-run-id tailsafe_mixed_incast_localonly_s1 \
+  --variants "after_a after_b restore_323 restore_371 restore_core random_core"
+
+bash scripts/continual_validation/run_path_intervention.sh \
+  --stage eval --base-run-id tailsafe_mixed_incast_localonly_s1 \
+  --variants "restore_rack random_rack"
+
+bash scripts/continual_validation/run_path_intervention.sh \
+  --stage analyze --base-run-id tailsafe_mixed_incast_localonly_s1
+```
+
+Read `path_intervention/PATH_INTERVENTION_REPORT.md`. Compare targeted restores
+with their same-size random controls. A larger old-task recovery together with
+small incast cost supports path-localized functional forgetting; parameter
+drift alone is not sufficient evidence.

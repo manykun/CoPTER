@@ -29,6 +29,7 @@ if SOR_DIR not in sys.path:
     sys.path.insert(0, SOR_DIR)
 
 from network_helper import NetworkHelper
+from port_metrics import PortMetricTracker, parse_watch_ports
 from structures import AgentHelperParameters, NetworkHelperParameters
 from sor_agent_helper import SORAgentHelper
 from sor_replay import SORReplayConfig
@@ -70,6 +71,8 @@ def build_parser():
     parser.add_argument("--phase", type=str, default=None)
     parser.add_argument("--eval_greedy", action="store_true", help="Pure greedy evaluation: epsilon=0, no recording/training/saving.")
     parser.add_argument("--eval_tag", type=str, default="", help="Optional tag recorded into metrics (e.g. phase/task name).")
+    parser.add_argument("--watch_ports", type=str, default="", help="Comma-separated port indices to measure explicitly.")
+    parser.add_argument("--watch_trace_file", type=str, default="", help="Optional JSONL path for per-step metrics of --watch_ports.")
     parser.add_argument("--tb_enable", type=str, default="true")
     parser.add_argument("--tb_log_dir", type=str, default="tb_logs")
     parser.add_argument("--tb_flush_secs", type=int, default=30)
@@ -116,6 +119,10 @@ def main():
     set_random_seed(args.seed)
     if args.reward_queue_lambda < 0 or args.reward_ecn_lambda < 0:
         raise SystemExit("tail-safe reward lambdas must be non-negative")
+    try:
+        watch_ports = parse_watch_ports(args.watch_ports)
+    except ValueError as exc:
+        raise SystemExit(f"invalid --watch_ports: {exc}")
     logger.info(f"Parsed arguments: {args}")
     logger.info(f"Random seed fixed to {args.seed}")
     logger.add(args.exp_name + "_log/sor_copter_{time}.log", level="INFO", rotation="5 MB")
@@ -133,6 +140,11 @@ def main():
         reward_ecn_lambda=args.reward_ecn_lambda,
     )
     network_helper = NetworkHelper(ns3_socket=args.ns3_socket, nhp=network_helper_params)
+    port_metric_tracker = PortMetricTracker(watch_ports, args.watch_trace_file)
+    try:
+        port_metric_tracker.validate(network_helper.get_n_port())
+    except ValueError as exc:
+        raise SystemExit(str(exc))
     agent_helper_params = AgentHelperParameters(
         epsilon_start=args.epsilon_start,
         epsilon_end=args.epsilon_end,
@@ -231,6 +243,9 @@ def main():
                         "exiting before reward/record update."
                     )
                     break
+                port_metric_tracker.observe(
+                    current_step, actions, network_helper
+                )
                 try:
                     n_port = network_helper.get_n_port()
                     congested_ports = [
@@ -350,6 +365,11 @@ def main():
                     if congested_step_count > 0 else 0.0
                 ),
                 "action_histogram": action_histogram,
+                "watch_ports_reward": {
+                    port: (round(value, 6) if value is not None else None)
+                    for port, value in port_metric_tracker.legacy_rewards().items()
+                } if watch_ports else {},
+                "watch_ports_metrics": port_metric_tracker.summary(),
                 **{
                     f"reward_{key}_mean": (
                         reward_component_sums[key] / reward_component_count
@@ -360,6 +380,10 @@ def main():
             })
         except Exception as exc:
             logger.exception(f"Failed to save SOR agent state on exit: {exc}")
+        try:
+            port_metric_tracker.write_trace()
+        except Exception as exc:
+            logger.exception(f"Failed to write watch-port trace: {exc}")
         try:
             network_helper.close_env()
         except Exception:

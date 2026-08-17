@@ -9,6 +9,7 @@ import numpy as np
 from loguru import logger
 from network_helper import NetworkHelper
 from agent_helper import AgentHelper
+from port_metrics import PortMetricTracker, parse_watch_ports
 from structures import (
     AgentHelperParameters,
     NetworkHelperParameters,
@@ -71,6 +72,7 @@ if __name__ == "__main__":
     parser.add_argument("--eval_tag", type=str, default="", help="Optional tag recorded into metrics (e.g. phase/task name).")
     parser.add_argument("--force_action", type=str, default="", help="Sanity-check: force a fixed action index triple 'kmin_idx,kmax_idx,pmax_idx' for ALL ports/steps (overrides the policy). Used to test reward sensitivity to actions.")
     parser.add_argument("--watch_ports", type=str, default="", help="Comma-separated port indices to track explicitly. Their per-epoch rollout reward (EMA) is written to metrics jsonl and TensorBoard (rollout/reward_port{p}) so a fixed port's reward trajectory can be plotted across epochs.")
+    parser.add_argument("--watch_trace_file", type=str, default="", help="Optional JSONL path for per-step metrics of --watch_ports.")
     # ---- tensorboard ----
     parser.add_argument("--tb_enable", type=str, default="true", help="Enable tensorboard logging: true/false")
     parser.add_argument("--tb_log_dir", type=str, default="tb_logs", help="TensorBoard root log dir; actual dir = <tb_log_dir>/<exp_name>")
@@ -103,12 +105,10 @@ if __name__ == "__main__":
             raise SystemExit(f"--force_action must be 'kmin_idx,kmax_idx,pmax_idx'; got {args.force_action!r} ({exc})")
 
     # Parse optional watch-port list (fixed ports whose reward we track across epochs).
-    watch_ports = []
-    if args.watch_ports:
-        try:
-            watch_ports = [int(x) for x in args.watch_ports.split(",") if x.strip() != ""]
-        except Exception as exc:
-            raise SystemExit(f"--watch_ports must be comma-separated ints; got {args.watch_ports!r} ({exc})")
+    try:
+        watch_ports = parse_watch_ports(args.watch_ports)
+    except ValueError as exc:
+        raise SystemExit(f"invalid --watch_ports: {exc}")
 
     # Print the parsed arguments
     logger.info(f"Parsed arguments: {args}")
@@ -133,6 +133,11 @@ if __name__ == "__main__":
     )
     
     network_helper = NetworkHelper(ns3_socket=args.ns3_socket, nhp=network_helper_params)
+    port_metric_tracker = PortMetricTracker(watch_ports, args.watch_trace_file)
+    try:
+        port_metric_tracker.validate(network_helper.get_n_port())
+    except ValueError as exc:
+        raise SystemExit(str(exc))
     
     agent_helper_params = AgentHelperParameters(
         epsilon_start=args.epsilon_start,
@@ -246,6 +251,9 @@ if __name__ == "__main__":
                 if done:
                     logger.info("NS3 terminal notification received after action; exiting before reward/record update.")
                     break
+                port_metric_tracker.observe(
+                    current_step, actions, network_helper
+                )
                 # Accumulate per-port reward for this step.
                 #
                 # KEY DESIGN: aggregate reward ONLY over CONGESTED ports.
@@ -425,9 +433,10 @@ if __name__ == "__main__":
                 # Enables plotting a specific port's reward trajectory across
                 # epochs (None if the port was never congested this epoch).
                 "watch_ports_reward": {
-                    str(p): (round(per_port_reward_ema[p], 6) if p in per_port_reward_ema else None)
-                    for p in watch_ports
+                    port: (round(value, 6) if value is not None else None)
+                    for port, value in port_metric_tracker.legacy_rewards().items()
                 } if watch_ports else {},
+                "watch_ports_metrics": port_metric_tracker.summary(),
             })
             if args.eval_greedy:
                 logger.info(
@@ -449,6 +458,10 @@ if __name__ == "__main__":
                         tb_writer.add_scalar(f"rollout/reward_port{p}", float(rv), step)
         except Exception as e:
             logger.exception(f"Failed to save agent state on exit: {e}")
+        try:
+            port_metric_tracker.write_trace()
+        except Exception as e:
+            logger.exception(f"Failed to write watch-port trace: {e}")
         try:
             network_helper.close_env()
         except Exception:

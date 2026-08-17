@@ -58,6 +58,7 @@ EVAL_GREEDY=0
 EVAL_TAG=""
 SEED=1
 WATCH_PORTS=""
+WATCH_TRACE_FILE=""
 MAX_STEPS=0
 TARGET_TRAIN_STEPS=0
 TB_ENABLE="true"
@@ -113,6 +114,7 @@ while [[ $# -gt 0 ]]; do
         --eval-tag)     EVAL_TAG="$2";        shift 2 ;;
         --seed)         SEED="$2";            shift 2 ;;
         --watch-ports)  WATCH_PORTS="$2";     shift 2 ;;
+        --watch-trace-file) WATCH_TRACE_FILE="$2"; shift 2 ;;
         --max-steps)    MAX_STEPS="$2";       shift 2 ;;
         --target-train-steps) TARGET_TRAIN_STEPS="$2"; shift 2 ;;
         --tb-enable)    TB_ENABLE="$2";       shift 2 ;;
@@ -350,6 +352,7 @@ run_single_experiment() {
         [ "${EVAL_GREEDY}" -eq 1 ] && AGENT_ARGS+=(--eval_greedy)
         [ -n "${EVAL_TAG}" ] && AGENT_ARGS+=(--eval_tag "${EVAL_TAG}")
         [ -n "${WATCH_PORTS}" ] && AGENT_ARGS+=(--watch_ports "${WATCH_PORTS}")
+        [ -n "${WATCH_TRACE_FILE}" ] && AGENT_ARGS+=(--watch_trace_file "${WATCH_TRACE_FILE}")
         [ "${MAX_STEPS}" -gt 0 ] && AGENT_ARGS+=(--max_steps "${MAX_STEPS}")
         [ "${TARGET_TRAIN_STEPS}" -gt 0 ] && AGENT_ARGS+=(--max_global_train_steps "${TARGET_TRAIN_STEPS}")
         [ -n "${RUN_ID}" ] && AGENT_ARGS+=(--run_id "${RUN_ID}")
