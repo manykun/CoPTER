@@ -24,6 +24,14 @@ def port_value(metrics, port, population, key):
     )
 
 
+def port_steps(metrics, port, population):
+    return (
+        metrics.get("watch_ports_metrics", {})
+        .get(str(port), {})
+        .get(f"{population}_steps")
+    )
+
+
 def fmt(value, digits=3):
     return "n/a" if value is None else f"{value:.{digits}f}"
 
@@ -121,8 +129,12 @@ def main():
             "old_port_reward_active": port_value(
                 old_metrics, port, "active", "reward"
             ),
+            "old_port_active_steps": port_steps(old_metrics, port, "active"),
             "old_port_reward_congested": port_value(
                 old_metrics, port, "congested", "reward"
+            ),
+            "old_port_congested_steps": port_steps(
+                old_metrics, port, "congested"
             ),
             "selected_for_safety": label in safety_labels,
             "new_common_flows": len(new_common) if new is not None else None,
@@ -135,8 +147,12 @@ def main():
             "new_port_reward_active": port_value(
                 new_metrics, port, "active", "reward"
             ),
+            "new_port_active_steps": port_steps(new_metrics, port, "active"),
             "new_port_reward_congested": port_value(
                 new_metrics, port, "congested", "reward"
+            ),
+            "new_port_congested_steps": port_steps(
+                new_metrics, port, "congested"
             ),
         })
 
@@ -169,8 +185,8 @@ def main():
         f"- Point set: **{manifest['point_set']}**",
         "- Descriptive experiment; network weights and replay are not updated.",
         "",
-        "| Point | Kmin KB | Kmax KB | Pmax | Old completion | Old p95 us | vs center | Old port reward | Safety | New p95 us | vs center |",
-        "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
+        "| Point | Kmin KB | Kmax KB | Pmax | Old completion | Old p95 us | vs center | Old congested samples | Old port reward | Safety | New p95 us | vs center |",
+        "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
     ]
     for row in rows:
         old_change = row["old_p95_change_vs_center"]
@@ -180,6 +196,7 @@ def main():
             f"{row['pmax']:.2f} | {fmt(row['old_completion'], 4)} | "
             f"{fmt(row['old_p95_fct_us'], 2)} | "
             f"{fmt(None if old_change is None else 100 * old_change, 2)}% | "
+            f"{row['old_port_congested_steps'] if row['old_port_congested_steps'] is not None else 'n/a'} | "
             f"{fmt(row['old_port_reward_congested'], 4)} | "
             f"{'yes' if row['selected_for_safety'] else 'no'} | "
             f"{fmt(row['new_p95_fct_us'], 2)} | "

@@ -29,6 +29,8 @@ def write_eval(root, label, task, fct_ns, completion=1.0):
         "rollout_all_congested_mean": reward,
         "watch_ports_metrics": {
             "323": {
+                "active_steps": 10,
+                "congested_steps": 8,
                 "means_active": {"reward": reward},
                 "means_congested": {"reward": reward, "tail_safe_raw": reward},
             }
@@ -88,6 +90,7 @@ def main():
         ], check=True)
         analysis = json.loads((root / "physical_range_analysis.json").read_text())
         assert analysis["new_common_flows"] == 10
+        assert analysis["rows"][0]["old_port_congested_steps"] == 8
         assert (root / "PHYSICAL_RANGE_REPORT.md").exists()
         assert (root / "physical_range_summary.csv").exists()
 
