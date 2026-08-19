@@ -288,3 +288,70 @@ endpoint+midpoint sweep of at most 13 points. Read
 - Indistinguishable midpoints mean finer discretization is unlikely to help.
 - The dominant-action fraction must be reported: a small fraction means the
   fixed local sweep characterizes one common action, not the full policy.
+
+## Per-port physical range sweep
+
+Use this experiment after the midpoint sweep shows an interior response. It
+does **not** remap the global ACC action grid: ns-3 overrides one flattened
+OpenGym port with physical `Kmin/Kmax/Pmax`, while the frozen after-B policy
+continues to control every other port. Rebuild ns-3 once after pulling this
+change.
+
+The recommended sequence deliberately covers more than one port:
+
+1. Screen 14 points on the known congested Agg-Core port 323 using `mixed`.
+2. Evaluate only the completion-safe top three plus the center on `incast`.
+3. Re-run the winning physical action on high-drift port 191. Treat it as a
+   replication only if the report contains congested samples; otherwise move
+   to another candidate such as 190, 200, or 201.
+4. Run the same two-point comparison on active-but-not-congested port 371 as a
+   negative control.
+
+```bash
+BASE_ID=tailsafe_mixed_incast_localonly_s1
+
+bash build_ns3_copter.sh
+python scripts/continual_validation/test_physical_range_sweep.py
+
+# R1: 14-point old-task physical range screen.
+bash scripts/continual_validation/run_physical_range_sweep.sh \
+  --stage screen --base-run-id "$BASE_ID" --target-port 323 \
+  --point-set wide --port 6156
+
+# R2: center plus the automatically selected top three on the new task.
+bash scripts/continual_validation/run_physical_range_sweep.sh \
+  --stage safety --base-run-id "$BASE_ID" --target-port 323 \
+  --point-set wide --port 6156
+
+BEST_ACTION=$(python - "$BASE_ID" <<'PY'
+import json, sys
+path = (
+    "experiments/continual_validation/" + sys.argv[1] +
+    "/physical_range_port323_wide/top_candidates.json"
+)
+point = json.load(open(path, encoding="utf-8"))["candidates"][0]
+print(f"{point['kmin_kb']},{point['kmax_kb']},{point['pmax']}")
+PY
+)
+echo "Selected physical action: $BEST_ACTION"
+
+# R3: second path candidate. Use a different socket if run in parallel.
+bash scripts/continual_validation/run_physical_range_sweep.sh \
+  --stage all --base-run-id "$BASE_ID" --target-port 191 \
+  --point-set control --control-action "$BEST_ACTION" \
+  --experiment-id physical_range_port191_control --port 6256
+
+# R4: non-congested negative control.
+bash scripts/continual_validation/run_physical_range_sweep.sh \
+  --stage all --base-run-id "$BASE_ID" --target-port 371 \
+  --point-set control --control-action "$BEST_ACTION" \
+  --experiment-id physical_range_port371_control --port 6356
+```
+
+Each output directory contains `PHYSICAL_RANGE_REPORT.md`,
+`physical_range_summary.csv`, `physical_range_analysis.json`, and the exact
+`top_candidates.json` used by the safety stage. A useful wider range must
+improve old-task p95 or the target port's congested reward, preserve completion,
+and avoid a meaningful incast regression. Evidence for a general range effect
+requires the direction to reproduce on a second **congested** port; port 371 is
+only a specificity control.
