@@ -479,3 +479,20 @@ bash scripts/continual_validation/run_continual.sh \
 `scripts/continual_validation/run_physical_range_sweep.sh`，输出报告为
 `PHYSICAL_RANGE_REPORT.md`。该阶段不设置 PASS/FAIL 门槛，结论同时依据 p95、
 完成率、目标端口拥塞 reward 和新任务代价。
+
+## 18. 当前实验转向：先修正 ACC 动作空间，再构造受控遗忘
+
+扩大范围的单端口复测显示，端口最大队列只有 24.56 KB 时，旧动作空间最小
+`Kmin=32 KB` 不会触发 ECN；降低到 16/32 KB 虽改变了队列，但并未稳定改善
+端到端 p95。继续逐点手调无法形成可靠的灾难性遗忘证据。因此当前停止 SOR
+比较和单端口阈值搜索，转入预注册的 ACC 动作空间实验。
+
+代码新增 `multiscale` 动作空间：将合法 `(Kmin,Kmax)` 作为一个 Profile 头，
+另设 Pmax 头。40 Gbps Profile 覆盖 `(8,24)` 至 `(80,160)` KB，共 9 个
+阈值对和 7 个 Pmax，既覆盖低队列端口，又避免独立动作头产生非法组合。
+
+新任务 `samepath_steady` 与 `samepath_burst` 使用相同的 640 条源、目的、大小
+流，只改变周期内到达时间的分散或聚集。实验按“冻结任务生成 → 五动作静态冲突
+筛选 → ACC A→B 顺序训练”执行。只有先观察到不同最优动作和可测性能敏感性，
+才开展长训练。完整命令和结论边界见
+`docs/acc-forgetting-multiscale-experiment.md`。

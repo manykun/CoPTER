@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import os
 import numpy as np
 import torch
@@ -5,14 +7,13 @@ import random
 from loguru import logger
 from scipy.interpolate import RegularGridInterpolator
 
-from backbone import DualHeadNN, TripleHeadACC, TripleHeadCoPTER
+from backbone import DualHeadNN, DualHeadProfileACC, TripleHeadACC, TripleHeadCoPTER
 from structures import (
-    ACC_KMAX_VALUES,
-    ACC_KMIN_VALUES,
-    ACC_PMAX_VALUES,
     AgentParameters,
     DCQCNParameters,
+    acc_action_dimensions,
     acc_action_from_indices,
+    describe_acc_action,
 )
 
 
@@ -50,17 +51,28 @@ class ACC(Agent):
     5. Call update_target_network() to update the target network priodically.
     6. Call save_model() to save the model to the specified path.
     """
-    def __init__(self, name: str, agent_params: AgentParameters):
+    def __init__(self, name: str, agent_params: AgentParameters, action_space="legacy"):
         # Agent Parameters Initialization
         self.p = agent_params
         self.name = name
+        self.action_space = action_space
         
         # Model Initialization
         self.device = torch.device("cpu")
         # 初始化策略网络（评估网络），每个训练步更新
-        self.policy_net = TripleHeadACC(self.p.state_dim, self.p.kmin_dim, self.p.kmax_dim, self.p.pmax_dim, self.p.hidden_dims).to(self.device)
+        action_dims = acc_action_dimensions(action_space)
+        if action_space == "legacy":
+            network_factory = lambda: TripleHeadACC(
+                self.p.state_dim, *action_dims, self.p.hidden_dims
+            )
+        else:
+            network_factory = lambda: DualHeadProfileACC(
+                self.p.state_dim, *action_dims, self.p.hidden_dims
+            )
+        self.action_dims = action_dims
+        self.policy_net = network_factory().to(self.device)
         # 初始化目标网络，定期更新
-        self.target_net = TripleHeadACC(self.p.state_dim, self.p.kmin_dim, self.p.kmax_dim, self.p.pmax_dim, self.p.hidden_dims).to(self.device)
+        self.target_net = network_factory().to(self.device)
         # 创建优化器，adam优化算法
         self.optimizer = torch.optim.Adam(self.policy_net.parameters(), lr=self.p.learning_rate)
         # 计算损失函数
@@ -94,7 +106,7 @@ class ACC(Agent):
             self.target_net.load_state_dict(self.policy_net.state_dict())
 
     # 基于贪心策略和基于state的策略网络来选择动作
-    def select_action(self, state, epsilon=0.1) -> tuple[DCQCNParameters, tuple[int, int, int]]:
+    def select_action(self, state, epsilon=0.1):
         """
         Select an action based on the current state and epsilon-greedy policy.
         Args:
@@ -104,22 +116,23 @@ class ACC(Agent):
             tuple: A tuple containing the selected action as a `DCQCNParameters` object and the action indices.
         """
         if random.random() < epsilon:
-            action = (random.randint(0, self.p.kmin_dim - 1), 
-                      random.randint(0, self.p.kmax_dim - 1), 
-                      random.randint(0, self.p.pmax_dim - 1))
+            action = tuple(random.randint(0, size - 1) for size in self.action_dims)
         else:
             state = torch.FloatTensor(state).unsqueeze(0).to(self.device)
             with torch.no_grad():
-                kmin, kmax, pmax = self.policy_net(state)
-                logger.info(f"ACC Agent {self.name} - Q Values: Kmin: {kmin}, Kmax: {kmax}, Pmax: {pmax}")
-            kmin_index = kmin.argmax().item()
-            kmax_index = kmax.argmax().item()
-            pmax_index = pmax.argmax().item()
-            action = (int(kmin_index), int(kmax_index), int(pmax_index))
+                q_heads = self.policy_net(state)
+                logger.info(
+                    f"ACC Agent {self.name} - Q Values ({self.action_space}): "
+                    f"{q_heads}"
+                )
+            action = tuple(int(head.argmax().item()) for head in q_heads)
         
-        logger.info(f"ACC Agent {self.name} - Action: Kmin: {ACC_KMIN_VALUES[action[0]]}, Kmax: {ACC_KMAX_VALUES[action[1]]}, Pmax: {ACC_PMAX_VALUES[action[2]]}")
+        logger.info(
+            f"ACC Agent {self.name} - Action ({self.action_space}): "
+            f"{describe_acc_action(action, self.action_space)}"
+        )
         # 返回kmin、kmax、pmax参数值以及索引值
-        return (acc_action_from_indices(action), action)
+        return (acc_action_from_indices(action, self.action_space), action)
     
     
     def train_model(self, state, action, reward, next_state):
@@ -132,18 +145,15 @@ class ACC(Agent):
         next_state = torch.FloatTensor(next_state).to(self.device)
         
         # Q prediction value based on current state and action，需要进行梯度计算
-        q_kmin_tensor, q_kmax_tensor, q_pmax_tensor = self.policy_net(state)  # torch.no_grad() couldn't be used here.
-        
-        # 拆分动作索引
-        action_kmin_idx = action[:, 0]
-        action_kmax_idx = action[:, 1]
-        action_pmax_idx = action[:, 2]
-
-        # 预测Q值汇总计算：Q = q_kmin + q_kmax + q_pmax
-        q_prediction = (
-            q_kmin_tensor.gather(1, action_kmin_idx.unsqueeze(1)) + 
-            q_kmax_tensor.gather(1, action_kmax_idx.unsqueeze(1)) + 
-            q_pmax_tensor.gather(1, action_pmax_idx.unsqueeze(1))
+        q_heads = self.policy_net(state)  # gradients are required here
+        if action.ndim != 2 or action.shape[1] != len(q_heads):
+            raise ValueError(
+                f"{self.action_space} replay action width is {action.shape}; "
+                f"expected (*, {len(q_heads)})"
+            )
+        q_prediction = sum(
+            head.gather(1, action[:, index].unsqueeze(1))
+            for index, head in enumerate(q_heads)
         )
 
         # Q value estimation based on reward and next state
@@ -153,16 +163,13 @@ class ACC(Agent):
         with torch.no_grad():
             # Double DQN
             # 用next_state 利用策略网络选择动作
-            q_kmin_tensor, q_kmax_tensor, q_pmax_tensor = self.policy_net(next_state)
-            action_kmin_idx = q_kmin_tensor.argmax(dim=1)
-            action_kmax_idx = q_kmax_tensor.argmax(dim=1)
-            action_pmax_idx = q_pmax_tensor.argmax(dim=1)
+            policy_heads = self.policy_net(next_state)
+            next_actions = [head.argmax(dim=1) for head in policy_heads]
             # 用next_state 利用目标网络评估动作
-            q_kmin_tensor, q_kmax_tensor, q_pmax_tensor = self.target_net(next_state)
-            q_target = (
-                q_kmin_tensor.gather(1, action_kmin_idx.unsqueeze(1)) +
-                q_kmax_tensor.gather(1, action_kmax_idx.unsqueeze(1)) +
-                q_pmax_tensor.gather(1, action_pmax_idx.unsqueeze(1))
+            target_heads = self.target_net(next_state)
+            q_target = sum(
+                head.gather(1, index.unsqueeze(1))
+                for head, index in zip(target_heads, next_actions)
             )
             # 目标网络Q值估计，原文中的yj=r+Q_target
             q_estimation = reward.unsqueeze(1).to(self.device) + self.p.gamma * q_target

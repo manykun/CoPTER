@@ -9,7 +9,14 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "copter"))
 sys.path.insert(0, str(ROOT / "tools" / "traffic"))
 
-from structures import DCQCNParameters, acc_action_from_indices, validate_acc_action_indices
+from structures import (
+    ACC_MULTISCALE_PMAX_VALUES,
+    ACC_MULTISCALE_THRESHOLD_PROFILES,
+    DCQCNParameters,
+    acc_action_dimensions,
+    acc_action_from_indices,
+    validate_acc_action_indices,
+)
 from TraGen import downsample_flows, expand_hosts
 
 
@@ -61,6 +68,32 @@ class ACCValidationTests(unittest.TestCase):
             validate_acc_action_indices((6, 0, 0))
         with self.assertRaises(ValueError):
             validate_acc_action_indices((0, 0))
+
+    def test_multiscale_action_mapping_and_bounds(self):
+        self.assertEqual(acc_action_dimensions("multiscale"), (9, 7))
+        self.assertEqual(
+            acc_action_from_indices((0, 0), "multiscale"),
+            DCQCNParameters(0.0, 0.0, 0.05),
+        )
+        self.assertEqual(
+            acc_action_from_indices((8, 6), "multiscale"),
+            DCQCNParameters(1.0, 1.0, 1.0),
+        )
+        with self.assertRaises(ValueError):
+            validate_acc_action_indices((9, 0), "multiscale")
+        with self.assertRaises(ValueError):
+            validate_acc_action_indices((0, 7), "multiscale")
+        with self.assertRaises(ValueError):
+            validate_acc_action_indices((0, 0, 0), "multiscale")
+
+    def test_multiscale_profiles_are_valid_physical_threshold_pairs(self):
+        kmin_min, kmin_max = 5.0, 50.0
+        kmax_min, kmax_max = 15.0, 100.0
+        for kmin_norm, kmax_norm in ACC_MULTISCALE_THRESHOLD_PROFILES:
+            kmin = kmin_min + kmin_norm * (kmin_max - kmin_min)
+            kmax = kmax_min + kmax_norm * (kmax_max - kmax_min)
+            self.assertLess(kmin, kmax)
+        self.assertEqual(ACC_MULTISCALE_PMAX_VALUES, (0.05, 0.1, 0.2, 0.4, 0.6, 0.8, 1.0))
 
     def test_compact_host_range(self):
         self.assertEqual(expand_hosts({"start": 4, "end": 7}), [4, 5, 6, 7])

@@ -67,6 +67,7 @@ ONE_SHOT=0
 RUN_ID=""
 PHASE=""
 ACC_HIDDEN_DIMS="32,64,64,32"
+ACTION_SPACE="legacy"
 REWARD_WEIGHTS="0.50,0.30,0.20"
 REWARD_PROFILE="weighted"
 REWARD_QUEUE_LAMBDA=5.0
@@ -124,6 +125,7 @@ while [[ $# -gt 0 ]]; do
         --run-id)       RUN_ID="$2";          shift 2 ;;
         --phase)        PHASE="$2";           shift 2 ;;
         --acc-hidden-dims) ACC_HIDDEN_DIMS="$2"; shift 2 ;;
+        --action-space) ACTION_SPACE="$2"; shift 2 ;;
         --reward-weights) REWARD_WEIGHTS="$2"; shift 2 ;;
         --reward-profile) REWARD_PROFILE="$2"; shift 2 ;;
         --reward-queue-lambda) REWARD_QUEUE_LAMBDA="$2"; shift 2 ;;
@@ -154,6 +156,10 @@ done
 case "${SHARED_REPLAY}" in
     true|false) ;;
     *) echo "--shared-replay must be true or false" >&2; exit 2 ;;
+esac
+case "${ACTION_SPACE}" in
+    legacy|multiscale) ;;
+    *) echo "--action-space must be legacy or multiscale" >&2; exit 2 ;;
 esac
 
 # ==================== Resolve Experiment List ====================
@@ -341,6 +347,7 @@ run_single_experiment() {
                 --seed "${SEED}"
                 --tb_enable "${TB_ENABLE}"
                 --acc_hidden_dims "${ACC_HIDDEN_DIMS}"
+                --action_space "${ACTION_SPACE}"
                 --reward_weights "${REWARD_WEIGHTS}"
                 --reward_profile "${REWARD_PROFILE}"
                 --reward_queue_lambda "${REWARD_QUEUE_LAMBDA}"

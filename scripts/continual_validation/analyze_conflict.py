@@ -9,9 +9,6 @@ from pathlib import Path
 from analyze_forgetting import load_eval, summarize
 
 
-ACTIONS = ("aggressive", "balanced", "permissive")
-
-
 def relative_spread(values):
     values = [value for value in values if value is not None]
     if len(values) < 2:
@@ -40,18 +37,33 @@ def main():
         (args.run_dir / "manifest.json").read_text(encoding="utf-8")
     )
     tasks = (manifest["task_a"], manifest["task_b"])
+    action_sets = []
+    for task in tasks:
+        task_dir = args.run_dir / "screen" / task
+        actions = {
+            path.name
+            for path in task_dir.iterdir()
+            if path.is_dir() and (path / "metrics.json").is_file()
+        }
+        action_sets.append(actions)
+    actions = sorted(set.intersection(*action_sets))
+    if len(actions) < 2:
+        raise SystemExit(
+            "conflict screen requires at least two common fixed actions; "
+            f"found {actions}"
+        )
     decision = {"tasks": {}}
     rows = []
     for task in tasks:
         runs = {
             action: load_eval(args.run_dir / "screen" / task / action)
-            for action in ACTIONS
+            for action in actions
         }
         common_flows = set.intersection(
             *(set(run["flows"]) for run in runs.values())
         )
         measurements = {}
-        for action in ACTIONS:
+        for action in actions:
             # Completion uses all offered flows; latency statistics use the
             # identical flow intersection across every fixed action so a
             # policy cannot look better merely because hard flows did not

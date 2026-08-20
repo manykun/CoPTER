@@ -163,6 +163,8 @@ def main():
         period = float(group.get("period_s", 1)) * 1e9  # 纳秒
         incast_dst_count = int(group.get("incast_dst_count", 1))
         reduce_group_size = int(group.get("reduce_group_size", 8))
+        burst_jitter_ns = int(group.get("burst_jitter_ns", 1000))
+        spread_fraction = float(group.get("spread_fraction", 0.0))
 
         # 加载CDF文件
         cdf = load_cdf(cdf_path)
@@ -258,7 +260,72 @@ def main():
                     heapq.heapreplace(host_heap, (t + inter_t, src))
 
         ###########################################################################
-        # 3. 全归约模式（all_reduce）
+        # 3. 周期同步汇聚模式（periodic_incast）
+        ###########################################################################
+        elif pattern == "periodic_incast":
+            if incast_dst_count > len(dst_hosts):
+                raise ValueError(
+                    f"incast_dst_count ({incast_dst_count}) > "
+                    f"len(dst_hosts) ({len(dst_hosts)})"
+                )
+            if period <= 0:
+                raise ValueError("period_s must be positive for periodic_incast")
+            if burst_jitter_ns < 0:
+                raise ValueError("burst_jitter_ns cannot be negative")
+            if not 0.0 <= spread_fraction < 1.0:
+                raise ValueError("spread_fraction must be in [0, 1)")
+            incast_dsts = random.sample(dst_hosts, k=incast_dst_count)
+            print(
+                f"Periodic Incast: {len(src_hosts)} sources -> "
+                f"{incast_dst_count} destinations ({incast_dsts}), "
+                f"period={period * 1e-9:g}s"
+            )
+            cycle = 0
+            while True:
+                cycle_start = start_time + int(cycle * period)
+                if cycle_start >= start_time + duration:
+                    break
+                for src_offset, src in enumerate(src_hosts):
+                    dst = incast_dsts[src_offset % len(incast_dsts)]
+                    if dst == src:
+                        alternatives = [candidate for candidate in incast_dsts if candidate != src]
+                        if not alternatives:
+                            raise ValueError(
+                                "periodic_incast source/destination sets create only self-loops"
+                            )
+                        dst = alternatives[src_offset % len(alternatives)]
+                    # Do not consume the traffic-size RNG when placing flows.
+                    # With the same seed, source/destination/size tuples are
+                    # therefore identical for a spread (steady) and clustered
+                    # (burst) scenario; only arrival times differ.
+                    if spread_fraction > 0.0:
+                        denominator = max(1, len(src_hosts) - 1)
+                        jitter = int(
+                            period * spread_fraction * src_offset / denominator
+                        )
+                    elif burst_jitter_ns:
+                        jitter = (
+                            src_offset * 7919 + cycle * 104729
+                        ) % (burst_jitter_ns + 1)
+                    else:
+                        jitter = 0
+                    flow_start = cycle_start + jitter
+                    size = max(1, int(customRand.rand()))
+                    flow_list.append({
+                        "id": flow_count,
+                        "src": int(src),
+                        "dst": int(dst),
+                        "size": int(size),
+                        "start_ns": int(flow_start),
+                        "start_s": flow_start * 1e-9,
+                        "pg": 3,
+                        "dport": 100,
+                    })
+                    flow_count += 1
+                cycle += 1
+
+        ###########################################################################
+        # 4. 全归约模式（all_reduce）
         ###########################################################################
         elif pattern == "all_reduce":
             # 划分All-Reduce组
@@ -305,7 +372,7 @@ def main():
                             flow_count += 1
 
         ###########################################################################
-        # 4. 全对全模式（all_to_all）
+        # 5. 全对全模式（all_to_all）
         ###########################################################################
         elif pattern == "all_to_all":
             # 校验源和目的集合

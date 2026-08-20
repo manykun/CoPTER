@@ -69,34 +69,98 @@ class DCQCNParameters:
     p_max: float = 0.2
 
 
-# ACC and SOR share the same discrete action grid.  Keep the grid in one
-# place so forced-action baselines and learned policies always mean the same
-# thing.
+# Legacy ACC and SOR share this discrete action grid. Keep it unchanged so
+# existing checkpoints and forced-action baselines retain their meaning.
 ACC_KMIN_VALUES = (0.0, 0.0949, 0.2259, 0.4066, 0.6560, 1.0)
 ACC_KMAX_VALUES = (0.0, 0.25, 0.5, 1.0)
 ACC_PMAX_VALUES = (0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0)
 
+# The multiscale action space selects one *valid threshold pair* plus Pmax.
+# It is designed for configurations whose base (25 Gbps) ranges are
+# Kmin=[5, 50] KB and Kmax=[15, 100] KB. ns-3 applies the existing link-rate
+# scaling, so the corresponding 40 Gbps physical profiles are:
+#   (8,24), (16,32), (20,40), (24,48), (32,64), (48,96),
+#   (57,110), (63,120), (80,160) KB.
+# Pairing the thresholds prevents the independent heads from proposing
+# Kmin >= Kmax and deliberately covers the sub-32-KB queues observed in the
+# forgetting study.
+ACC_ACTION_SPACES = ("legacy", "multiscale")
+ACC_MULTISCALE_THRESHOLD_PROFILES = (
+    (0.0, 0.0),
+    (1.0 / 9.0, 1.0 / 17.0),
+    (1.0 / 6.0, 2.0 / 17.0),
+    (2.0 / 9.0, 3.0 / 17.0),
+    (1.0 / 3.0, 5.0 / 17.0),
+    (5.0 / 9.0, 9.0 / 17.0),
+    (49.0 / 72.0, 43.0 / 68.0),
+    (55.0 / 72.0, 12.0 / 17.0),
+    (1.0, 1.0),
+)
+ACC_MULTISCALE_PMAX_VALUES = (0.05, 0.1, 0.2, 0.4, 0.6, 0.8, 1.0)
 
-def validate_acc_action_indices(indices):
-    """Validate and return an ACC action index triple."""
-    if len(indices) != 3:
-        raise ValueError("ACC action must contain kmin,kmax,pmax indices")
+
+def acc_action_dimensions(action_space="legacy"):
+    """Return the categorical head sizes for an ACC action space."""
+    if action_space == "legacy":
+        return (len(ACC_KMIN_VALUES), len(ACC_KMAX_VALUES), len(ACC_PMAX_VALUES))
+    if action_space == "multiscale":
+        return (
+            len(ACC_MULTISCALE_THRESHOLD_PROFILES),
+            len(ACC_MULTISCALE_PMAX_VALUES),
+        )
+    raise ValueError(
+        f"unknown ACC action space {action_space!r}; expected one of "
+        f"{ACC_ACTION_SPACES}"
+    )
+
+
+def validate_acc_action_indices(indices, action_space="legacy"):
+    """Validate and return categorical ACC action indices."""
+    limits = acc_action_dimensions(action_space)
+    expected = len(limits)
+    if len(indices) != expected:
+        labels = "kmin,kmax,pmax" if action_space == "legacy" else "profile,pmax"
+        raise ValueError(
+            f"{action_space} ACC action must contain {labels} indices"
+        )
     action = tuple(int(index) for index in indices)
-    limits = (len(ACC_KMIN_VALUES), len(ACC_KMAX_VALUES), len(ACC_PMAX_VALUES))
-    names = ("kmin", "kmax", "pmax")
+    names = (
+        ("kmin", "kmax", "pmax")
+        if action_space == "legacy"
+        else ("profile", "pmax")
+    )
     for name, index, limit in zip(names, action, limits):
         if not 0 <= index < limit:
             raise ValueError(f"{name} index {index} is outside [0, {limit - 1}]")
     return action
 
 
-def acc_action_from_indices(indices):
-    """Map a validated ACC action index triple to DCQCN parameters."""
-    kmin_index, kmax_index, pmax_index = validate_acc_action_indices(indices)
+def acc_action_from_indices(indices, action_space="legacy"):
+    """Map categorical ACC action indices to normalized DCQCN parameters."""
+    action = validate_acc_action_indices(indices, action_space)
+    if action_space == "multiscale":
+        profile_index, pmax_index = action
+        kmin_norm, kmax_norm = ACC_MULTISCALE_THRESHOLD_PROFILES[profile_index]
+        return DCQCNParameters(
+            kmin_norm,
+            kmax_norm,
+            ACC_MULTISCALE_PMAX_VALUES[pmax_index],
+        )
+    kmin_index, kmax_index, pmax_index = action
     return DCQCNParameters(
         ACC_KMIN_VALUES[kmin_index],
         ACC_KMAX_VALUES[kmax_index],
         ACC_PMAX_VALUES[pmax_index],
+    )
+
+
+def describe_acc_action(indices, action_space="legacy"):
+    """Return a concise, auditable description of a categorical action."""
+    action = validate_acc_action_indices(indices, action_space)
+    parameters = acc_action_from_indices(action, action_space)
+    return (
+        f"indices={action}, Kmin={parameters.k_min_norm:.6f}, "
+        f"Kmax={parameters.k_max_norm:.6f}, Pmax={parameters.p_max:.3f}"
     )
 
 

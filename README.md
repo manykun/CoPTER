@@ -26,3 +26,7 @@ For the Chinese research-progress report covering paper baselines, ACC
 effectiveness, the negative continual-learning result, reward diagnosis,
 tail-safe reward redesign, registered gates, and next objectives, see
 [docs/research-progress-acc-sor.md](docs/research-progress-acc-sor.md).
+
+For the controlled ACC multiscale-action and same-path steady-to-burst
+catastrophic-forgetting experiment, see
+[docs/acc-forgetting-multiscale-experiment.md](docs/acc-forgetting-multiscale-experiment.md).

@@ -15,6 +15,7 @@ from port_metrics import (
     parse_watch_ports,
 )
 from structures import (
+    ACC_ACTION_SPACES,
     AgentHelperParameters,
     DCQCNParameters,
     NetworkHelperParameters,
@@ -57,6 +58,12 @@ if __name__ == "__main__":
     parser.add_argument("--epsilon_end", type=float, default=0.05)
     parser.add_argument("--epsilon_decay_steps", type=int, default=50000)
     parser.add_argument("--acc_hidden_dims", type=str, default="32,64,64,32", help="Comma-separated ACC hidden layer widths.")
+    parser.add_argument(
+        "--action_space",
+        choices=ACC_ACTION_SPACES,
+        default="legacy",
+        help="ACC categorical action space. multiscale uses a valid threshold-profile head plus Pmax.",
+    )
     parser.add_argument("--reward_weights", type=str, default="0.50,0.30,0.20", help="Throughput,queue,ECN reward weights; must sum to 1.")
     parser.add_argument("--reward_profile", choices=("weighted", "tail_safe"), default="weighted")
     parser.add_argument("--reward_queue_lambda", type=float, default=5.0)
@@ -106,9 +113,19 @@ if __name__ == "__main__":
     forced_action_idx = None
     if args.force_action:
         try:
-            forced_action_idx = validate_acc_action_indices(args.force_action.split(","))
+            forced_action_idx = validate_acc_action_indices(
+                args.force_action.split(","), args.action_space
+            )
         except Exception as exc:
-            raise SystemExit(f"--force_action must be 'kmin_idx,kmax_idx,pmax_idx'; got {args.force_action!r} ({exc})")
+            expected = (
+                "kmin_idx,kmax_idx,pmax_idx"
+                if args.action_space == "legacy"
+                else "profile_idx,pmax_idx"
+            )
+            raise SystemExit(
+                f"--force_action must be '{expected}' for {args.action_space}; "
+                f"got {args.force_action!r} ({exc})"
+            )
     try:
         forced_port_action = parse_forced_port_action(args.force_port_action)
     except ValueError as exc:
@@ -175,7 +192,8 @@ if __name__ == "__main__":
     agent_helper = AgentHelper(node_number=network_helper.get_n_port(), ahp=agent_helper_params, model_dir=args.model_dir, mode=args.mode,
                                exp_name=args.exp_name, online=args.online, network_helper=network_helper, fmap_dir=args.fmap_dir,
                                run_id=args.run_id, phase=args.phase, config_hash=config_hash,
-                               acc_hidden_dims=acc_hidden_dims)
+                               acc_hidden_dims=acc_hidden_dims,
+                               acc_action_space=args.action_space)
 
     checkpoint_name = args.checkpoint if args.resume and args.checkpoint else args.override_name
     agent_helper.load(checkpoint_name)
@@ -253,7 +271,9 @@ if __name__ == "__main__":
                 if forced_action_idx is not None:
                     # Sanity-check: bypass the policy and apply a fixed action to
                     # every port so we can measure reward sensitivity to actions.
-                    forced_para = acc_action_from_indices(forced_action_idx)
+                    forced_para = acc_action_from_indices(
+                        forced_action_idx, args.action_space
+                    )
                     n_port = network_helper.get_n_port()
                     paras = [forced_para for _ in range(n_port)]
                     actions = [forced_action_idx for _ in range(n_port)]
@@ -441,6 +461,7 @@ if __name__ == "__main__":
                 "congested_step_ratio": (congested_step_count / current_step) if current_step > 0 else 0.0,
                 "avg_congested_ports_per_step": (congested_port_count_sum / congested_step_count) if congested_step_count > 0 else 0.0,
                 "forced_action": list(forced_action_idx) if forced_action_idx is not None else None,
+                "action_space": args.action_space,
                 "forced_port_action": (
                     list(forced_port_action)
                     if forced_port_action is not None else None

@@ -34,6 +34,9 @@ SMOKE=0
 RESUME=0
 REPORT_ONLY=0
 SHARED_REPLAY="true"
+ACTION_SPACE="legacy"
+KMIN_RANGE_EXPLICIT=0
+KMAX_RANGE_EXPLICIT=0
 
 usage() {
     cat <<'EOF'
@@ -66,6 +69,7 @@ Important options:
   --resume
   --report-only          Record all measurements without PASS/FAIL gating
   --shared-replay BOOL   ACC cross-port global replay: true (default) or false
+  --action-space NAME    legacy or multiscale (ACC only)
 EOF
 }
 
@@ -84,14 +88,15 @@ while [[ $# -gt 0 ]]; do
         --reward-profile) REWARD_PROFILE="$2"; shift 2 ;;
         --reward-queue-lambda) REWARD_QUEUE_LAMBDA="$2"; shift 2 ;;
         --reward-ecn-lambda) REWARD_ECN_LAMBDA="$2"; shift 2 ;;
-        --kmin-range) KMIN_RANGE="$2"; shift 2 ;;
-        --kmax-range) KMAX_RANGE="$2"; shift 2 ;;
+        --kmin-range) KMIN_RANGE="$2"; KMIN_RANGE_EXPLICIT=1; shift 2 ;;
+        --kmax-range) KMAX_RANGE="$2"; KMAX_RANGE_EXPLICIT=1; shift 2 ;;
         --baseline-stop-time) BASELINE_STOP_TIME="$2"; shift 2 ;;
         --port) PORT="$2"; shift 2 ;;
         --smoke) SMOKE=1; shift ;;
         --resume) RESUME=1; shift ;;
         --report-only) REPORT_ONLY=1; shift ;;
         --shared-replay) SHARED_REPLAY="$2"; shift 2 ;;
+        --action-space) ACTION_SPACE="$2"; shift 2 ;;
         -h|--help) usage; exit 0 ;;
         *) echo "Unknown argument: $1" >&2; usage >&2; exit 2 ;;
     esac
@@ -121,6 +126,22 @@ case "${SHARED_REPLAY}" in
     true|false) ;;
     *) echo "shared-replay must be true or false" >&2; exit 2 ;;
 esac
+case "${ACTION_SPACE}" in
+    legacy|multiscale) ;;
+    *) echo "action-space must be legacy or multiscale" >&2; exit 2 ;;
+esac
+if [[ "${ACTION_SPACE}" == "multiscale" ]]; then
+    [[ "${KMIN_RANGE_EXPLICIT}" -eq 1 ]] || KMIN_RANGE="5000,50000"
+    [[ "${KMAX_RANGE_EXPLICIT}" -eq 1 ]] || KMAX_RANGE="15000,100000"
+    [[ "${KMIN_RANGE}" == "5000,50000" && "${KMAX_RANGE}" == "15000,100000" ]] || {
+        echo "multiscale requires --kmin-range 5000,50000 and --kmax-range 15000,100000" >&2
+        exit 2
+    }
+    [[ "${STAGE}" != "sor" && "${STAGE}" != "all" ]] || {
+        echo "multiscale is an ACC-only experiment; run prepare, screen, and acc separately" >&2
+        exit 2
+    }
+fi
 python - "${REWARD_PROFILE}" "${REWARD_QUEUE_LAMBDA}" "${REWARD_ECN_LAMBDA}" <<'PY'
 import sys
 
@@ -155,7 +176,7 @@ manifest_json() {
         "${ACC_HIDDEN_DIMS}" "${REWARD_PROFILE}" \
         "${REWARD_QUEUE_LAMBDA}" "${REWARD_ECN_LAMBDA}" "${KMIN_RANGE}" \
         "${KMAX_RANGE}" "${BASELINE_STOP_TIME}" "${MAX_FLOWS}" \
-        "${SHARED_REPLAY}" <<'PY'
+        "${ACTION_SPACE}" "${SHARED_REPLAY}" <<'PY'
 import json
 import sys
 
@@ -163,7 +184,7 @@ keys = (
     "run_id", "task_a", "task_b", "seed", "buffer_kb", "phase_epochs",
     "updates_per_task", "epsilon_decay_steps", "hidden_dims",
     "reward_profile", "reward_queue_lambda", "reward_ecn_lambda", "kmin_range",
-    "kmax_range", "simulator_stop_time", "max_flows",
+    "kmax_range", "simulator_stop_time", "max_flows", "action_space",
 )
 values = sys.argv[1:-1]
 record = dict(zip(keys, values))
@@ -174,7 +195,12 @@ for key in (
     record[key] = int(record[key])
 for key in ("reward_queue_lambda", "reward_ecn_lambda"):
     record[key] = float(record[key])
-record["methods"] = ["acc", "sor"]
+if record["action_space"] == "multiscale":
+    record["methods"] = ["acc"]
+else:
+    # Preserve legacy manifests so previously prepared runs remain resumable.
+    del record["action_space"]
+    record["methods"] = ["acc", "sor"]
 record["curriculum"] = [record["task_a"], record["task_b"]]
 record["evaluation"] = {
     "greedy": True,
@@ -385,6 +411,7 @@ evaluate() {
         --reward-queue-lambda "${REWARD_QUEUE_LAMBDA}" \
         --reward-ecn-lambda "${REWARD_ECN_LAMBDA}" \
         --shared-replay "${SHARED_REPLAY}" \
+        --action-space "${ACTION_SPACE}" \
         --tb-enable false \
         --run-id "${RUN_ID}" \
         --phase "${phase}"
@@ -420,13 +447,25 @@ screen() {
     local screen_dir="${RUN_DIR}/screen"
     local model_dir="${screen_dir}/models"
     local exp="continual_${RUN_ID}_screen_s${SEED}"
-    local task label action name base
+    local task label action name base specifications
     mkdir -p "${model_dir}"
+    if [[ "${ACTION_SPACE}" == "multiscale" ]]; then
+        specifications=(
+            "low_strong:1,5"
+            "low_moderate:2,3"
+            "mid:4,3"
+            "high_moderate:6,2"
+            "high_gentle:8,1"
+        )
+    else
+        specifications=(
+            "aggressive:0,0,9"
+            "balanced:2,1,4"
+            "permissive:5,3,0"
+        )
+    fi
     for task in "${TASK_A}" "${TASK_B}"; do
-        for specification in \
-            "aggressive:0,0,9" \
-            "balanced:2,1,4" \
-            "permissive:5,3,0"; do
+        for specification in "${specifications[@]}"; do
             label="${specification%%:*}"
             action="${specification#*:}"
             [[ -s "${screen_dir}/${task}/${label}/metrics.json" ]] && continue
@@ -437,6 +476,7 @@ screen() {
             bash "${ROOT}/run_training.sh" \
                 --one-shot --eval-greedy \
                 --force-action "${action}" \
+                --action-space "${ACTION_SPACE}" \
                 --eval-tag "screen_${task}_${label}" \
                 --config "$(runtime_config_path "${task}")" \
                 --exp "${exp}" --mode ACC --port "${PORT}" --seed "${SEED}" \
@@ -551,6 +591,7 @@ train_method() {
             --reward-queue-lambda "${REWARD_QUEUE_LAMBDA}" \
             --reward-ecn-lambda "${REWARD_ECN_LAMBDA}" \
             --shared-replay "${SHARED_REPLAY}" \
+            --action-space "${ACTION_SPACE}" \
             --tb-enable false \
             --run-id "${RUN_ID}" \
             --phase train_a \
@@ -598,6 +639,7 @@ train_method() {
             --reward-queue-lambda "${REWARD_QUEUE_LAMBDA}" \
             --reward-ecn-lambda "${REWARD_ECN_LAMBDA}" \
             --shared-replay "${SHARED_REPLAY}" \
+            --action-space "${ACTION_SPACE}" \
             --tb-enable false \
             --run-id "${RUN_ID}" \
             --phase train_b \
