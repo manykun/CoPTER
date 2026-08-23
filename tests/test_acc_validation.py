@@ -1,4 +1,5 @@
 import importlib.util
+import json
 import sys
 import tempfile
 import unittest
@@ -107,6 +108,23 @@ class ACCValidationTests(unittest.TestCase):
         self.assertIs(downsample_flows(flows, 0), flows)
         with self.assertRaises(ValueError):
             downsample_flows(flows, -1)
+
+    def test_stress_pair_changes_only_arrival_spread(self):
+        traffic = ROOT / "tools" / "traffic" / "acc_validation"
+        steady = json.loads(
+            (traffic / "samepath_steady_stress.json").read_text()
+        )[0]
+        burst = json.loads(
+            (traffic / "samepath_burst_stress.json").read_text()
+        )[0]
+        steady_spread = steady.pop("spread_fraction")
+        burst_spread = burst.pop("spread_fraction")
+        self.assertEqual(steady, burst)
+        self.assertEqual(steady_spread, 0.95)
+        self.assertEqual(burst_spread, 0.0)
+        sources = steady["src_hosts"]["end"] - steady["src_hosts"]["start"] + 1
+        cycles = round(steady["duration_s"] / steady["period_s"])
+        self.assertEqual(sources * cycles, 1920)
 
     def test_percentile_and_rank_correlation(self):
         analysis = load_analysis_module()

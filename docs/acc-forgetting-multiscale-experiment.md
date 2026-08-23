@@ -38,13 +38,20 @@ Pmax 为 `0.05, 0.10, 0.20, 0.40, 0.60, 0.80, 1.00`。因此共有 63 个
 
 ## 3. 受控任务
 
-任务 A 为 `samepath_steady`，任务 B 为 `samepath_burst`。两者使用相同 seed
-时具有完全相同的 640 个 `(src,dst,size)` 流，只改变开始时间：
+正式压力实验使用任务 A `samepath_steady_stress` 和任务 B
+`samepath_burst_stress`。两者使用相同 seed 时具有完全相同的 1920 个
+`(src,dst,pg,dport,size)` 流，只改变开始时间：
 
-- steady：每个周期内将 32 个 incast 流均匀铺开；
-- burst：将同一批流聚集在周期起点附近。
+- steady：每个周期内将 64 个 incast 流均匀铺开；
+- burst：将同一批 64 个流聚集在周期起点附近。
 
 因此 A→B 的主要处理变量是流量时间突发性，而不是路径、流大小分布或流数。
+`--task-pair-mode same-flows` 会在 prepare 阶段自动按多重集合校验流身份，并
+生成 `TASK_PAIR_REPORT.md`；不再依赖人工抽查。
+
+训练前还要求端口 323（物理链路 `288-295`）在两个任务中均活跃并出现拥塞，
+同时要求“任务 B 偏好动作”施加到任务 A 时至少带来 3% 的 p95 代价。这样长
+训练只在共享瓶颈和方向性动作冲突都已被实测确认后启动。
 
 ## 4. 服务器实验顺序
 
@@ -53,24 +60,31 @@ Pmax 为 `0.05, 0.10, 0.20, 0.40, 0.60, 0.80, 1.00`。因此共有 63 个
 ```bash
 conda activate /mnt/sdb1/xuduokun/conda/envs/m3
 
-RUN_ID=acc_multiscale_samepath_s1
+RUN_ID=acc_forgetting_stress_s1
 COMMON_ARGS=(
   --run-id "$RUN_ID"
-  --task-a samepath_steady
-  --task-b samepath_burst
+  --task-a samepath_steady_stress
+  --task-b samepath_burst_stress
   --seed 1
   --buffer-kb 400
   --action-space multiscale
+  --task-pair-mode same-flows
   --reward-profile tail_safe
   --reward-queue-lambda 5.0
   --reward-ecn-lambda 5.0
   --reward-weights "0.50,0.30,0.20"
   --shared-replay false
-  --updates-per-task 900
-  --phase-epochs 80
+  --updates-task-a 900
+  --updates-task-b 1800
+  --phase-epochs 180
   --eps-decay 2500
+  --task-b-eps-start 0.50
+  --task-b-eps-decay 6000
   --acc-hidden-dims "32,64,64,32"
-  --report-only
+  --screen-watch-ports "323"
+  --screen-min-active-samples 50
+  --screen-min-congested-samples 20
+  --screen-min-old-task-p95-penalty 0.03
 )
 ```
 
@@ -81,33 +95,20 @@ bash scripts/continual_validation/run_continual.sh \
   --stage prepare "${COMMON_ARGS[@]}"
 ```
 
-核对两个任务除了时间列之外具有相同流集合：
+查看自动生成的任务对校验：
 
 ```bash
-python - "$RUN_ID" <<'PY'
-import sys
-from pathlib import Path
-
-root = Path("experiments/continual_validation") / sys.argv[1] / "tasks"
-
-def flows(task):
-    rows = (root / task / "input.flow").read_text().splitlines()[1:]
-    return sorted(tuple(row.split()[:5]) for row in rows)
-
-a = flows("samepath_steady")
-b = flows("samepath_burst")
-print("flows A/B:", len(a), len(b))
-print("same src/dst/size multiset:", a == b)
-PY
+cat "experiments/continual_validation/${RUN_ID}/TASK_PAIR_REPORT.md"
 ```
 
-预期输出为 `640 640` 和 `True`。
+预期为 1920/1920、流身份相同、时间分布不同；burst 的 1 us 窗口峰值流数
+和 interarrival CV 应显著高于 steady。
 
 ### 阶段 2：固定动作冲突筛选
 
 ```bash
 bash scripts/continual_validation/run_continual.sh \
-  --stage screen "${COMMON_ARGS[@]}"
+  --stage screen "${COMMON_ARGS[@]}" --report-only
 
 cat "experiments/continual_validation/${RUN_ID}/screen/REPORT.md"
 ```
@@ -117,9 +118,19 @@ cat "experiments/continual_validation/${RUN_ID}/screen/REPORT.md"
 - 两任务的最佳 reward 动作不同；
 - p95 或完成率随动作发生可测变化；
 - reward 最优动作没有靠牺牲大量完成率取胜。
+- 端口 323 在两个任务的固定动作测试中均满足活跃/拥塞样本要求；
+- B 偏好动作在 A 上造成至少 3% 的 p95 代价。
 
-若两个任务仍选择同一个最优动作，应先保留完整负结果并停止长训练；此时说明
-任务冲突仍不足，而不是 ACC 没有遗忘。
+若描述性结果满足以上条件，用相同输出重新应用注册 gate（已有 10 次仿真结果
+会被复用，不会重跑）：
+
+```bash
+bash scripts/continual_validation/run_continual.sh \
+  --stage screen "${COMMON_ARGS[@]}"
+```
+
+若 gate 失败，应保留完整负结果并停止长训练；此时说明任务冲突或共享路径仍
+不足，而不是 ACC 没有遗忘。
 
 ### 阶段 3：ACC 顺序训练
 
@@ -127,7 +138,7 @@ cat "experiments/continual_validation/${RUN_ID}/screen/REPORT.md"
 
 ```bash
 nohup bash scripts/continual_validation/run_continual.sh \
-  --stage acc "${COMMON_ARGS[@]}" \
+  --stage acc "${COMMON_ARGS[@]}" --report-only \
   > "experiments/continual_validation/${RUN_ID}/acc_driver.log" 2>&1 &
 
 tail -f "experiments/continual_validation/${RUN_ID}/acc_driver.log"
@@ -140,7 +151,14 @@ cat "experiments/continual_validation/${RUN_ID}/CONTINUAL_REPORT.md"
 ```
 
 核心比较为同一冻结 A 流量上的 `after_a` 与 `after_b`：reward 下降、共同完成流
-p95 上升和完成率下降分别报告，不用单一阈值隐藏原始效果量。
+p95 上升和完成率下降分别报告，不用单一阈值隐藏原始效果量。这里保留
+`--report-only`，避免旧的通用 acquisition gate 在压力场景中提前终止 B 阶段；
+静态冲突筛选仍已在上一阶段单独应用 gate。
+
+其中 A 使用 900 次优化更新，B 使用额外 1800 次更新。B 阶段将 phase-local
+epsilon 重置到 0.50，并在 6000 个环境步内衰减到 0.05；全局模型、训练步和
+本地 replay 连续保留。此非对称预算用于增加新任务覆盖，但没有改变两个任务
+的奖励函数、动作空间或评估流量。
 
 ## 5. 结论边界
 

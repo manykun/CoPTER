@@ -19,7 +19,11 @@ SEED=1
 BUFFER_KB=400
 PHASE_EPOCHS=100
 UPDATES_PER_TASK=600
+UPDATES_TASK_A=""
+UPDATES_TASK_B=""
 EPS_DECAY=2500
+TASK_B_EPS_START="1.0"
+TASK_B_EPS_DECAY=""
 ACC_HIDDEN_DIMS="32,64,64,32"
 REWARD_PROFILE="tail_safe"
 REWARD_QUEUE_LAMBDA="5.0"
@@ -35,8 +39,17 @@ RESUME=0
 REPORT_ONLY=0
 SHARED_REPLAY="true"
 ACTION_SPACE="legacy"
+TASK_PAIR_MODE="independent"
+SCREEN_WATCH_PORTS=""
+SCREEN_MIN_ACTIVE_SAMPLES=0
+SCREEN_MIN_CONGESTED_SAMPLES=0
+SCREEN_MIN_OLD_TASK_P95_PENALTY="0.0"
 KMIN_RANGE_EXPLICIT=0
 KMAX_RANGE_EXPLICIT=0
+UPDATES_TASK_A_EXPLICIT=0
+UPDATES_TASK_B_EXPLICIT=0
+TASK_B_EPS_EXPLICIT=0
+REWARD_WEIGHTS_EXPLICIT=0
 
 usage() {
     cat <<'EOF'
@@ -57,19 +70,29 @@ Important options:
   --task-b NAME
   --seed N
   --updates-per-task N
+  --updates-task-a N     Override optimizer-update budget for task A
+  --updates-task-b N     Override optimizer-update budget for task B
   --phase-epochs N       Safety cap; update count is the actual budget
   --buffer-kb N
   --eps-decay N
+  --task-b-eps-start X   Reset task-B exploration to X (default: 1.0)
+  --task-b-eps-decay N   Task-B phase-local epsilon decay
   --acc-hidden-dims CSV
   --reward-profile NAME
   --reward-queue-lambda X
   --reward-ecn-lambda X
+  --reward-weights CSV
   --port N
   --smoke
   --resume
   --report-only          Record all measurements without PASS/FAIL gating
   --shared-replay BOOL   ACC cross-port global replay: true (default) or false
   --action-space NAME    legacy or multiscale (ACC only)
+  --task-pair-mode NAME  independent or same-flows
+  --screen-watch-ports CSV
+  --screen-min-active-samples N
+  --screen-min-congested-samples N
+  --screen-min-old-task-p95-penalty X
 EOF
 }
 
@@ -83,11 +106,16 @@ while [[ $# -gt 0 ]]; do
         --buffer-kb) BUFFER_KB="$2"; shift 2 ;;
         --phase-epochs) PHASE_EPOCHS="$2"; shift 2 ;;
         --updates-per-task) UPDATES_PER_TASK="$2"; shift 2 ;;
+        --updates-task-a) UPDATES_TASK_A="$2"; UPDATES_TASK_A_EXPLICIT=1; shift 2 ;;
+        --updates-task-b) UPDATES_TASK_B="$2"; UPDATES_TASK_B_EXPLICIT=1; shift 2 ;;
         --eps-decay) EPS_DECAY="$2"; shift 2 ;;
+        --task-b-eps-start) TASK_B_EPS_START="$2"; TASK_B_EPS_EXPLICIT=1; shift 2 ;;
+        --task-b-eps-decay) TASK_B_EPS_DECAY="$2"; TASK_B_EPS_EXPLICIT=1; shift 2 ;;
         --acc-hidden-dims) ACC_HIDDEN_DIMS="$2"; shift 2 ;;
         --reward-profile) REWARD_PROFILE="$2"; shift 2 ;;
         --reward-queue-lambda) REWARD_QUEUE_LAMBDA="$2"; shift 2 ;;
         --reward-ecn-lambda) REWARD_ECN_LAMBDA="$2"; shift 2 ;;
+        --reward-weights) REWARD_WEIGHTS="$2"; REWARD_WEIGHTS_EXPLICIT=1; shift 2 ;;
         --kmin-range) KMIN_RANGE="$2"; KMIN_RANGE_EXPLICIT=1; shift 2 ;;
         --kmax-range) KMAX_RANGE="$2"; KMAX_RANGE_EXPLICIT=1; shift 2 ;;
         --baseline-stop-time) BASELINE_STOP_TIME="$2"; shift 2 ;;
@@ -97,6 +125,11 @@ while [[ $# -gt 0 ]]; do
         --report-only) REPORT_ONLY=1; shift ;;
         --shared-replay) SHARED_REPLAY="$2"; shift 2 ;;
         --action-space) ACTION_SPACE="$2"; shift 2 ;;
+        --task-pair-mode) TASK_PAIR_MODE="$2"; shift 2 ;;
+        --screen-watch-ports) SCREEN_WATCH_PORTS="$2"; shift 2 ;;
+        --screen-min-active-samples) SCREEN_MIN_ACTIVE_SAMPLES="$2"; shift 2 ;;
+        --screen-min-congested-samples) SCREEN_MIN_CONGESTED_SAMPLES="$2"; shift 2 ;;
+        --screen-min-old-task-p95-penalty) SCREEN_MIN_OLD_TASK_P95_PENALTY="$2"; shift 2 ;;
         -h|--help) usage; exit 0 ;;
         *) echo "Unknown argument: $1" >&2; usage >&2; exit 2 ;;
     esac
@@ -122,6 +155,21 @@ esac
     echo "updates-per-task must be a positive integer" >&2
     exit 2
 }
+[[ -n "${UPDATES_TASK_A}" ]] || UPDATES_TASK_A="${UPDATES_PER_TASK}"
+[[ -n "${UPDATES_TASK_B}" ]] || UPDATES_TASK_B="${UPDATES_PER_TASK}"
+[[ -n "${TASK_B_EPS_DECAY}" ]] || TASK_B_EPS_DECAY="${EPS_DECAY}"
+for value in "${UPDATES_TASK_A}" "${UPDATES_TASK_B}" "${EPS_DECAY}" "${TASK_B_EPS_DECAY}"; do
+    [[ "${value}" =~ ^[1-9][0-9]*$ ]] || {
+        echo "update budgets and epsilon decay must be positive integers" >&2
+        exit 2
+    }
+done
+for value in "${SCREEN_MIN_ACTIVE_SAMPLES}" "${SCREEN_MIN_CONGESTED_SAMPLES}"; do
+    [[ "${value}" =~ ^[0-9]+$ ]] || {
+        echo "screen sample thresholds must be non-negative integers" >&2
+        exit 2
+    }
+done
 case "${SHARED_REPLAY}" in
     true|false) ;;
     *) echo "shared-replay must be true or false" >&2; exit 2 ;;
@@ -129,6 +177,10 @@ esac
 case "${ACTION_SPACE}" in
     legacy|multiscale) ;;
     *) echo "action-space must be legacy or multiscale" >&2; exit 2 ;;
+esac
+case "${TASK_PAIR_MODE}" in
+    independent|same-flows) ;;
+    *) echo "task-pair-mode must be independent or same-flows" >&2; exit 2 ;;
 esac
 if [[ "${ACTION_SPACE}" == "multiscale" ]]; then
     [[ "${KMIN_RANGE_EXPLICIT}" -eq 1 ]] || KMIN_RANGE="5000,50000"
@@ -142,7 +194,9 @@ if [[ "${ACTION_SPACE}" == "multiscale" ]]; then
         exit 2
     }
 fi
-python - "${REWARD_PROFILE}" "${REWARD_QUEUE_LAMBDA}" "${REWARD_ECN_LAMBDA}" <<'PY'
+python - "${REWARD_PROFILE}" "${REWARD_QUEUE_LAMBDA}" "${REWARD_ECN_LAMBDA}" \
+    "${REWARD_WEIGHTS}" "${TASK_B_EPS_START}" \
+    "${SCREEN_MIN_OLD_TASK_P95_PENALTY}" "${SCREEN_WATCH_PORTS}" <<'PY'
 import sys
 
 profile = sys.argv[1]
@@ -155,11 +209,40 @@ for label, raw in zip(("queue", "ECN"), sys.argv[2:]):
         raise SystemExit(f"{label} lambda is invalid: {exc}")
     if value < 0:
         raise SystemExit(f"{label} lambda must be non-negative")
+weights = sys.argv[4].split(",")
+if len(weights) != 3:
+    raise SystemExit("reward weights must contain three comma-separated values")
+try:
+    weights = [float(value) for value in weights]
+    task_b_epsilon = float(sys.argv[5])
+    old_task_penalty = float(sys.argv[6])
+except ValueError as exc:
+    raise SystemExit(f"invalid floating-point experiment parameter: {exc}")
+if any(value < 0 for value in weights) or sum(weights) <= 0:
+    raise SystemExit("reward weights must be non-negative and sum to more than zero")
+if not 0 <= task_b_epsilon <= 1:
+    raise SystemExit("task-b-eps-start must be in [0, 1]")
+if old_task_penalty < 0:
+    raise SystemExit("screen-min-old-task-p95-penalty must be non-negative")
+try:
+    ports = [int(value.strip()) for value in sys.argv[7].split(",") if value.strip()]
+except ValueError as exc:
+    raise SystemExit(f"screen watch ports are invalid: {exc}")
+if len(ports) != len(set(ports)) or any(port < 0 for port in ports):
+    raise SystemExit("screen watch ports must be unique non-negative integers")
 PY
+if [[ -z "${SCREEN_WATCH_PORTS}" &&
+      ( "${SCREEN_MIN_ACTIVE_SAMPLES}" -gt 0 ||
+        "${SCREEN_MIN_CONGESTED_SAMPLES}" -gt 0 ) ]]; then
+    echo "screen sample thresholds require --screen-watch-ports" >&2
+    exit 2
+fi
 
 if [[ "${SMOKE}" -eq 1 ]]; then
     PHASE_EPOCHS=3
     UPDATES_PER_TASK=10
+    UPDATES_TASK_A=10
+    UPDATES_TASK_B=10
     MAX_FLOWS=2000
 fi
 
@@ -176,7 +259,13 @@ manifest_json() {
         "${ACC_HIDDEN_DIMS}" "${REWARD_PROFILE}" \
         "${REWARD_QUEUE_LAMBDA}" "${REWARD_ECN_LAMBDA}" "${KMIN_RANGE}" \
         "${KMAX_RANGE}" "${BASELINE_STOP_TIME}" "${MAX_FLOWS}" \
-        "${ACTION_SPACE}" "${SHARED_REPLAY}" <<'PY'
+        "${ACTION_SPACE}" "${SHARED_REPLAY}" "${UPDATES_TASK_A}" \
+        "${UPDATES_TASK_B}" "${TASK_B_EPS_START}" "${TASK_B_EPS_DECAY}" \
+        "${TASK_PAIR_MODE}" "${SCREEN_WATCH_PORTS}" \
+        "${SCREEN_MIN_ACTIVE_SAMPLES}" "${SCREEN_MIN_CONGESTED_SAMPLES}" \
+        "${SCREEN_MIN_OLD_TASK_P95_PENALTY}" "${REWARD_WEIGHTS}" \
+        "${UPDATES_TASK_A_EXPLICIT}" "${UPDATES_TASK_B_EXPLICIT}" \
+        "${TASK_B_EPS_EXPLICIT}" "${REWARD_WEIGHTS_EXPLICIT}" <<'PY'
 import json
 import sys
 
@@ -186,7 +275,7 @@ keys = (
     "reward_profile", "reward_queue_lambda", "reward_ecn_lambda", "kmin_range",
     "kmax_range", "simulator_stop_time", "max_flows", "action_space",
 )
-values = sys.argv[1:-1]
+values = sys.argv[1:18]
 record = dict(zip(keys, values))
 for key in (
     "seed", "buffer_kb", "phase_epochs", "updates_per_task",
@@ -209,8 +298,44 @@ record["evaluation"] = {
     "new_task_acquisition": ["after_a", "after_b"],
 }
 record["experiment_type"] = "traffic_shift_common_objective"
+shared_replay = sys.argv[18]
+updates_a, updates_b = map(int, sys.argv[19:21])
+task_b_eps_start = float(sys.argv[21])
+task_b_eps_decay = int(sys.argv[22])
+task_pair_mode = sys.argv[23]
+screen_watch_ports = sys.argv[24]
+screen_active = int(sys.argv[25])
+screen_congested = int(sys.argv[26])
+screen_old_p95 = float(sys.argv[27])
+reward_weights = [float(value) for value in sys.argv[28].split(",")]
+updates_explicit = sys.argv[29] == "1" or sys.argv[30] == "1"
+task_b_eps_explicit = sys.argv[31] == "1"
+reward_weights_explicit = sys.argv[32] == "1"
+
 record["epsilon_schedule"] = "reset_per_task"
-if sys.argv[-1] == "false":
+if updates_explicit:
+    record["updates_task_a"] = updates_a
+    record["updates_task_b"] = updates_b
+if task_b_eps_explicit:
+    record["epsilon_schedule"] = {
+        "task_a": {"start": 1.0, "end": 0.05, "decay_steps": record["epsilon_decay_steps"]},
+        "task_b": {"start": task_b_eps_start, "end": 0.05, "decay_steps": task_b_eps_decay},
+    }
+if reward_weights_explicit:
+    record["reward_weights"] = reward_weights
+if task_pair_mode != "independent":
+    record["task_pair_mode"] = task_pair_mode
+if screen_watch_ports:
+    record["screen_watch_ports"] = [
+        int(value) for value in screen_watch_ports.split(",") if value.strip()
+    ]
+if screen_active or screen_congested or screen_old_p95:
+    record["screen_requirements"] = {
+        "min_active_samples": screen_active,
+        "min_congested_samples": screen_congested,
+        "min_old_task_p95_penalty": screen_old_p95,
+    }
+if shared_replay == "false":
     # Omit the default true value so manifests created before this ablation
     # remain byte-for-byte compatible with the expected record.
     record["shared_replay"] = False
@@ -316,6 +441,17 @@ validate_configs() {
     done
 }
 
+verify_task_pair() {
+    [[ "${TASK_PAIR_MODE}" == "same-flows" ]] || return 0
+    python "${ROOT}/scripts/continual_validation/verify_task_pair.py" \
+        --task-a "${RUN_DIR}/tasks/${TASK_A}/input.flow" \
+        --task-b "${RUN_DIR}/tasks/${TASK_B}/input.flow" \
+        --json-output "${RUN_DIR}/task_pair_analysis.json" \
+        --report-output "${RUN_DIR}/TASK_PAIR_REPORT.md" \
+        --require-identical-flows \
+        --require-timing-shift
+}
+
 prepare() {
     if [[ -f "${MANIFEST}" ]]; then
         if [[ "${RESUME}" -ne 1 ]]; then
@@ -325,6 +461,7 @@ prepare() {
         fi
         check_manifest
         validate_configs
+        verify_task_pair
         ensure_runtime_configs
         echo "Prepared run already matches requested arguments; keeping fixed files."
         return 0
@@ -346,6 +483,7 @@ prepare() {
         cp "${FLOW_DIR}/${name}.conf" "${destination}/input.conf"
         cp "${FLOW_DIR}/${name}.meta" "${destination}/input.meta"
     done
+    verify_task_pair
     manifest_json > "${MANIFEST}.tmp"
     mv "${MANIFEST}.tmp" "${MANIFEST}"
     validate_configs
@@ -388,6 +526,8 @@ evaluate() {
     local name="${task}_seed${SEED}"
     local base
     base="$(output_base "${task}")"
+    local watch_args=()
+    [[ -z "${SCREEN_WATCH_PORTS}" ]] || watch_args+=(--watch-ports "${SCREEN_WATCH_PORTS}")
     rm -f "${base}".*
     echo "[${method}] frozen evaluation phase=${phase} task=${task}"
     bash "${ROOT}/run_training.sh" \
@@ -414,7 +554,8 @@ evaluate() {
         --action-space "${ACTION_SPACE}" \
         --tb-enable false \
         --run-id "${RUN_ID}" \
-        --phase "${phase}"
+        --phase "${phase}" \
+        "${watch_args[@]}"
     copy_eval_outputs "${method}" "${phase}" "${task}" "${exp}" "${model_dir}"
 }
 
@@ -448,6 +589,8 @@ screen() {
     local model_dir="${screen_dir}/models"
     local exp="continual_${RUN_ID}_screen_s${SEED}"
     local task label action name base specifications
+    local watch_args=()
+    [[ -z "${SCREEN_WATCH_PORTS}" ]] || watch_args+=(--watch-ports "${SCREEN_WATCH_PORTS}")
     mkdir -p "${model_dir}"
     if [[ "${ACTION_SPACE}" == "multiscale" ]]; then
         specifications=(
@@ -487,7 +630,8 @@ screen() {
                 --reward-queue-lambda "${REWARD_QUEUE_LAMBDA}" \
                 --reward-ecn-lambda "${REWARD_ECN_LAMBDA}" \
                 --shared-replay "${SHARED_REPLAY}" \
-                --tb-enable false --run-id "${RUN_ID}" --phase screen
+                --tb-enable false --run-id "${RUN_ID}" --phase screen \
+                "${watch_args[@]}"
             copy_screen_outputs "${task}" "${label}" "${exp}" "${model_dir}"
         done
     done
@@ -503,6 +647,10 @@ screen() {
         --min-p95-spread 0.05 \
         --min-completion-spread 0.02 \
         --completion-tolerance 0.01 \
+        --required-watch-ports "${SCREEN_WATCH_PORTS}" \
+        --min-port-active-samples "${SCREEN_MIN_ACTIVE_SAMPLES}" \
+        --min-port-congested-samples "${SCREEN_MIN_CONGESTED_SAMPLES}" \
+        --min-old-task-p95-penalty "${SCREEN_MIN_OLD_TASK_P95_PENALTY}" \
         "${screen_gate_args[@]}"
     mkdir -p "${screen_dir}/markers"
     touch "${screen_dir}/markers/complete"
@@ -525,6 +673,8 @@ train_method() {
     local model_dir="${method_dir}/models"
     local exp="continual_${RUN_ID}_${method}_s${SEED}"
     local method_port="${PORT}"
+    local watch_args=()
+    [[ -z "${SCREEN_WATCH_PORTS}" ]] || watch_args+=(--watch-ports "${SCREEN_WATCH_PORTS}")
     [[ "${method}" == "sor" ]] && method_port=$((PORT + 100))
 
     check_manifest
@@ -571,7 +721,7 @@ train_method() {
     fi
 
     if [[ ! -f "${method_dir}/markers/train_a" ]]; then
-        echo "[${method}] train task A=${TASK_A}, target updates=${UPDATES_PER_TASK}"
+        echo "[${method}] train task A=${TASK_A}, target updates=${UPDATES_TASK_A}"
         bash "${ROOT}/run_training.sh" \
             --config "$(runtime_config_path "${TASK_A}")" \
             --exp "${exp}" \
@@ -581,7 +731,7 @@ train_method() {
             --buffer "${BUFFER_KB}" \
             --model-dir "${model_dir}" \
             --episodes "${PHASE_EPOCHS}" \
-            --target-train-steps "${UPDATES_PER_TASK}" \
+            --target-train-steps "${UPDATES_TASK_A}" \
             --eps-start 1.0 \
             --eps-end 0.05 \
             --eps-decay "${EPS_DECAY}" \
@@ -595,7 +745,8 @@ train_method() {
             --tb-enable false \
             --run-id "${RUN_ID}" \
             --phase train_a \
-            --sor-save-buffer-every 1
+            --sor-save-buffer-every 1 \
+            "${watch_args[@]}"
         snapshot_models "${method_dir}" after_a
         touch "${method_dir}/markers/train_a"
     fi
@@ -617,9 +768,26 @@ train_method() {
         --completion-tolerance 0.01 "${acquisition_mode_args[@]}"
 
     if [[ ! -f "${method_dir}/markers/train_b" ]]; then
-        local target_epoch=$((PHASE_EPOCHS * 2))
-        local target_updates=$((UPDATES_PER_TASK * 2))
-        echo "[${method}] continue same model on task B=${TASK_B}, target updates=${target_updates}"
+        local after_a_state="${method_dir}/checkpoints/after_a/${exp}_train_state.json"
+        [[ -s "${after_a_state}" ]] || {
+            echo "Missing after-A train state: ${after_a_state}" >&2
+            return 1
+        }
+        local after_a_epoch after_a_updates
+        read -r after_a_epoch after_a_updates < <(
+            python - "${after_a_state}" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as handle:
+    state = json.load(handle)
+print(int(state["epoch"]), int(state["global_train_step"]))
+PY
+        )
+        local target_epoch=$((after_a_epoch + PHASE_EPOCHS))
+        local target_updates=$((after_a_updates + UPDATES_TASK_B))
+        echo "[${method}] continue same model on task B=${TASK_B}, "\
+"additional updates=${UPDATES_TASK_B}, absolute target=${target_updates}"
         bash "${ROOT}/run_training.sh" \
             --config "$(runtime_config_path "${TASK_B}")" \
             --exp "${exp}" \
@@ -630,9 +798,9 @@ train_method() {
             --model-dir "${model_dir}" \
             --episodes "${target_epoch}" \
             --target-train-steps "${target_updates}" \
-            --eps-start 1.0 \
+            --eps-start "${TASK_B_EPS_START}" \
             --eps-end 0.05 \
-            --eps-decay "${EPS_DECAY}" \
+            --eps-decay "${TASK_B_EPS_DECAY}" \
             --acc-hidden-dims "${ACC_HIDDEN_DIMS}" \
             --reward-weights "${REWARD_WEIGHTS}" \
             --reward-profile "${REWARD_PROFILE}" \
@@ -643,7 +811,8 @@ train_method() {
             --tb-enable false \
             --run-id "${RUN_ID}" \
             --phase train_b \
-            --sor-save-buffer-every 1
+            --sor-save-buffer-every 1 \
+            "${watch_args[@]}"
         snapshot_models "${method_dir}" after_b
         touch "${method_dir}/markers/train_b"
     fi
