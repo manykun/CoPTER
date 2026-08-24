@@ -40,7 +40,7 @@ Options:
   --run-id ID
   --seed N
   --buffer-kb N
-  --spread-profile NAME  coarse, micro, or micro32 (default: micro)
+  --spread-profile NAME  coarse, micro, micro32, or micro48 (default: micro)
   --watch-ports CSV      Comma-separated ports, or all (default)
   --watch-port N         Backward-compatible single-port form
   --port N
@@ -104,7 +104,14 @@ case "${SPREAD_PROFILE}" in
             "samepath32_spread0005_stress:0.005"
         )
         ;;
-    *) echo "spread-profile must be coarse, micro, or micro32" >&2; exit 2 ;;
+    micro48)
+        CANDIDATE_RECORDS=(
+            "samepath48_spread005_stress:0.05"
+            "samepath48_spread002_stress:0.02"
+            "samepath48_spread001_stress:0.01"
+        )
+        ;;
+    *) echo "spread-profile must be coarse, micro, micro32, or micro48" >&2; exit 2 ;;
 esac
 for record in "${CANDIDATE_RECORDS[@]}"; do
     CANDIDATES+=("${record%%:*}")

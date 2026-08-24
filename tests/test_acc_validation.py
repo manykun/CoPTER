@@ -185,6 +185,27 @@ class ACCValidationTests(unittest.TestCase):
         self.assertEqual(sources, 32)
         self.assertEqual(sources * cycles, 960)
 
+    def test_micro48_calibration_holds_flow_identity_fixed(self):
+        traffic = ROOT / "tools" / "traffic" / "acc_validation"
+        names = (
+            "samepath48_spread005_stress",
+            "samepath48_spread002_stress",
+            "samepath48_spread001_stress",
+        )
+        expected_spreads = (0.05, 0.02, 0.01)
+        common = None
+        for name, expected in zip(names, expected_spreads):
+            record = json.loads((traffic / f"{name}.json").read_text())[0]
+            self.assertEqual(record.pop("spread_fraction"), expected)
+            if common is None:
+                common = record
+            else:
+                self.assertEqual(record, common)
+        sources = common["src_hosts"]["end"] - common["src_hosts"]["start"] + 1
+        cycles = round(common["duration_s"] / common["period_s"])
+        self.assertEqual(sources, 48)
+        self.assertEqual(sources * cycles, 1440)
+
     def test_percentile_and_rank_correlation(self):
         analysis = load_analysis_module()
         self.assertEqual(analysis.percentile([1, 2, 3], 0.5), 2)

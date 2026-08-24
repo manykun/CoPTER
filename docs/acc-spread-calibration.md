@@ -158,6 +158,53 @@ tail -f "experiments/continual_validation/${CAL_ID}_driver.log"
 该配置运行 4 个 spread × 3 个固定动作，共 12 次冻结仿真。只有报告产生
 `recommended_pair.env` 后，才进入后续 ACC A→B 训练。
 
+### 32 源恢复可控性后的 48 源中点校准
+
+若 `micro32` 的完成率恢复到 90% 以上并出现动作敏感性，但所有场景的 reward
+最优动作仍相同，则在32和64源之间先测试48源。三个场景都包含0–47号发送端、
+接收端128和相同的1440条流身份，仅将 spread 设置为0.05、0.02和0.01。
+
+```bash
+CAL_ID=acc_micro48_calibration_s1
+CAL_ARGS=(
+  --run-id "$CAL_ID"
+  --seed 1
+  --buffer-kb 400
+  --spread-profile micro48
+  --watch-ports all
+  --port 6256
+  --reward-profile tail_safe
+  --reward-queue-lambda 5.0
+  --reward-ecn-lambda 5.0
+  --reward-weights "0.50,0.30,0.20"
+  --acc-hidden-dims "32,64,64,32"
+)
+
+bash scripts/continual_validation/run_spread_calibration.sh \
+  --stage prepare "${CAL_ARGS[@]}"
+
+nohup bash scripts/continual_validation/run_spread_calibration.sh \
+  --stage run "${CAL_ARGS[@]}" \
+  > "experiments/continual_validation/${CAL_ID}_driver.log" 2>&1 &
+
+echo $! > "experiments/continual_validation/${CAL_ID}_driver.pid"
+tail -f "experiments/continual_validation/${CAL_ID}_driver.log"
+```
+
+运行结束后执行：
+
+```bash
+bash scripts/continual_validation/run_spread_calibration.sh \
+  --stage analyze "${CAL_ARGS[@]}"
+
+CAL_DIR="experiments/continual_validation/${CAL_ID}/calibration"
+cat "${CAL_DIR}/CALIBRATION_REPORT.md"
+```
+
+本轮最多运行3个 spread × 3个动作，共9次冻结仿真。如果三个场景仍全部选择
+`high_gentle`且完成率不低于90%，下一轮提高到56源；若完成率低于90%并且动作
+差异消失，则降低到40源。不要在同一个校准任务对中混用不同 fan-in。
+
 ## 4. 使用推荐任务对做正式筛选
 
 以下命令只有在 `recommended_pair.env` 存在时执行：
