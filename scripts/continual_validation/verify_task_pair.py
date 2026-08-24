@@ -73,6 +73,12 @@ def analyze(task_a, task_b):
     flows_b = load_flows(task_b)
     identities_a = Counter(identity for identity, _ in flows_a)
     identities_b = Counter(identity for identity, _ in flows_b)
+    endpoint_support_a = {
+        identity[:4] for identity in identities_a
+    }
+    endpoint_support_b = {
+        identity[:4] for identity in identities_b
+    }
     starts_a = [start for _, start in flows_a]
     starts_b = [start for _, start in flows_b]
     same_identity = identities_a == identities_b
@@ -83,6 +89,8 @@ def analyze(task_a, task_b):
         "flows_a": len(flows_a),
         "flows_b": len(flows_b),
         "same_flow_identity_multiset": same_identity,
+        "same_endpoint_support": endpoint_support_a == endpoint_support_b,
+        "flow_distribution_shift": not same_identity,
         "same_timing_sequence": same_timing,
         "timing_only_shift": same_identity and not same_timing,
         "identity_sha256_a": identity_digest(identities_a),
@@ -99,6 +107,8 @@ def write_report(result, path):
         "# Controlled task-pair verification",
         "",
         f"- Same flow-identity multiset: **{result['same_flow_identity_multiset']}**",
+        f"- Same endpoint support: **{result['same_endpoint_support']}**",
+        f"- Flow-distribution shift: **{result['flow_distribution_shift']}**",
         f"- Timing-only shift: **{result['timing_only_shift']}**",
         f"- Flow counts: **{result['flows_a']} / {result['flows_b']}**",
         "",
@@ -127,6 +137,8 @@ def main():
     parser.add_argument("--report-output", type=Path)
     parser.add_argument("--require-identical-flows", action="store_true")
     parser.add_argument("--require-timing-shift", action="store_true")
+    parser.add_argument("--require-same-endpoint-support", action="store_true")
+    parser.add_argument("--require-flow-distribution-shift", action="store_true")
     args = parser.parse_args()
 
     result = analyze(args.task_a, args.task_b)
@@ -144,6 +156,13 @@ def main():
         raise SystemExit("task pair changed flow identity; expected a timing-only shift")
     if args.require_timing_shift and not result["timing_only_shift"]:
         raise SystemExit("task pair does not contain a timing-only distribution shift")
+    if args.require_same_endpoint_support and not result["same_endpoint_support"]:
+        raise SystemExit("task pair changed source/destination endpoint support")
+    if (
+        args.require_flow_distribution_shift
+        and not result["flow_distribution_shift"]
+    ):
+        raise SystemExit("task pair does not change the flow-size distribution")
 
 
 if __name__ == "__main__":

@@ -18,7 +18,13 @@ from structures import (
     acc_action_from_indices,
     validate_acc_action_indices,
 )
-from TraGen import downsample_flows, expand_hosts
+from TraGen import (
+    CustomRand,
+    downsample_flows,
+    expand_hosts,
+    load_cdf,
+    stratified_cdf_value,
+)
 
 
 def load_analysis_module():
@@ -108,6 +114,19 @@ class ACCValidationTests(unittest.TestCase):
         self.assertIs(downsample_flows(flows, 0), flows)
         with self.assertRaises(ValueError):
             downsample_flows(flows, -1)
+
+    def test_stratified_cdf_sampling_tracks_heavy_tail_mean(self):
+        cdf = ROOT / "tools" / "traffic" / "pattern" / "hadoop-all.txt"
+        distribution = CustomRand()
+        self.assertTrue(distribution.setCdf(load_cdf(str(cdf))))
+        values = [
+            stratified_cdf_value(distribution, index, 960)
+            for index in range(960)
+        ]
+        relative_error = abs(
+            sum(values) / len(values) - distribution.getAvg()
+        ) / distribution.getAvg()
+        self.assertLess(relative_error, 0.02)
 
     def test_stress_pair_changes_only_arrival_spread(self):
         traffic = ROOT / "tools" / "traffic" / "acc_validation"
@@ -205,6 +224,38 @@ class ACCValidationTests(unittest.TestCase):
         cycles = round(common["duration_s"] / common["period_s"])
         self.assertEqual(sources, 48)
         self.assertEqual(sources * cycles, 1440)
+
+    def test_cdf32_pair_holds_path_and_expected_byte_load_fixed(self):
+        traffic = ROOT / "tools" / "traffic" / "acc_validation"
+        pattern = ROOT / "tools" / "traffic" / "pattern"
+        long_flow = json.loads(
+            (traffic / "samepath32_hadoop_long.json").read_text()
+        )[0]
+        short_flow = json.loads(
+            (traffic / "samepath32_alistorage_short.json").read_text()
+        )[0]
+        long_cdf = long_flow.pop("cdf")
+        short_cdf = short_flow.pop("cdf")
+        long_period = long_flow.pop("period_s")
+        short_period = short_flow.pop("period_s")
+        self.assertEqual(long_flow, short_flow)
+        self.assertEqual(long_flow["pattern"], "periodic_incast")
+        self.assertEqual(long_flow["load"], 0.10)
+
+        means = []
+        for name in (Path(long_cdf).name, Path(short_cdf).name):
+            distribution = CustomRand()
+            self.assertTrue(distribution.setCdf(load_cdf(str(pattern / name))))
+            means.append(distribution.getAvg())
+        self.assertGreater(means[0] / means[1], 10.0)
+
+        # Periods are proportional to CDF means, fixing the expected byte
+        # rate per source while preserving very different flow-size mixes.
+        expected_rates = [
+            means[0] / long_period,
+            means[1] / short_period,
+        ]
+        self.assertAlmostEqual(expected_rates[0], expected_rates[1], delta=1.0)
 
     def test_percentile_and_rank_correlation(self):
         analysis = load_analysis_module()

@@ -206,10 +206,33 @@ def test_same_flow_pair_verifier_ignores_only_start_time():
         assert result["timing_b"]["peak_flows_in_1us"] == 2
 
 
+def test_workload_shift_verifier_preserves_endpoint_support():
+    with tempfile.TemporaryDirectory() as temp:
+        root = Path(temp)
+        task_a = root / "a.flow"
+        task_b = root / "b.flow"
+        task_a.write_text(
+            "2\n0 128 3 100 4096 2.000000000\n"
+            "1 128 3 100 8192 2.001000000\n",
+            encoding="utf-8",
+        )
+        task_b.write_text(
+            "3\n0 128 3 100 65536 2.000000000\n"
+            "0 128 3 100 32768 2.000500000\n"
+            "1 128 3 100 131072 2.001000000\n",
+            encoding="utf-8",
+        )
+        result = TASK_PAIR.analyze(task_a, task_b)
+        assert not result["same_flow_identity_multiset"]
+        assert result["same_endpoint_support"]
+        assert result["flow_distribution_shift"]
+
+
 if __name__ == "__main__":
     test_acquisition_rejects_unsafe_completion_drop()
     test_conflict_screen_requires_different_best_actions()
     test_all_congested_reward_and_completion_sensitivity_can_pass()
     test_conflict_screen_checks_directional_penalty_and_shared_port()
     test_same_flow_pair_verifier_ignores_only_start_time()
+    test_workload_shift_verifier_preserves_endpoint_support()
     print("continual protocol gate tests passed")

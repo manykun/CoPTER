@@ -101,6 +101,18 @@ def downsample_flows(flow_list, max_flows):
     ]
 
 
+def stratified_cdf_value(distribution, sample_index, sample_count):
+    """Deterministically cover CDF quantiles without ordering them in time."""
+    if sample_count <= 0 or not 0 <= sample_index < sample_count:
+        raise ValueError("invalid stratified CDF sample index/count")
+    stride = sample_count // 2 + 1
+    while math.gcd(stride, sample_count) != 1:
+        stride += 1
+    rank = (sample_index * stride) % sample_count
+    percentile = (rank + 0.5) * 100.0 / sample_count
+    return distribution.getValueFromPercentile(percentile)
+
+
 def main():
     parser = OptionParser()
     parser.add_option("-b", "--bandwidth", dest="bandwidth", default="10G",
@@ -165,6 +177,13 @@ def main():
         reduce_group_size = int(group.get("reduce_group_size", 8))
         burst_jitter_ns = int(group.get("burst_jitter_ns", 1000))
         spread_fraction = float(group.get("spread_fraction", 0.0))
+        size_sampling = group.get("size_sampling", "random")
+        if size_sampling not in ("random", "stratified"):
+            raise ValueError("size_sampling must be random or stratified")
+        if size_sampling == "stratified" and pattern != "periodic_incast":
+            raise ValueError(
+                "stratified size sampling currently requires periodic_incast"
+            )
 
         # 加载CDF文件
         cdf = load_cdf(cdf_path)
@@ -280,6 +299,11 @@ def main():
                 f"{incast_dst_count} destinations ({incast_dsts}), "
                 f"period={period * 1e-9:g}s"
             )
+            cycle_count = 0
+            while start_time + int(cycle_count * period) < start_time + duration:
+                cycle_count += 1
+            sample_count = cycle_count * len(src_hosts)
+            sample_index = 0
             cycle = 0
             while True:
                 cycle_start = start_time + int(cycle * period)
@@ -310,7 +334,14 @@ def main():
                     else:
                         jitter = 0
                     flow_start = cycle_start + jitter
-                    size = max(1, int(customRand.rand()))
+                    if size_sampling == "stratified":
+                        sampled_size = stratified_cdf_value(
+                            customRand, sample_index, sample_count
+                        )
+                    else:
+                        sampled_size = customRand.rand()
+                    size = max(1, int(sampled_size))
+                    sample_index += 1
                     flow_list.append({
                         "id": flow_count,
                         "src": int(src),

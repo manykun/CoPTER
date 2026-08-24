@@ -43,6 +43,14 @@ def is_switch_switch_port(detail):
     )
 
 
+def controlled_pair(pair_mode, same_identity, same_endpoint_support):
+    if pair_mode == "timing-only":
+        return same_identity
+    if pair_mode == "workload-shift":
+        return same_endpoint_support and not same_identity
+    raise ValueError(f"unsupported pair mode: {pair_mode}")
+
+
 def select_pair(results, ordered_names, minimum_penalty):
     """Return the strongest eligible steady->bursty directional conflict."""
     pairs = []
@@ -123,6 +131,7 @@ def main():
         watch_ports = [int(manifest["watch_port"])]
     watch_ports = [int(port) for port in watch_ports]
     actions = manifest["actions"]
+    pair_mode = manifest.get("pair_mode", "timing-only")
 
     identity_sets = {}
     for name in ordered_names:
@@ -130,6 +139,17 @@ def main():
         identity_sets[name] = Counter(identity for identity, _ in flows)
     reference = identity_sets[ordered_names[0]]
     same_identity = all(value == reference for value in identity_sets.values())
+    endpoint_supports = {
+        name: {identity[:4] for identity in identities}
+        for name, identities in identity_sets.items()
+    }
+    reference_endpoints = endpoint_supports[ordered_names[0]]
+    same_endpoint_support = all(
+        value == reference_endpoints for value in endpoint_supports.values()
+    )
+    pair_controlled = controlled_pair(
+        pair_mode, same_identity, same_endpoint_support
+    )
 
     results = {}
     rows = []
@@ -202,7 +222,7 @@ def main():
         aligned = best_reward_action == best_safe_p95_action
         port_ready = bool(ready_ports)
         eligible = (
-            same_identity
+            pair_controlled
             and completion_floor >= args.min_completion
             and reward_spread >= args.min_reward_spread
             and p95_spread >= args.min_p95_spread
@@ -232,6 +252,9 @@ def main():
     )
     decision = {
         "same_flow_identity_multiset": same_identity,
+        "same_endpoint_support": same_endpoint_support,
+        "pair_mode": pair_mode,
+        "controlled_pair": pair_controlled,
         "watch_ports": watch_ports,
         "port_scope": args.port_scope,
         "thresholds": {
@@ -276,6 +299,9 @@ def main():
         "# Spread calibration report",
         "",
         f"- Same flow-identity multiset: **{same_identity}**",
+        f"- Same endpoint support: **{same_endpoint_support}**",
+        f"- Pair mode: **{pair_mode}**",
+        f"- Controlled pair: **{pair_controlled}**",
         f"- Watched ports: **{len(watch_ports)}**",
         f"- Ready-port scope: **{args.port_scope}**",
         (

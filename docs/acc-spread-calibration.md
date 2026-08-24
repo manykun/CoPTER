@@ -205,6 +205,68 @@ cat "${CAL_DIR}/CALIBRATION_REPORT.md"
 `high_gentle`且完成率不低于90%，下一轮提高到56源；若完成率低于90%并且动作
 差异消失，则降低到40源。不要在同一个校准任务对中混用不同 fan-in。
 
+### 时间/fan-in校准无策略翻转后的CDF任务冲突
+
+如果32、48和64源实验都从同一个reward最优动作直接进入动作失效区，则停止
+继续插值，改为固定路径和期望字节负载、改变流大小分布：
+
+- Task A `samepath32_hadoop_long`：Hadoop长流分布；
+- Task B `samepath32_alistorage_short`：AliStorage短流分布；
+- 两者均使用0–31号源、目的端128和相同的1.6699秒窗口；
+- Hadoop周期为0.055665秒，AliStorage周期为0.004秒；周期按CDF均值成比例
+  设置，因此每个源的期望字节速率相同；
+- 两边启用分层CDF分位数采样，降低有限样本下重尾流量的实际字节率偏差；
+- 两个任务的端点支持相同，但流大小与流数量按设计不同。
+
+先运行两个任务 × 三个动作，共六次冻结仿真：
+
+```bash
+CAL_ID=acc_cdf32_calibration_s1
+CAL_ARGS=(
+  --run-id "$CAL_ID"
+  --seed 1
+  --buffer-kb 400
+  --spread-profile cdf32
+  --watch-ports all
+  --port 6256
+  --reward-profile tail_safe
+  --reward-queue-lambda 5.0
+  --reward-ecn-lambda 5.0
+  --reward-weights "0.50,0.30,0.20"
+  --acc-hidden-dims "32,64,64,32"
+)
+
+bash scripts/continual_validation/run_spread_calibration.sh \
+  --stage prepare "${CAL_ARGS[@]}"
+
+nohup bash scripts/continual_validation/run_spread_calibration.sh \
+  --stage run "${CAL_ARGS[@]}" \
+  > "experiments/continual_validation/${CAL_ID}_driver.log" 2>&1 &
+
+echo $! > "experiments/continual_validation/${CAL_ID}_driver.pid"
+tail -f "experiments/continual_validation/${CAL_ID}_driver.log"
+```
+
+完成后：
+
+```bash
+bash scripts/continual_validation/run_spread_calibration.sh \
+  --stage analyze "${CAL_ARGS[@]}"
+
+CAL_DIR="experiments/continual_validation/${CAL_ID}/calibration"
+cat "${CAL_DIR}/CALIBRATION_REPORT.md"
+```
+
+该模式预期显示`Same flow-identity multiset: False`，但必须显示
+`Same endpoint support: True`和`Pair mode: workload-shift`。这不是校验失败：
+正式遗忘比较仍分别使用冻结的Task A文件做after-A/after-B对照。
+
+若生成`recommended_pair.env`，正式连续训练应使用：
+
+```bash
+--task-pair-mode workload-shift
+```
+
 ## 4. 使用推荐任务对做正式筛选
 
 以下命令只有在 `recommended_pair.env` 存在时执行：

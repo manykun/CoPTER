@@ -11,6 +11,7 @@ BUFFER_KB=400
 WATCH_PORTS="all"
 PORT=6256
 SPREAD_PROFILE="micro"
+PAIR_MODE="timing-only"
 REWARD_PROFILE="tail_safe"
 REWARD_QUEUE_LAMBDA="5.0"
 REWARD_ECN_LAMBDA="5.0"
@@ -40,7 +41,7 @@ Options:
   --run-id ID
   --seed N
   --buffer-kb N
-  --spread-profile NAME  coarse, micro, micro32, or micro48 (default: micro)
+  --spread-profile NAME  coarse, micro, micro32, micro48, or cdf32
   --watch-ports CSV      Comma-separated ports, or all (default)
   --watch-port N         Backward-compatible single-port form
   --port N
@@ -111,7 +112,14 @@ case "${SPREAD_PROFILE}" in
             "samepath48_spread001_stress:0.01"
         )
         ;;
-    *) echo "spread-profile must be coarse, micro, micro32, or micro48" >&2; exit 2 ;;
+    cdf32)
+        PAIR_MODE="workload-shift"
+        CANDIDATE_RECORDS=(
+            "samepath32_hadoop_long:0.0"
+            "samepath32_alistorage_short:0.0"
+        )
+        ;;
+    *) echo "spread-profile must be coarse, micro, micro32, micro48, or cdf32" >&2; exit 2 ;;
 esac
 for record in "${CANDIDATE_RECORDS[@]}"; do
     CANDIDATES+=("${record%%:*}")
@@ -154,12 +162,13 @@ manifest_json() {
     python - "${RUN_ID}" "${SEED}" "${BUFFER_KB}" "${WATCH_PORTS}" \
         "${REWARD_PROFILE}" "${REWARD_QUEUE_LAMBDA}" \
         "${REWARD_ECN_LAMBDA}" "${REWARD_WEIGHTS}" \
-        "${ACC_HIDDEN_DIMS}" "${SPREAD_PROFILE}" "${candidates_blob}" <<'PY'
+        "${ACC_HIDDEN_DIMS}" "${SPREAD_PROFILE}" "${PAIR_MODE}" \
+        "${candidates_blob}" <<'PY'
 import json
 import sys
 
 candidates = []
-for item in sys.argv[11].split(","):
+for item in sys.argv[12].split(","):
     name, spread = item.split(":", 1)
     candidates.append({"name": name, "spread_fraction": float(spread)})
 record = {
@@ -175,6 +184,7 @@ record = {
     "reward_weights": [float(value) for value in sys.argv[8].split(",")],
     "hidden_dims": sys.argv[9],
     "spread_profile": sys.argv[10],
+    "pair_mode": sys.argv[11],
     "port_scope": "switch-switch",
     "action_space": "multiscale",
     "candidates": candidates,
@@ -199,6 +209,8 @@ import sys
 with open(sys.argv[1], encoding="utf-8") as handle:
     actual = json.load(handle)
 expected = json.loads(os.environ["EXPECTED_MANIFEST"])
+# Manifests written before workload-shift calibration were timing-only.
+actual.setdefault("pair_mode", "timing-only")
 if actual != expected:
     raise SystemExit(
         "calibration manifest differs from requested arguments; use the "
@@ -270,12 +282,23 @@ prepare() {
         cp "${FLOW_DIR}/${name}.meta" "${destination}/input.meta"
         make_runtime_config "${scenario}"
         if [[ "${scenario}" != "${reference}" ]]; then
+            local -a verification_flags
+            if [[ "${PAIR_MODE}" == "timing-only" ]]; then
+                verification_flags=(
+                    --require-identical-flows
+                    --require-timing-shift
+                )
+            else
+                verification_flags=(
+                    --require-same-endpoint-support
+                    --require-flow-distribution-shift
+                )
+            fi
             python "${ROOT}/scripts/continual_validation/verify_task_pair.py" \
                 --task-a "${RUN_DIR}/tasks/${reference}/input.flow" \
                 --task-b "${destination}/input.flow" \
                 --json-output "${RUN_DIR}/identity_${scenario}.json" \
-                --require-identical-flows \
-                --require-timing-shift > /dev/null
+                "${verification_flags[@]}" > /dev/null
         fi
     done
     manifest_json > "${MANIFEST}.tmp"

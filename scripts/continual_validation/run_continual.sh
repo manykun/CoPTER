@@ -88,7 +88,7 @@ Important options:
   --report-only          Record all measurements without PASS/FAIL gating
   --shared-replay BOOL   ACC cross-port global replay: true (default) or false
   --action-space NAME    legacy or multiscale (ACC only)
-  --task-pair-mode NAME  independent or same-flows
+  --task-pair-mode NAME  independent, same-flows, or workload-shift
   --screen-watch-ports CSV
   --screen-min-active-samples N
   --screen-min-congested-samples N
@@ -179,8 +179,8 @@ case "${ACTION_SPACE}" in
     *) echo "action-space must be legacy or multiscale" >&2; exit 2 ;;
 esac
 case "${TASK_PAIR_MODE}" in
-    independent|same-flows) ;;
-    *) echo "task-pair-mode must be independent or same-flows" >&2; exit 2 ;;
+    independent|same-flows|workload-shift) ;;
+    *) echo "task-pair-mode must be independent, same-flows, or workload-shift" >&2; exit 2 ;;
 esac
 if [[ "${ACTION_SPACE}" == "multiscale" ]]; then
     [[ "${KMIN_RANGE_EXPLICIT}" -eq 1 ]] || KMIN_RANGE="5000,50000"
@@ -442,14 +442,27 @@ validate_configs() {
 }
 
 verify_task_pair() {
-    [[ "${TASK_PAIR_MODE}" == "same-flows" ]] || return 0
-    python "${ROOT}/scripts/continual_validation/verify_task_pair.py" \
-        --task-a "${RUN_DIR}/tasks/${TASK_A}/input.flow" \
-        --task-b "${RUN_DIR}/tasks/${TASK_B}/input.flow" \
-        --json-output "${RUN_DIR}/task_pair_analysis.json" \
-        --report-output "${RUN_DIR}/TASK_PAIR_REPORT.md" \
-        --require-identical-flows \
-        --require-timing-shift
+    case "${TASK_PAIR_MODE}" in
+        independent) return 0 ;;
+        same-flows)
+            python "${ROOT}/scripts/continual_validation/verify_task_pair.py" \
+                --task-a "${RUN_DIR}/tasks/${TASK_A}/input.flow" \
+                --task-b "${RUN_DIR}/tasks/${TASK_B}/input.flow" \
+                --json-output "${RUN_DIR}/task_pair_analysis.json" \
+                --report-output "${RUN_DIR}/TASK_PAIR_REPORT.md" \
+                --require-identical-flows \
+                --require-timing-shift
+            ;;
+        workload-shift)
+            python "${ROOT}/scripts/continual_validation/verify_task_pair.py" \
+                --task-a "${RUN_DIR}/tasks/${TASK_A}/input.flow" \
+                --task-b "${RUN_DIR}/tasks/${TASK_B}/input.flow" \
+                --json-output "${RUN_DIR}/task_pair_analysis.json" \
+                --report-output "${RUN_DIR}/TASK_PAIR_REPORT.md" \
+                --require-same-endpoint-support \
+                --require-flow-distribution-shift
+            ;;
+    esac
 }
 
 prepare() {

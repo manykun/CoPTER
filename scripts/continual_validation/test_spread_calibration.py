@@ -67,8 +67,17 @@ def test_switch_switch_port_filter_excludes_host_links():
     assert not MODULE.is_switch_switch_port({"actions": {}})
 
 
+def test_controlled_pair_modes_separate_timing_and_workload_shifts():
+    assert MODULE.controlled_pair("timing-only", True, True)
+    assert not MODULE.controlled_pair("timing-only", False, True)
+    assert MODULE.controlled_pair("workload-shift", False, True)
+    assert not MODULE.controlled_pair("workload-shift", True, True)
+    assert not MODULE.controlled_pair("workload-shift", False, False)
+
+
 if __name__ == "__main__":
     test_select_pair_requires_bidirectional_action_cost()
     test_select_pair_rejects_ineligible_scenario()
     test_switch_switch_port_filter_excludes_host_links()
+    test_controlled_pair_modes_separate_timing_and_workload_shifts()
     print("spread calibration tests passed")
