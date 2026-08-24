@@ -8,20 +8,17 @@ STAGE="all"
 RUN_ID="spread_calibration_s1"
 SEED=1
 BUFFER_KB=400
-WATCH_PORT=323
+WATCH_PORTS="all"
 PORT=6256
+SPREAD_PROFILE="micro"
 REWARD_PROFILE="tail_safe"
 REWARD_QUEUE_LAMBDA="5.0"
 REWARD_ECN_LAMBDA="5.0"
 REWARD_WEIGHTS="0.50,0.30,0.20"
 ACC_HIDDEN_DIMS="32,64,64,32"
 RESUME=0
-CANDIDATES=(
-    samepath_spread070_stress
-    samepath_spread050_stress
-    samepath_spread030_stress
-    samepath_spread010_stress
-)
+CANDIDATES=()
+CANDIDATE_RECORDS=()
 SPECIFICATIONS=(
     "low_strong:1,5"
     "mid:4,3"
@@ -43,7 +40,9 @@ Options:
   --run-id ID
   --seed N
   --buffer-kb N
-  --watch-port N
+  --spread-profile NAME  coarse or micro (default: micro)
+  --watch-ports CSV      Comma-separated ports, or all (default)
+  --watch-port N         Backward-compatible single-port form
   --port N
   --reward-profile NAME
   --reward-queue-lambda X
@@ -60,7 +59,9 @@ while [[ $# -gt 0 ]]; do
         --run-id) RUN_ID="$2"; shift 2 ;;
         --seed) SEED="$2"; shift 2 ;;
         --buffer-kb) BUFFER_KB="$2"; shift 2 ;;
-        --watch-port) WATCH_PORT="$2"; shift 2 ;;
+        --spread-profile) SPREAD_PROFILE="$2"; shift 2 ;;
+        --watch-ports) WATCH_PORTS="$2"; shift 2 ;;
+        --watch-port) WATCH_PORTS="$2"; shift 2 ;;
         --port) PORT="$2"; shift 2 ;;
         --reward-profile) REWARD_PROFILE="$2"; shift 2 ;;
         --reward-queue-lambda) REWARD_QUEUE_LAMBDA="$2"; shift 2 ;;
@@ -77,16 +78,52 @@ case "${STAGE}" in
     prepare|run|analyze|all) ;;
     *) echo "Invalid stage: ${STAGE}" >&2; exit 2 ;;
 esac
+case "${SPREAD_PROFILE}" in
+    coarse)
+        CANDIDATE_RECORDS=(
+            "samepath_spread070_stress:0.70"
+            "samepath_spread050_stress:0.50"
+            "samepath_spread030_stress:0.30"
+            "samepath_spread010_stress:0.10"
+        )
+        ;;
+    micro)
+        CANDIDATE_RECORDS=(
+            "samepath_spread002_stress:0.02"
+            "samepath_spread001_stress:0.01"
+            "samepath_spread0005_stress:0.005"
+            "samepath_spread0002_stress:0.002"
+            "samepath_spread0001_stress:0.001"
+        )
+        ;;
+    *) echo "spread-profile must be coarse or micro" >&2; exit 2 ;;
+esac
+for record in "${CANDIDATE_RECORDS[@]}"; do
+    CANDIDATES+=("${record%%:*}")
+done
 [[ "${RUN_ID}" =~ ^[A-Za-z0-9_.-]+$ ]] || {
     echo "run-id contains unsupported characters" >&2
     exit 2
 }
-for value in "${SEED}" "${BUFFER_KB}" "${WATCH_PORT}" "${PORT}"; do
+for value in "${SEED}" "${BUFFER_KB}" "${PORT}"; do
     [[ "${value}" =~ ^[0-9]+$ ]] || {
-        echo "seed, buffer, watch port, and socket port must be integers" >&2
+        echo "seed, buffer, and socket port must be integers" >&2
         exit 2
     }
 done
+if [[ "${WATCH_PORTS}" == "all" ]]; then
+    WATCH_PORTS="$(seq -s, 0 447)"
+fi
+python - "${WATCH_PORTS}" <<'PY'
+import sys
+
+try:
+    ports = [int(value.strip()) for value in sys.argv[1].split(",") if value.strip()]
+except ValueError as exc:
+    raise SystemExit(f"invalid watch ports: {exc}")
+if not ports or len(ports) != len(set(ports)) or any(not 0 <= port < 448 for port in ports):
+    raise SystemExit("watch ports must be unique integers in [0, 447]")
+PY
 
 RUN_DIR="${ROOT}/experiments/continual_validation/${RUN_ID}/calibration"
 MANIFEST="${RUN_DIR}/calibration_manifest.json"
@@ -97,35 +134,34 @@ RUNTIME_DIR="${RUN_DIR}/runtime"
 mkdir -p "${RUN_DIR}"
 
 manifest_json() {
-    python - "${RUN_ID}" "${SEED}" "${BUFFER_KB}" "${WATCH_PORT}" \
+    local candidates_blob
+    candidates_blob="$(IFS=,; echo "${CANDIDATE_RECORDS[*]}")"
+    python - "${RUN_ID}" "${SEED}" "${BUFFER_KB}" "${WATCH_PORTS}" \
         "${REWARD_PROFILE}" "${REWARD_QUEUE_LAMBDA}" \
         "${REWARD_ECN_LAMBDA}" "${REWARD_WEIGHTS}" \
-        "${ACC_HIDDEN_DIMS}" <<'PY'
+        "${ACC_HIDDEN_DIMS}" "${SPREAD_PROFILE}" "${candidates_blob}" <<'PY'
 import json
 import sys
 
-names = (
-    "samepath_spread070_stress",
-    "samepath_spread050_stress",
-    "samepath_spread030_stress",
-    "samepath_spread010_stress",
-)
-spreads = (0.70, 0.50, 0.30, 0.10)
+candidates = []
+for item in sys.argv[11].split(","):
+    name, spread = item.split(":", 1)
+    candidates.append({"name": name, "spread_fraction": float(spread)})
 record = {
     "run_id": sys.argv[1],
     "seed": int(sys.argv[2]),
     "buffer_kb": int(sys.argv[3]),
-    "watch_port": int(sys.argv[4]),
+    "watch_ports": [
+        int(value) for value in sys.argv[4].split(",") if value.strip()
+    ],
     "reward_profile": sys.argv[5],
     "reward_queue_lambda": float(sys.argv[6]),
     "reward_ecn_lambda": float(sys.argv[7]),
     "reward_weights": [float(value) for value in sys.argv[8].split(",")],
     "hidden_dims": sys.argv[9],
+    "spread_profile": sys.argv[10],
     "action_space": "multiscale",
-    "candidates": [
-        {"name": name, "spread_fraction": spread}
-        for name, spread in zip(names, spreads)
-    ],
+    "candidates": candidates,
     "actions": ["low_strong", "mid", "high_gentle"],
 }
 print(json.dumps(record, indent=2, sort_keys=True))
@@ -288,7 +324,7 @@ run_grid() {
                 --reward-queue-lambda "${REWARD_QUEUE_LAMBDA}" \
                 --reward-ecn-lambda "${REWARD_ECN_LAMBDA}" \
                 --shared-replay false \
-                --watch-ports "${WATCH_PORT}" \
+                --watch-ports "${WATCH_PORTS}" \
                 --tb-enable false --run-id "${RUN_ID}" --phase calibration
             copy_outputs "${scenario}" "${label}" "${exp}"
         done

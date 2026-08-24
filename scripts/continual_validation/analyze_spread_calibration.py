@@ -29,6 +29,10 @@ def select_pair(results, ordered_names, minimum_penalty):
         for task_b in ordered_names[left_index + 1:]:
             old = results[task_a]
             new = results[task_b]
+            shared_ready_ports = sorted(
+                set(old.get("ready_ports", []))
+                & set(new.get("ready_ports", []))
+            )
             old_action = old["best_reward_action"]
             new_action = new["best_reward_action"]
             old_p95 = old["measurements"][old_action]["p95_fct_us"]
@@ -41,6 +45,7 @@ def select_pair(results, ordered_names, minimum_penalty):
                 old["eligible"]
                 and new["eligible"]
                 and old_action != new_action
+                and bool(shared_ready_ports)
                 and old_penalty is not None
                 and new_penalty is not None
                 and old_penalty >= minimum_penalty
@@ -53,6 +58,7 @@ def select_pair(results, ordered_names, minimum_penalty):
                 "task_b_action": new_action,
                 "old_task_p95_penalty": old_penalty,
                 "new_task_p95_penalty_with_old_action": new_penalty,
+                "shared_ready_ports": shared_ready_ports,
                 "eligible": eligible,
             }
             pair["score"] = (
@@ -86,7 +92,10 @@ def main():
     )
     candidates = manifest["candidates"]
     ordered_names = [item["name"] for item in candidates]
-    watch_port = int(manifest["watch_port"])
+    watch_ports = manifest.get("watch_ports")
+    if watch_ports is None:
+        watch_ports = [int(manifest["watch_port"])]
+    watch_ports = [int(port) for port in watch_ports]
     actions = manifest["actions"]
 
     identity_sets = {}
@@ -111,19 +120,23 @@ def main():
             action: summarize(run, common_flows)
             for action, run in runs.items()
         }
-        port = watch_port_summary(runs, watch_port)
+        ports = {
+            str(port): watch_port_summary(runs, port)
+            for port in watch_ports
+        }
+        ready_ports = [
+            int(port) for port, detail in ports.items()
+            if detail["present_in_all_actions"]
+            and detail["active_steps_min"] >= args.min_port_active_samples
+            and detail["congested_steps_max"] >= args.min_port_congested_samples
+        ]
         for action, measurement in measurements.items():
             rows.append({
                 "scenario": name,
                 "spread_fraction": candidate["spread_fraction"],
                 "action": action,
                 **measurement,
-                "port_active_steps": port["actions"].get(action, {}).get(
-                    "active_steps"
-                ),
-                "port_congested_steps": port["actions"].get(action, {}).get(
-                    "congested_steps"
-                ),
+                "ready_port_count": len(ready_ports),
             })
 
         rewards = [value["reward"] for value in measurements.values()]
@@ -157,11 +170,7 @@ def main():
             >= best_completion - args.completion_tolerance
         )
         aligned = best_reward_action == best_safe_p95_action
-        port_ready = (
-            port["present_in_all_actions"]
-            and port["active_steps_min"] >= args.min_port_active_samples
-            and port["congested_steps_max"] >= args.min_port_congested_samples
-        )
+        port_ready = bool(ready_ports)
         eligible = (
             same_identity
             and completion_floor >= args.min_completion
@@ -181,7 +190,8 @@ def main():
             "completion_floor": completion_floor,
             "completion_safe": completion_safe,
             "reward_aligned_with_safe_p95": aligned,
-            "port": port,
+            "ports": ports,
+            "ready_ports": ready_ports,
             "port_ready": port_ready,
             "eligible": eligible,
             "measurements": measurements,
@@ -192,7 +202,7 @@ def main():
     )
     decision = {
         "same_flow_identity_multiset": same_identity,
-        "watch_port": watch_port,
+        "watch_ports": watch_ports,
         "thresholds": {
             "min_completion": args.min_completion,
             "completion_tolerance": args.completion_tolerance,
@@ -221,9 +231,13 @@ def main():
         if env_path.exists():
             env_path.unlink()
     else:
+        recommended_ports = ",".join(
+            map(str, recommended["shared_ready_ports"][:12])
+        )
         env_path.write_text(
             f"RECOMMENDED_TASK_A={recommended['task_a']}\n"
-            f"RECOMMENDED_TASK_B={recommended['task_b']}\n",
+            f"RECOMMENDED_TASK_B={recommended['task_b']}\n"
+            f"RECOMMENDED_WATCH_PORTS={recommended_ports}\n",
             encoding="utf-8",
         )
 
@@ -231,7 +245,7 @@ def main():
         "# Spread calibration report",
         "",
         f"- Same flow-identity multiset: **{same_identity}**",
-        f"- Watched port: **{watch_port}**",
+        f"- Watched ports: **{len(watch_ports)}**",
         (
             f"- Recommended pair: **{recommended['task_a']} → "
             f"{recommended['task_b']}**"
@@ -240,8 +254,8 @@ def main():
         ),
         "",
         "| Scenario | Spread | Completion floor | Reward best | p95 best | "
-        "Reward spread | p95 spread | Port active min | Port congested max | Eligible |",
-        "|---|---:|---:|---|---|---:|---:|---:|---:|---:|",
+        "Reward spread | p95 spread | Ready ports | Eligible |",
+        "|---|---:|---:|---|---|---:|---:|---:|---:|",
     ]
     for candidate in candidates:
         item = results[candidate["name"]]
@@ -249,16 +263,16 @@ def main():
             f"| {candidate['name']} | {candidate['spread_fraction']:.2f} | "
             f"{item['completion_floor']:.2%} | {item['best_reward_action']} | "
             f"{item['best_safe_p95_action']} | {item['reward_spread']:.2%} | "
-            f"{item['p95_spread']:.2%} | {item['port']['active_steps_min']} | "
-            f"{item['port']['congested_steps_max']} | {item['eligible']} |"
+            f"{item['p95_spread']:.2%} | {len(item['ready_ports'])} | "
+            f"{item['eligible']} |"
         )
     lines.extend([
         "",
         "## Directional pair conflicts",
         "",
         "| Task A | Task B | A action | B action | B-action cost on A | "
-        "A-action cost on B | Eligible |",
-        "|---|---|---|---|---:|---:|---:|",
+        "A-action cost on B | Shared ready ports | Eligible |",
+        "|---|---|---|---|---:|---:|---|---:|",
     ])
     for pair in pairs:
         old_penalty = pair["old_task_p95_penalty"]
@@ -267,12 +281,13 @@ def main():
             f"| {pair['task_a']} | {pair['task_b']} | "
             f"{pair['task_a_action']} | {pair['task_b_action']} | "
             f"{format_percent(old_penalty)} | {format_percent(new_penalty)} | "
+            f"{','.join(map(str, pair['shared_ready_ports'][:12])) or 'none'} | "
             f"{pair['eligible']} |"
         )
     lines.extend([
         "",
         "A recommended pair must keep at least 90% completion, activate and "
-        "congest the watched port, remain reward/p95 sensitive, select different "
+        "congest at least one shared port, remain reward/p95 sensitive, select different "
         "actions, and show at least 3% p95 cost in both directions.",
         "",
     ])

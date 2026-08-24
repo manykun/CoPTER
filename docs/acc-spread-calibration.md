@@ -8,18 +8,21 @@
 - burst 在端口 323 上持续拥塞，但不同动作的 reward 和 p95 完全相同；
 - 两个极端分别落入“无控制信号区”和“动作失效的饱和区”。
 
-因此不能直接开始长训练。本实验保持 1920 条流的
-`(src,dst,pg,dport,size)` 多重集合完全不变，只测试四个中间到达分散度：
+粗粒度校准进一步发现 `spread=0.10` 仍对应约 400 μs 的铺开窗口，而
+`spread=0` 直接缩到约 0.5 μs，两者之间仍有约 800 倍空档。下一轮保持
+1920 条流的 `(src,dst,pg,dport,size)` 多重集合完全不变，测试五个微突发档位：
 
 | 场景 | spread_fraction |
 |---|---:|
-| samepath_spread070_stress | 0.70 |
-| samepath_spread050_stress | 0.50 |
-| samepath_spread030_stress | 0.30 |
-| samepath_spread010_stress | 0.10 |
+| samepath_spread002_stress | 0.020（约80 μs） |
+| samepath_spread001_stress | 0.010（约40 μs） |
+| samepath_spread0005_stress | 0.005（约20 μs） |
+| samepath_spread0002_stress | 0.002（约8 μs） |
+| samepath_spread0001_stress | 0.001（约4 μs） |
 
-每档只运行 `low_strong`、`mid`、`high_gentle` 三个固定动作，共 12 次冻结
-仿真，不更新网络或 replay。
+每档只运行 `low_strong`、`mid`、`high_gentle` 三个固定动作，共 15 次冻结
+仿真，不更新网络或 replay。校准同时观察全部448个端口，自动寻找在 A/B 中
+都达到活跃和拥塞要求的共享端口，不再只假设端口323是瓶颈。
 
 ## 2. 运行校准
 
@@ -27,7 +30,7 @@
 conda activate /mnt/sdb1/xuduokun/conda/envs/m3
 cd /mnt/sdb1/xuduokun/projects/CoPTER
 
-CAL_ID=acc_spread_calibration_s1
+CAL_ID=acc_microspread_calibration_s1
 mkdir -p experiments/continual_validation
 
 nohup bash scripts/continual_validation/run_spread_calibration.sh \
@@ -35,7 +38,8 @@ nohup bash scripts/continual_validation/run_spread_calibration.sh \
   --run-id "$CAL_ID" \
   --seed 1 \
   --buffer-kb 400 \
-  --watch-port 323 \
+  --spread-profile micro \
+  --watch-ports all \
   --port 6256 \
   --reward-profile tail_safe \
   --reward-queue-lambda 5.0 \
@@ -51,14 +55,15 @@ tail -f "experiments/continual_validation/${CAL_ID}_driver.log"
 如果进程中断，复用已完成的候选/动作，不会重跑：
 
 ```bash
-CAL_ID=acc_spread_calibration_s1
+CAL_ID=acc_microspread_calibration_s1
 
 nohup bash scripts/continual_validation/run_spread_calibration.sh \
   --stage run \
   --run-id "$CAL_ID" \
   --seed 1 \
   --buffer-kb 400 \
-  --watch-port 323 \
+  --spread-profile micro \
+  --watch-ports all \
   --port 6256 \
   --reward-profile tail_safe \
   --reward-queue-lambda 5.0 \
@@ -72,14 +77,15 @@ nohup bash scripts/continual_validation/run_spread_calibration.sh \
 恢复运行完成后单独分析：
 
 ```bash
-CAL_ID=acc_spread_calibration_s1
+CAL_ID=acc_microspread_calibration_s1
 
 bash scripts/continual_validation/run_spread_calibration.sh \
   --stage analyze \
   --run-id "$CAL_ID" \
   --seed 1 \
   --buffer-kb 400 \
-  --watch-port 323 \
+  --spread-profile micro \
+  --watch-ports all \
   --port 6256 \
   --reward-profile tail_safe \
   --reward-queue-lambda 5.0 \
@@ -101,7 +107,7 @@ column -s, -t < "${CAL_DIR}/calibration_summary.csv" | less -S
 
 - 所有固定动作的完成率均不低于 90%；
 - reward spread 不低于 2%，p95 spread 不低于 5%；
-- 端口 323 至少活跃 50 步、拥塞 20 步；
+- 至少一个相同端口在两个场景中都活跃 50 步、拥塞 20 步；
 - reward 最优动作和完成率安全的 p95 最优动作一致；
 - A、B 选择不同动作；
 - B 动作施加到 A、A 动作施加到 B 时，p95 代价都不低于 3%。
@@ -112,6 +118,7 @@ column -s, -t < "${CAL_DIR}/calibration_summary.csv" | less -S
 source "${CAL_DIR}/recommended_pair.env"
 echo "Task A: ${RECOMMENDED_TASK_A}"
 echo "Task B: ${RECOMMENDED_TASK_B}"
+echo "Shared ports: ${RECOMMENDED_WATCH_PORTS}"
 ```
 
 如果报告为 `Recommended pair: NONE`，停止长训练，并保留报告。此时说明仅调整
@@ -146,7 +153,7 @@ COMMON_ARGS=(
   --task-b-eps-start 0.50
   --task-b-eps-decay 6000
   --acc-hidden-dims "32,64,64,32"
-  --screen-watch-ports "323"
+  --screen-watch-ports "$RECOMMENDED_WATCH_PORTS"
   --screen-min-active-samples 50
   --screen-min-congested-samples 20
   --screen-min-old-task-p95-penalty 0.03

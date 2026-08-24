@@ -144,6 +144,25 @@ class ACCValidationTests(unittest.TestCase):
             else:
                 self.assertEqual(record, common)
 
+    def test_micro_calibration_grid_bridges_the_burst_gap(self):
+        traffic = ROOT / "tools" / "traffic" / "acc_validation"
+        names = (
+            "samepath_spread002_stress",
+            "samepath_spread001_stress",
+            "samepath_spread0005_stress",
+            "samepath_spread0002_stress",
+            "samepath_spread0001_stress",
+        )
+        expected_spreads = (0.02, 0.01, 0.005, 0.002, 0.001)
+        common = None
+        for name, expected in zip(names, expected_spreads):
+            record = json.loads((traffic / f"{name}.json").read_text())[0]
+            self.assertEqual(record.pop("spread_fraction"), expected)
+            if common is None:
+                common = record
+            else:
+                self.assertEqual(record, common)
+
     def test_percentile_and_rank_correlation(self):
         analysis = load_analysis_module()
         self.assertEqual(analysis.percentile([1, 2, 3], 0.5), 2)
