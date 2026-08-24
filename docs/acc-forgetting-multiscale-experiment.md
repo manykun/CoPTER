@@ -1,5 +1,10 @@
 # ACC 多尺度动作空间与灾难性遗忘实验
 
+> 首次 `samepath_steady_stress → samepath_burst_stress` 筛选已经确认两个
+> 极端分别过弱和过强。后续应先执行
+> [`acc-spread-calibration.md`](acc-spread-calibration.md) 中的中间突发度校准，
+> 不再直接训练该极端任务对。
+
 ## 1. 目的
 
 本实验先解决两个已经由端口数据暴露的问题，再进行 ACC 顺序学习：
