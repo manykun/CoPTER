@@ -163,6 +163,28 @@ class ACCValidationTests(unittest.TestCase):
             else:
                 self.assertEqual(record, common)
 
+    def test_micro32_calibration_reduces_fan_in_only(self):
+        traffic = ROOT / "tools" / "traffic" / "acc_validation"
+        names = (
+            "samepath32_spread005_stress",
+            "samepath32_spread002_stress",
+            "samepath32_spread001_stress",
+            "samepath32_spread0005_stress",
+        )
+        expected_spreads = (0.05, 0.02, 0.01, 0.005)
+        common = None
+        for name, expected in zip(names, expected_spreads):
+            record = json.loads((traffic / f"{name}.json").read_text())[0]
+            self.assertEqual(record.pop("spread_fraction"), expected)
+            if common is None:
+                common = record
+            else:
+                self.assertEqual(record, common)
+        sources = common["src_hosts"]["end"] - common["src_hosts"]["start"] + 1
+        cycles = round(common["duration_s"] / common["period_s"])
+        self.assertEqual(sources, 32)
+        self.assertEqual(sources * cycles, 960)
+
     def test_percentile_and_rank_correlation(self):
         analysis = load_analysis_module()
         self.assertEqual(analysis.percentile([1, 2, 3], 0.5), 2)

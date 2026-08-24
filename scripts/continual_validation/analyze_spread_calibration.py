@@ -22,6 +22,27 @@ def format_percent(value):
     return "n/a" if value is None else f"{value:.2%}"
 
 
+def is_switch_switch_port(detail):
+    """Return whether every parseable physical identifier joins two switches."""
+    identifiers = {
+        value.get("identifier")
+        for value in detail.get("actions", {}).values()
+        if value.get("identifier")
+    }
+    endpoints = []
+    for identifier in identifiers:
+        pieces = str(identifier).split("-")
+        if len(pieces) != 2:
+            continue
+        try:
+            endpoints.append(tuple(int(piece) for piece in pieces))
+        except ValueError:
+            continue
+    return bool(endpoints) and all(
+        left >= 256 and right >= 256 for left, right in endpoints
+    )
+
+
 def select_pair(results, ordered_names, minimum_penalty):
     """Return the strongest eligible steady->bursty directional conflict."""
     pairs = []
@@ -84,6 +105,11 @@ def main():
     parser.add_argument("--min-p95-spread", type=float, default=0.05)
     parser.add_argument("--min-port-active-samples", type=int, default=50)
     parser.add_argument("--min-port-congested-samples", type=int, default=20)
+    parser.add_argument(
+        "--port-scope",
+        choices=("all", "switch-switch"),
+        default="switch-switch",
+    )
     parser.add_argument("--min-pair-p95-penalty", type=float, default=0.03)
     args = parser.parse_args()
 
@@ -129,6 +155,10 @@ def main():
             if detail["present_in_all_actions"]
             and detail["active_steps_min"] >= args.min_port_active_samples
             and detail["congested_steps_max"] >= args.min_port_congested_samples
+            and (
+                args.port_scope == "all"
+                or is_switch_switch_port(detail)
+            )
         ]
         for action, measurement in measurements.items():
             rows.append({
@@ -203,6 +233,7 @@ def main():
     decision = {
         "same_flow_identity_multiset": same_identity,
         "watch_ports": watch_ports,
+        "port_scope": args.port_scope,
         "thresholds": {
             "min_completion": args.min_completion,
             "completion_tolerance": args.completion_tolerance,
@@ -246,6 +277,7 @@ def main():
         "",
         f"- Same flow-identity multiset: **{same_identity}**",
         f"- Watched ports: **{len(watch_ports)}**",
+        f"- Ready-port scope: **{args.port_scope}**",
         (
             f"- Recommended pair: **{recommended['task_a']} → "
             f"{recommended['task_b']}**"
@@ -260,7 +292,7 @@ def main():
     for candidate in candidates:
         item = results[candidate["name"]]
         lines.append(
-            f"| {candidate['name']} | {candidate['spread_fraction']:.2f} | "
+            f"| {candidate['name']} | {candidate['spread_fraction']:.4g} | "
             f"{item['completion_floor']:.2%} | {item['best_reward_action']} | "
             f"{item['best_safe_p95_action']} | {item['reward_spread']:.2%} | "
             f"{item['p95_spread']:.2%} | {len(item['ready_ports'])} | "
@@ -287,7 +319,7 @@ def main():
     lines.extend([
         "",
         "A recommended pair must keep at least 90% completion, activate and "
-        "congest at least one shared port, remain reward/p95 sensitive, select different "
+        "congest at least one shared switch-to-switch port, remain reward/p95 sensitive, select different "
         "actions, and show at least 3% p95 cost in both directions.",
         "",
     ])

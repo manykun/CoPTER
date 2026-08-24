@@ -121,9 +121,42 @@ echo "Task B: ${RECOMMENDED_TASK_B}"
 echo "Shared ports: ${RECOMMENDED_WATCH_PORTS}"
 ```
 
-如果报告为 `Recommended pair: NONE`，停止长训练，并保留报告。此时说明仅调整
-时间突发度仍不能构造动作冲突，下一步应改变共享瓶颈的空间路径，而不是继续
-增加训练轮数。
+如果报告为 `Recommended pair: NONE`，停止长训练，并保留报告。若完成率仍高且
+端口不拥塞，可继续缩小时间范围；若端口已拥塞但完成率过低且动作完全等价，
+先降低 fan-in。完成降载校准后仍无冲突，再改变共享瓶颈的空间路径。
+
+### 64 源微突发无推荐任务对后的降载校准
+
+若 `micro` 报告呈现完成率低于 90%、共享端口已拥塞但三种动作 spread 为 0，
+说明 64 源 fan-in 已进入 PFC/瞬时 incast 主导的动作失效区。此时不要继续缩短
+spread，也不要开始长训练。改用 32 源的 `micro32` 档位，使每个场景保持相同的
+960 条流身份，只改变到达铺开时间；分析阶段只将物理端点均为交换机的链路计作
+共享就绪端口。
+
+```bash
+CAL_ID=acc_micro32_calibration_s1
+
+nohup bash scripts/continual_validation/run_spread_calibration.sh \
+  --stage all \
+  --run-id "$CAL_ID" \
+  --seed 1 \
+  --buffer-kb 400 \
+  --spread-profile micro32 \
+  --watch-ports all \
+  --port 6256 \
+  --reward-profile tail_safe \
+  --reward-queue-lambda 5.0 \
+  --reward-ecn-lambda 5.0 \
+  --reward-weights "0.50,0.30,0.20" \
+  --acc-hidden-dims "32,64,64,32" \
+  > "experiments/continual_validation/${CAL_ID}_driver.log" 2>&1 &
+
+echo $! > "experiments/continual_validation/${CAL_ID}_driver.pid"
+tail -f "experiments/continual_validation/${CAL_ID}_driver.log"
+```
+
+该配置运行 4 个 spread × 3 个固定动作，共 12 次冻结仿真。只有报告产生
+`recommended_pair.env` 后，才进入后续 ACC A→B 训练。
 
 ## 4. 使用推荐任务对做正式筛选
 

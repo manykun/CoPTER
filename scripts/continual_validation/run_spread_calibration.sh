@@ -31,7 +31,7 @@ Usage:
   bash scripts/continual_validation/run_spread_calibration.sh [options]
 
 Stages:
-  prepare   Generate and freeze four timing-spread candidates
+  prepare   Generate and freeze the selected timing-spread candidates
   run       Evaluate three representative fixed actions per candidate
   analyze   Recommend an eligible steady->bursty task pair
   all       Run prepare, run, and analyze
@@ -40,7 +40,7 @@ Options:
   --run-id ID
   --seed N
   --buffer-kb N
-  --spread-profile NAME  coarse or micro (default: micro)
+  --spread-profile NAME  coarse, micro, or micro32 (default: micro)
   --watch-ports CSV      Comma-separated ports, or all (default)
   --watch-port N         Backward-compatible single-port form
   --port N
@@ -96,7 +96,15 @@ case "${SPREAD_PROFILE}" in
             "samepath_spread0001_stress:0.001"
         )
         ;;
-    *) echo "spread-profile must be coarse or micro" >&2; exit 2 ;;
+    micro32)
+        CANDIDATE_RECORDS=(
+            "samepath32_spread005_stress:0.05"
+            "samepath32_spread002_stress:0.02"
+            "samepath32_spread001_stress:0.01"
+            "samepath32_spread0005_stress:0.005"
+        )
+        ;;
+    *) echo "spread-profile must be coarse, micro, or micro32" >&2; exit 2 ;;
 esac
 for record in "${CANDIDATE_RECORDS[@]}"; do
     CANDIDATES+=("${record%%:*}")
@@ -160,6 +168,7 @@ record = {
     "reward_weights": [float(value) for value in sys.argv[8].split(",")],
     "hidden_dims": sys.argv[9],
     "spread_profile": sys.argv[10],
+    "port_scope": "switch-switch",
     "action_space": "multiscale",
     "candidates": candidates,
     "actions": ["low_strong", "mid", "high_gentle"],
@@ -347,6 +356,7 @@ analyze() {
         --min-p95-spread 0.05 \
         --min-port-active-samples 50 \
         --min-port-congested-samples 20 \
+        --port-scope switch-switch \
         --min-pair-p95-penalty 0.03
 }
 

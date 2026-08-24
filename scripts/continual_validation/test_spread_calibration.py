@@ -49,7 +49,26 @@ def test_select_pair_rejects_ineligible_scenario():
     assert recommended is None
 
 
+def test_switch_switch_port_filter_excludes_host_links():
+    switch_link = {
+        "actions": {
+            "low": {"identifier": "288-295"},
+            "high": {"identifier": "295-288"},
+        }
+    }
+    host_link = {
+        "actions": {
+            "low": {"identifier": "274-147"},
+            "high": {"identifier": "274-147"},
+        }
+    }
+    assert MODULE.is_switch_switch_port(switch_link)
+    assert not MODULE.is_switch_switch_port(host_link)
+    assert not MODULE.is_switch_switch_port({"actions": {}})
+
+
 if __name__ == "__main__":
     test_select_pair_requires_bidirectional_action_cost()
     test_select_pair_rejects_ineligible_scenario()
+    test_switch_switch_port_filter_excludes_host_links()
     print("spread calibration tests passed")
