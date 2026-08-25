@@ -267,12 +267,67 @@ cat "${CAL_DIR}/CALIBRATION_REPORT.md"
 --task-pair-mode workload-shift
 ```
 
+#### 在原CDF运行上增量补齐3×3动作网格
+
+三动作对角筛选没有找到策略冲突时，不重新生成流量，也不重复已有动作。使用
+同一个run-id并显式传入`--resume`，将manifest从`diagonal`安全升级为
+`factorial3`。运行器会复用`low_strong`、`mid`和`high_gentle`，每个任务只补
+六个动作：
+
+```bash
+CAL_ID=acc_cdf32_calibration_s1
+CAL_ARGS=(
+  --run-id "$CAL_ID"
+  --seed 1
+  --buffer-kb 400
+  --spread-profile cdf32
+  --action-grid factorial3
+  --watch-ports all
+  --port 6256
+  --reward-profile tail_safe
+  --reward-queue-lambda 5.0
+  --reward-ecn-lambda 5.0
+  --reward-weights "0.50,0.30,0.20"
+  --acc-hidden-dims "32,64,64,32"
+)
+
+nohup bash scripts/continual_validation/run_spread_calibration.sh \
+  --stage run "${CAL_ARGS[@]}" --resume \
+  > "experiments/continual_validation/${CAL_ID}_factorial3.log" 2>&1 &
+
+echo $! > "experiments/continual_validation/${CAL_ID}_factorial3.pid"
+tail -f "experiments/continual_validation/${CAL_ID}_factorial3.log"
+```
+
+完成后确认应有18个结果，再重新分析：
+
+```bash
+CAL_DIR="experiments/continual_validation/${CAL_ID}/calibration"
+
+find "${CAL_DIR}/runs" -name metrics.json | wc -l
+
+bash scripts/continual_validation/run_spread_calibration.sh \
+  --stage analyze "${CAL_ARGS[@]}" --resume
+
+cat "${CAL_DIR}/CALIBRATION_REPORT.md"
+column -s, -t < "${CAL_DIR}/calibration_summary.csv" | less -S
+```
+
 ## 4. 使用推荐任务对做正式筛选
 
 以下命令只有在 `recommended_pair.env` 存在时执行：
 
 ```bash
 source "${CAL_DIR}/recommended_pair.env"
+
+CAL_PAIR_MODE="$(python - "${CAL_DIR}/calibration_manifest.json" <<'PY'
+import json
+import sys
+with open(sys.argv[1]) as handle:
+    mode = json.load(handle).get("pair_mode", "timing-only")
+print("same-flows" if mode == "timing-only" else mode)
+PY
+)"
 
 RUN_ID=acc_forgetting_calibrated_s1
 COMMON_ARGS=(
@@ -282,7 +337,7 @@ COMMON_ARGS=(
   --seed 1
   --buffer-kb 400
   --action-space multiscale
-  --task-pair-mode same-flows
+  --task-pair-mode "$CAL_PAIR_MODE"
   --reward-profile tail_safe
   --reward-queue-lambda 5.0
   --reward-ecn-lambda 5.0

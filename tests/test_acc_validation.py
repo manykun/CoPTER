@@ -257,6 +257,18 @@ class ACCValidationTests(unittest.TestCase):
         ]
         self.assertAlmostEqual(expected_rates[0], expected_rates[1], delta=1.0)
 
+    def test_factorial3_grid_decouples_threshold_and_pmax(self):
+        runner = (
+            ROOT / "scripts" / "continual_validation" /
+            "run_spread_calibration.sh"
+        ).read_text()
+        for specification in (
+            "low_gentle:1,1", "low_mid:1,3", "low_strong:1,5",
+            "mid_gentle:4,1", "mid:4,3", "mid_strong:4,5",
+            "high_gentle:8,1", "high_mid:8,3", "high_strong:8,5",
+        ):
+            self.assertIn(f'"{specification}"', runner)
+
     def test_percentile_and_rank_correlation(self):
         analysis = load_analysis_module()
         self.assertEqual(analysis.percentile([1, 2, 3], 0.5), 2)

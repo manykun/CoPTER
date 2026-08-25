@@ -326,6 +326,24 @@ def main():
         )
     lines.extend([
         "",
+        "## Action measurements",
+        "",
+        "| Scenario | Action | Completion | p95 FCT (us) | Reward |",
+        "|---|---|---:|---:|---:|",
+    ])
+    for candidate in candidates:
+        item = results[candidate["name"]]
+        for action in actions:
+            measurement = item["measurements"][action]
+            reward = measurement["reward"]
+            reward_text = "n/a" if reward is None else f"{reward:.6f}"
+            lines.append(
+                f"| {candidate['name']} | {action} | "
+                f"{measurement['completion_ratio']:.2%} | "
+                f"{measurement['p95_fct_us']:.2f} | {reward_text} |"
+            )
+    lines.extend([
+        "",
         "## Directional pair conflicts",
         "",
         "| Task A | Task B | A action | B action | B-action cost on A | "
