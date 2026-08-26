@@ -12,6 +12,7 @@ WATCH_PORTS="all"
 PORT=6256
 SPREAD_PROFILE="micro"
 PAIR_MODE="timing-only"
+PAIR_ANCHOR_FIRST="false"
 ACTION_GRID="diagonal"
 REWARD_PROFILE="tail_safe"
 REWARD_QUEUE_LAMBDA="5.0"
@@ -38,7 +39,8 @@ Options:
   --run-id ID
   --seed N
   --buffer-kb N
-  --spread-profile NAME  coarse, micro, micro32, micro48, cdf32, or conflict32
+  --spread-profile NAME  coarse, micro, micro32, micro48, cdf32, conflict32,
+                         or conflict32grid
   --action-grid NAME     diagonal or factorial3 (default: diagonal)
   --watch-ports CSV      Comma-separated ports, or all (default)
   --watch-port N         Backward-compatible single-port form
@@ -131,7 +133,20 @@ case "${SPREAD_PROFILE}" in
             "samepath32_hotspot_burst:0.0"
         )
         ;;
-    *) echo "spread-profile must be coarse, micro, micro32, micro48, cdf32, or conflict32" >&2; exit 2 ;;
+    conflict32grid)
+        # Incremental hotspot-intensity sweep.  The first candidate is the
+        # unchanged Task A from conflict32; analysis anchors every comparison
+        # on it and selects among three safer Task-B hotspot strengths.
+        PAIR_MODE="workload-shift"
+        PAIR_ANCHOR_FIRST="true"
+        CANDIDATE_RECORDS=(
+            "samepath32_balanced_steady:0.25"
+            "samepath32_hotspot9_burst:0.0"
+            "samepath32_hotspot7_burst:0.0"
+            "samepath32_hotspot5_burst:0.0"
+        )
+        ;;
+    *) echo "spread-profile must be coarse, micro, micro32, micro48, cdf32, conflict32, or conflict32grid" >&2; exit 2 ;;
 esac
 case "${ACTION_GRID}" in
     diagonal)
@@ -203,12 +218,13 @@ manifest_json() {
         "${REWARD_PROFILE}" "${REWARD_QUEUE_LAMBDA}" \
         "${REWARD_ECN_LAMBDA}" "${REWARD_WEIGHTS}" \
         "${ACC_HIDDEN_DIMS}" "${SPREAD_PROFILE}" "${PAIR_MODE}" \
-        "${ACTION_GRID}" "${actions_blob}" "${candidates_blob}" <<'PY'
+        "${PAIR_ANCHOR_FIRST}" "${ACTION_GRID}" "${actions_blob}" \
+        "${candidates_blob}" <<'PY'
 import json
 import sys
 
 candidates = []
-for item in sys.argv[14].split(","):
+for item in sys.argv[15].split(","):
     name, spread = item.split(":", 1)
     candidates.append({"name": name, "spread_fraction": float(spread)})
 record = {
@@ -225,11 +241,12 @@ record = {
     "hidden_dims": sys.argv[9],
     "spread_profile": sys.argv[10],
     "pair_mode": sys.argv[11],
-    "action_grid": sys.argv[12],
+    "pair_anchor_first": sys.argv[12] == "true",
+    "action_grid": sys.argv[13],
     "port_scope": "switch-switch",
     "action_space": "multiscale",
     "candidates": candidates,
-    "actions": sys.argv[13].split(","),
+    "actions": sys.argv[14].split(","),
 }
 print(json.dumps(record, indent=2, sort_keys=True))
 PY
@@ -255,6 +272,7 @@ with path.open(encoding="utf-8") as handle:
 expected = json.loads(os.environ["EXPECTED_MANIFEST"])
 # Manifests written before workload-shift calibration were timing-only.
 actual.setdefault("pair_mode", "timing-only")
+actual.setdefault("pair_anchor_first", False)
 actual.setdefault("action_grid", "diagonal")
 if actual == expected:
     raise SystemExit(0)
@@ -269,7 +287,17 @@ can_upgrade = (
     and set(actual["actions"]).issubset(expected["actions"])
     and upgrade == expected
 )
-if can_upgrade:
+profile_upgrade = dict(actual)
+profile_upgrade["spread_profile"] = expected["spread_profile"]
+profile_upgrade["pair_anchor_first"] = expected["pair_anchor_first"]
+profile_upgrade["candidates"] = expected["candidates"]
+can_upgrade_profile = (
+    os.environ.get("ALLOW_ACTION_UPGRADE") == "1"
+    and actual["spread_profile"] == "conflict32"
+    and expected["spread_profile"] == "conflict32grid"
+    and profile_upgrade == expected
+)
+if can_upgrade or can_upgrade_profile:
     temporary = path.with_suffix(path.suffix + ".tmp")
     temporary.write_text(
         json.dumps(expected, indent=2, sort_keys=True) + "\n",
@@ -279,13 +307,16 @@ if can_upgrade:
     completion_marker = path.parent / "grid_complete"
     if completion_marker.exists():
         completion_marker.unlink()
-    print("Calibration manifest upgraded: diagonal -> factorial3")
+    if can_upgrade_profile:
+        print("Calibration manifest upgraded: conflict32 -> conflict32grid")
+    else:
+        print("Calibration manifest upgraded: diagonal -> factorial3")
     raise SystemExit(0)
 if actual != expected:
     raise SystemExit(
         "calibration manifest differs from requested arguments; use the "
-        "original arguments, or pass --resume for a diagonal-to-factorial3 "
-        "upgrade"
+        "original arguments, or pass --resume for a supported "
+        "diagonal-to-factorial3 or conflict32-to-conflict32grid upgrade"
     )
 PY
 }
@@ -320,37 +351,38 @@ make_runtime_config() {
     mv "${destination}.tmp" "${destination}"
 }
 
-prepare() {
-    if [[ -s "${MANIFEST}" ]]; then
-        [[ "${RESUME}" -eq 1 ]] || {
-            echo "Calibration run already exists; pass --resume or use a new run-id." >&2
-            return 1
-        }
-        check_manifest
-        echo "Calibration inputs already exist; keeping frozen files."
-        return 0
-    fi
+prepare_inputs() {
     local scenario_list
     scenario_list="${CANDIDATES[*]}"
-    bash "${ROOT}/scripts/acc_validation/prepare_scenarios.sh" \
-        --seeds "${SEED}" \
-        --scenarios "${scenario_list}" \
-        --buffer-kb "${BUFFER_KB}" \
-        --kmin-range "5000,50000" \
-        --kmax-range "15000,100000" \
-        --max-flows 0 \
-        --baseline-stop-time 4.00
+    local missing=0 scenario
+    for scenario in "${CANDIDATES[@]}"; do
+        if [[ ! -s "${RUN_DIR}/tasks/${scenario}/input.flow" ]]; then
+            missing=1
+        fi
+    done
+    if [[ "${missing}" -eq 1 ]]; then
+        bash "${ROOT}/scripts/acc_validation/prepare_scenarios.sh" \
+            --seeds "${SEED}" \
+            --scenarios "${scenario_list}" \
+            --buffer-kb "${BUFFER_KB}" \
+            --kmin-range "5000,50000" \
+            --kmax-range "15000,100000" \
+            --max-flows 0 \
+            --baseline-stop-time 4.00
+    fi
 
     mkdir -p "${RUN_DIR}/tasks" "${RUNTIME_DIR}" "${OUTPUT_DIR}"
-    local scenario name destination reference
+    local name destination reference
     reference="${CANDIDATES[0]}"
     for scenario in "${CANDIDATES[@]}"; do
         name="${scenario}_seed${SEED}"
         destination="${RUN_DIR}/tasks/${scenario}"
         mkdir -p "${destination}"
-        cp "${FLOW_DIR}/${name}.flow" "${destination}/input.flow"
-        cp "${FLOW_DIR}/${name}.conf" "${destination}/input.conf"
-        cp "${FLOW_DIR}/${name}.meta" "${destination}/input.meta"
+        if [[ ! -s "${destination}/input.flow" ]]; then
+            cp "${FLOW_DIR}/${name}.flow" "${destination}/input.flow"
+            cp "${FLOW_DIR}/${name}.conf" "${destination}/input.conf"
+            cp "${FLOW_DIR}/${name}.meta" "${destination}/input.meta"
+        fi
         make_runtime_config "${scenario}"
         if [[ "${scenario}" != "${reference}" ]]; then
             local -a verification_flags
@@ -372,6 +404,20 @@ prepare() {
                 "${verification_flags[@]}" > /dev/null
         fi
     done
+}
+
+prepare() {
+    if [[ -s "${MANIFEST}" ]]; then
+        [[ "${RESUME}" -eq 1 ]] || {
+            echo "Calibration run already exists; pass --resume or use a new run-id." >&2
+            return 1
+        }
+        check_manifest
+        prepare_inputs
+        echo "Calibration inputs match; keeping existing frozen files."
+        return 0
+    fi
+    prepare_inputs
     manifest_json > "${MANIFEST}.tmp"
     mv "${MANIFEST}.tmp" "${MANIFEST}"
     echo "Spread calibration prepared under ${RUN_DIR}"

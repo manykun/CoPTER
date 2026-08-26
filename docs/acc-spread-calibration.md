@@ -377,6 +377,75 @@ column -s, -t < "${CAL_DIR}/port_action_summary.csv" | less -S
 至少损失3% reward，才会进入`RECOMMENDED_WATCH_PORTS`。这避免把“端口只是
 活跃/拥塞”误当成“端口存在可学习的任务冲突”。
 
+### 3.7 降低热点强度：复用Task A，只补跑三档Task B
+
+`13:1:1:1`热点任务的最低完成率约为80%，过载掩盖了动作差异。下一轮固定
+Task A、拓扑、CDF、总发送周期、总流数和reward，只将Task B的目的端权重依次
+降为`9:1:1:1`、`7:1:1:1`和`5:1:1:1`。分析仅比较第一个候选Task A与三档
+Task B，不会把两个热点任务错误地选成A/B任务对。
+
+沿用上一轮`acc_conflict32_calibration_s1`，准备阶段会安全地把manifest升级为
+`conflict32grid`，保留已冻结的Task A及其九个动作结果。旧的13:1结果继续留在
+磁盘中作为审计记录，但不参与本轮分析；服务器只需新增3个任务 × 9个动作，
+共27次仿真。
+
+```bash
+CAL_ID=acc_conflict32_calibration_s1
+CAL_ARGS=(
+  --run-id "$CAL_ID"
+  --seed 1
+  --buffer-kb 400
+  --spread-profile conflict32grid
+  --action-grid factorial3
+  --watch-ports all
+  --port 6256
+  --reward-profile tail_safe
+  --reward-queue-lambda 30.0
+  --reward-ecn-lambda 18.5
+  --reward-weights "0.50,0.30,0.20"
+  --acc-hidden-dims "32,64,64,32"
+)
+
+bash scripts/continual_validation/run_spread_calibration.sh \
+  --stage prepare "${CAL_ARGS[@]}" --resume
+
+nohup bash scripts/continual_validation/run_spread_calibration.sh \
+  --stage run "${CAL_ARGS[@]}" --resume \
+  > "experiments/continual_validation/${CAL_ID}_hotspot_grid.log" 2>&1 &
+
+echo $! > "experiments/continual_validation/${CAL_ID}_hotspot_grid.pid"
+tail -f "experiments/continual_validation/${CAL_ID}_hotspot_grid.log"
+```
+
+进度只统计当前manifest中的四个任务，期望最终得到36个结果（复用A的9个，
+新增B的27个）：
+
+```bash
+CAL_DIR="experiments/continual_validation/${CAL_ID}/calibration"
+
+for scenario in \
+  samepath32_balanced_steady \
+  samepath32_hotspot9_burst \
+  samepath32_hotspot7_burst \
+  samepath32_hotspot5_burst; do
+  find "${CAL_DIR}/runs/${scenario}" -name metrics.json 2>/dev/null
+done | wc -l
+
+bash scripts/continual_validation/run_spread_calibration.sh \
+  --stage analyze "${CAL_ARGS[@]}" --resume
+
+cat "${CAL_DIR}/CALIBRATION_REPORT.md"
+if test -f "${CAL_DIR}/recommended_pair.env"; then
+  cat "${CAL_DIR}/recommended_pair.env"
+fi
+```
+
+选择顺序是：先满足完成率不低于90%，再检查网络级reward/p95敏感性、Task A与
+Task B的双向p95代价，最后检查共享交换机端口上的reward最优动作是否改变。
+reward最优动作与单独的p95最优动作不要求完全相同，因为pair gate已经直接测量
+两个reward最优动作互换时的p95代价；这也避免上一轮Task A永久阻断后续候选。
+三档均不满足时，应转向调整到达结构或负载，而不是直接启动长时间ACC训练。
+
 ## 4. 使用推荐任务对做正式筛选
 
 以下命令只有在 `recommended_pair.env` 存在时执行：

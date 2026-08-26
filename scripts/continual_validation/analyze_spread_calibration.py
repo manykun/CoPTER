@@ -83,10 +83,13 @@ def select_pair(
     ordered_names,
     minimum_penalty,
     minimum_port_reward_penalty,
+    anchor_first=False,
 ):
     """Return the strongest eligible steady->bursty directional conflict."""
     pairs = []
     for left_index, task_a in enumerate(ordered_names):
+        if anchor_first and left_index > 0:
+            break
         for task_b in ordered_names[left_index + 1:]:
             old = results[task_a]
             new = results[task_b]
@@ -216,6 +219,7 @@ def main():
     watch_ports = [int(port) for port in watch_ports]
     actions = manifest["actions"]
     pair_mode = manifest.get("pair_mode", "timing-only")
+    pair_anchor_first = bool(manifest.get("pair_anchor_first", False))
 
     identity_sets = {}
     for name in ordered_names:
@@ -334,7 +338,6 @@ def main():
             and reward_spread >= args.min_reward_spread
             and p95_spread >= args.min_p95_spread
             and completion_safe
-            and aligned
             and port_ready
         )
         results[name] = {
@@ -360,11 +363,13 @@ def main():
         ordered_names,
         args.min_pair_p95_penalty,
         args.min_port_reward_penalty,
+        pair_anchor_first,
     )
     decision = {
         "same_flow_identity_multiset": same_identity,
         "same_endpoint_support": same_endpoint_support,
         "pair_mode": pair_mode,
+        "pair_anchor_first": pair_anchor_first,
         "controlled_pair": pair_controlled,
         "watch_ports": watch_ports,
         "port_scope": args.port_scope,
@@ -424,6 +429,11 @@ def main():
         f"- Same flow-identity multiset: **{same_identity}**",
         f"- Same endpoint support: **{same_endpoint_support}**",
         f"- Pair mode: **{pair_mode}**",
+        (
+            "- Pair anchor: **first candidate only**"
+            if pair_anchor_first
+            else "- Pair anchor: **all ordered pairs**"
+        ),
         f"- Controlled pair: **{pair_controlled}**",
         f"- Watched ports: **{len(watch_ports)}**",
         f"- Ready-port scope: **{args.port_scope}**",
@@ -508,6 +518,9 @@ def main():
         "actions, show at least 3% p95 cost in both directions, and contain at "
         "least one shared port whose reward-optimal action changes with at "
         "least 3% reward cost in both directions.",
+        "Reward-best and p95-best actions are reported separately; exact "
+        "equality is not required because the pair gate directly measures "
+        "the p95 cost of exchanging the two learned reward-optimal actions.",
         "All ready-port/action measurements are written to "
         "`port_action_summary.csv` for diagnostics.",
         "",

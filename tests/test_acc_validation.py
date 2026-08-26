@@ -317,6 +317,33 @@ class ACCValidationTests(unittest.TestCase):
                 expected_counts,
             )
 
+    def test_conflict32grid_changes_only_hotspot_intensity(self):
+        traffic = ROOT / "tools" / "traffic" / "acc_validation"
+        reference = json.loads(
+            (traffic / "samepath32_hotspot_burst.json").read_text()
+        )[0]
+        expected = {
+            "samepath32_hotspot9_burst.json": [9, 1, 1, 1],
+            "samepath32_hotspot7_burst.json": [7, 1, 1, 1],
+            "samepath32_hotspot5_burst.json": [5, 1, 1, 1],
+        }
+        for filename, weights in expected.items():
+            candidate = json.loads((traffic / filename).read_text())[0]
+            self.assertEqual(candidate["destination_weights"], weights)
+            candidate_without_weights = dict(candidate)
+            reference_without_weights = dict(reference)
+            candidate_without_weights.pop("destination_weights")
+            reference_without_weights.pop("destination_weights")
+            self.assertEqual(candidate_without_weights, reference_without_weights)
+
+        runner = (
+            ROOT / "scripts" / "continual_validation" /
+            "run_spread_calibration.sh"
+        ).read_text()
+        self.assertIn("conflict32grid)", runner)
+        self.assertIn('PAIR_ANCHOR_FIRST="true"', runner)
+        self.assertIn("conflict32 -> conflict32grid", runner)
+
     def test_factorial3_grid_decouples_threshold_and_pmax(self):
         runner = (
             ROOT / "scripts" / "continual_validation" /

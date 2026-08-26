@@ -74,6 +74,22 @@ def test_select_pair_rejects_same_per_port_reward_action():
     assert pairs[0]["eligible_port_conflicts"] == []
 
 
+def test_select_pair_can_anchor_every_comparison_on_first_task():
+    results = {
+        "steady": scenario("high", 100.0, "mid", 130.0),
+        "burst9": scenario("mid", 100.0, "high", 125.0),
+        "burst7": scenario("mid", 100.0, "high", 120.0),
+    }
+    recommended, pairs = MODULE.select_pair(
+        results, ["steady", "burst9", "burst7"], 0.03, 0.03,
+        anchor_first=True,
+    )
+    assert recommended is not None
+    assert len(pairs) == 2
+    assert {pair["task_a"] for pair in pairs} == {"steady"}
+    assert {pair["task_b"] for pair in pairs} == {"burst9", "burst7"}
+
+
 def test_switch_switch_port_filter_excludes_host_links():
     switch_link = {
         "actions": {
@@ -123,6 +139,7 @@ if __name__ == "__main__":
     test_select_pair_requires_bidirectional_action_cost()
     test_select_pair_rejects_ineligible_scenario()
     test_select_pair_rejects_same_per_port_reward_action()
+    test_select_pair_can_anchor_every_comparison_on_first_task()
     test_switch_switch_port_filter_excludes_host_links()
     test_controlled_pair_modes_separate_timing_and_workload_shifts()
     test_port_action_profile_uses_congested_reward()
