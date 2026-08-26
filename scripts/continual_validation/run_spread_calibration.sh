@@ -38,7 +38,7 @@ Options:
   --run-id ID
   --seed N
   --buffer-kb N
-  --spread-profile NAME  coarse, micro, micro32, micro48, or cdf32
+  --spread-profile NAME  coarse, micro, micro32, micro48, cdf32, or conflict32
   --action-grid NAME     diagonal or factorial3 (default: diagonal)
   --watch-ports CSV      Comma-separated ports, or all (default)
   --watch-port N         Backward-compatible single-port form
@@ -118,7 +118,20 @@ case "${SPREAD_PROFILE}" in
             "samepath32_alistorage_short:0.0"
         )
         ;;
-    *) echo "spread-profile must be coarse, micro, micro32, micro48, or cdf32" >&2; exit 2 ;;
+    conflict32)
+        # Maximum-contrast controlled pair: the same 32 sources and four
+        # destination hosts carry the same stratified AliStorage size mix and
+        # aggregate byte rate.  Task A distributes arrivals across receivers
+        # and time; task B synchronizes them and directs 13/16 of the offered
+        # flows at one receiver.  Every source/destination pair is explicitly
+        # covered, so endpoint support remains identical.
+        PAIR_MODE="workload-shift"
+        CANDIDATE_RECORDS=(
+            "samepath32_balanced_steady:0.25"
+            "samepath32_hotspot_burst:0.0"
+        )
+        ;;
+    *) echo "spread-profile must be coarse, micro, micro32, micro48, cdf32, or conflict32" >&2; exit 2 ;;
 esac
 case "${ACTION_GRID}" in
     diagonal)
@@ -445,7 +458,8 @@ analyze() {
         --min-port-active-samples 50 \
         --min-port-congested-samples 20 \
         --port-scope switch-switch \
-        --min-pair-p95-penalty 0.03
+        --min-pair-p95-penalty 0.03 \
+        --min-port-reward-penalty 0.03
 }
 
 [[ "${STAGE}" == "prepare" || "${STAGE}" == "all" ]] && prepare

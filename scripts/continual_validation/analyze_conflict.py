@@ -35,10 +35,18 @@ def watch_port_summary(runs, port):
         metrics = run["metrics"].get("watch_ports_metrics", {})
         record = metrics.get(str(port))
         if record is not None:
+            active_means = record.get("means_active", {})
+            congested_means = record.get("means_congested", {})
             records[action] = {
                 "identifier": record.get("identifier"),
                 "active_steps": int(record.get("active_steps", 0)),
                 "congested_steps": int(record.get("congested_steps", 0)),
+                "reward_active": active_means.get("reward"),
+                "reward_congested": congested_means.get("reward"),
+                "tail_safe_raw_active": active_means.get("tail_safe_raw"),
+                "tail_safe_raw_congested": congested_means.get(
+                    "tail_safe_raw"
+                ),
             }
     if len(records) != len(runs):
         return {

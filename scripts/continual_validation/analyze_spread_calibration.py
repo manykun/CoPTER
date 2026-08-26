@@ -22,6 +22,33 @@ def format_percent(value):
     return "n/a" if value is None else f"{value:.2%}"
 
 
+def relative_reward_penalty(best, candidate):
+    """Return the fractional reward lost by replacing a task's best action."""
+    if best is None or candidate is None:
+        return None
+    return (best - candidate) / max(abs(best), 1e-12)
+
+
+def port_action_profile(detail):
+    """Summarize fixed-action reward preferences for one watched port."""
+    rewards = {
+        action: record.get("reward_congested")
+        for action, record in detail.get("actions", {}).items()
+        if record.get("reward_congested") is not None
+    }
+    if not rewards:
+        return {
+            "best_action": None,
+            "reward_spread": 0.0,
+            "rewards": {},
+        }
+    return {
+        "best_action": max(rewards, key=rewards.get),
+        "reward_spread": relative_spread(rewards.values()),
+        "rewards": rewards,
+    }
+
+
 def is_switch_switch_port(detail):
     """Return whether every parseable physical identifier joins two switches."""
     identifiers = {
@@ -51,7 +78,12 @@ def controlled_pair(pair_mode, same_identity, same_endpoint_support):
     raise ValueError(f"unsupported pair mode: {pair_mode}")
 
 
-def select_pair(results, ordered_names, minimum_penalty):
+def select_pair(
+    results,
+    ordered_names,
+    minimum_penalty,
+    minimum_port_reward_penalty,
+):
     """Return the strongest eligible steady->bursty directional conflict."""
     pairs = []
     for left_index, task_a in enumerate(ordered_names):
@@ -70,11 +102,58 @@ def select_pair(results, ordered_names, minimum_penalty):
             new_with_old = new["measurements"][old_action]["p95_fct_us"]
             old_penalty = relative_worsening(old_p95, old_with_new)
             new_penalty = relative_worsening(new_p95, new_with_old)
+            port_conflicts = []
+            for port in shared_ready_ports:
+                old_profile = old["port_action_profiles"][str(port)]
+                new_profile = new["port_action_profiles"][str(port)]
+                old_port_action = old_profile["best_action"]
+                new_port_action = new_profile["best_action"]
+                if (
+                    old_port_action is None
+                    or new_port_action is None
+                    or old_port_action == new_port_action
+                ):
+                    continue
+                old_best_reward = old_profile["rewards"][old_port_action]
+                old_cross_reward = old_profile["rewards"].get(new_port_action)
+                new_best_reward = new_profile["rewards"][new_port_action]
+                new_cross_reward = new_profile["rewards"].get(old_port_action)
+                old_reward_penalty = relative_reward_penalty(
+                    old_best_reward, old_cross_reward
+                )
+                new_reward_penalty = relative_reward_penalty(
+                    new_best_reward, new_cross_reward
+                )
+                conflict_eligible = (
+                    old_profile["reward_spread"]
+                    >= minimum_port_reward_penalty
+                    and new_profile["reward_spread"]
+                    >= minimum_port_reward_penalty
+                    and old_reward_penalty is not None
+                    and new_reward_penalty is not None
+                    and old_reward_penalty >= minimum_port_reward_penalty
+                    and new_reward_penalty >= minimum_port_reward_penalty
+                )
+                port_conflicts.append({
+                    "port": port,
+                    "task_a_action": old_port_action,
+                    "task_b_action": new_port_action,
+                    "task_a_reward_spread": old_profile["reward_spread"],
+                    "task_b_reward_spread": new_profile["reward_spread"],
+                    "task_a_reward_penalty": old_reward_penalty,
+                    "task_b_reward_penalty": new_reward_penalty,
+                    "eligible": conflict_eligible,
+                })
+            eligible_port_conflicts = [
+                conflict for conflict in port_conflicts
+                if conflict["eligible"]
+            ]
             eligible = (
                 old["eligible"]
                 and new["eligible"]
                 and old_action != new_action
                 and bool(shared_ready_ports)
+                and bool(eligible_port_conflicts)
                 and old_penalty is not None
                 and new_penalty is not None
                 and old_penalty >= minimum_penalty
@@ -88,6 +167,8 @@ def select_pair(results, ordered_names, minimum_penalty):
                 "old_task_p95_penalty": old_penalty,
                 "new_task_p95_penalty_with_old_action": new_penalty,
                 "shared_ready_ports": shared_ready_ports,
+                "port_conflicts": port_conflicts,
+                "eligible_port_conflicts": eligible_port_conflicts,
                 "eligible": eligible,
             }
             pair["score"] = (
@@ -119,6 +200,9 @@ def main():
         default="switch-switch",
     )
     parser.add_argument("--min-pair-p95-penalty", type=float, default=0.03)
+    parser.add_argument(
+        "--min-port-reward-penalty", type=float, default=0.03
+    )
     args = parser.parse_args()
 
     manifest = json.loads(
@@ -153,6 +237,7 @@ def main():
 
     results = {}
     rows = []
+    port_rows = []
     for candidate in candidates:
         name = candidate["name"]
         runs = {
@@ -221,6 +306,28 @@ def main():
         )
         aligned = best_reward_action == best_safe_p95_action
         port_ready = bool(ready_ports)
+        port_action_profiles = {
+            str(port): port_action_profile(ports[str(port)])
+            for port in ready_ports
+        }
+        for port in ready_ports:
+            for action, record in ports[str(port)]["actions"].items():
+                port_rows.append({
+                    "scenario": name,
+                    "port": port,
+                    "identifier": record.get("identifier"),
+                    "action": action,
+                    "active_steps": record.get("active_steps"),
+                    "congested_steps": record.get("congested_steps"),
+                    "reward_active": record.get("reward_active"),
+                    "reward_congested": record.get("reward_congested"),
+                    "tail_safe_raw_active": record.get(
+                        "tail_safe_raw_active"
+                    ),
+                    "tail_safe_raw_congested": record.get(
+                        "tail_safe_raw_congested"
+                    ),
+                })
         eligible = (
             pair_controlled
             and completion_floor >= args.min_completion
@@ -243,12 +350,16 @@ def main():
             "ports": ports,
             "ready_ports": ready_ports,
             "port_ready": port_ready,
+            "port_action_profiles": port_action_profiles,
             "eligible": eligible,
             "measurements": measurements,
         }
 
     recommended, pairs = select_pair(
-        results, ordered_names, args.min_pair_p95_penalty
+        results,
+        ordered_names,
+        args.min_pair_p95_penalty,
+        args.min_port_reward_penalty,
     )
     decision = {
         "same_flow_identity_multiset": same_identity,
@@ -265,6 +376,7 @@ def main():
             "min_port_active_samples": args.min_port_active_samples,
             "min_port_congested_samples": args.min_port_congested_samples,
             "min_pair_p95_penalty": args.min_pair_p95_penalty,
+            "min_port_reward_penalty": args.min_port_reward_penalty,
         },
         "scenarios": results,
         "pairs": pairs,
@@ -279,6 +391,16 @@ def main():
         writer = csv.DictWriter(handle, fieldnames=list(rows[0]))
         writer.writeheader()
         writer.writerows(rows)
+    port_summary_path = args.run_dir / "port_action_summary.csv"
+    if port_rows:
+        with port_summary_path.open(
+            "w", newline="", encoding="utf-8"
+        ) as handle:
+            writer = csv.DictWriter(handle, fieldnames=list(port_rows[0]))
+            writer.writeheader()
+            writer.writerows(port_rows)
+    elif port_summary_path.exists():
+        port_summary_path.unlink()
 
     env_path = args.run_dir / "recommended_pair.env"
     if recommended is None:
@@ -286,7 +408,8 @@ def main():
             env_path.unlink()
     else:
         recommended_ports = ",".join(
-            map(str, recommended["shared_ready_ports"][:12])
+            str(item["port"])
+            for item in recommended["eligible_port_conflicts"][:12]
         )
         env_path.write_text(
             f"RECOMMENDED_TASK_A={recommended['task_a']}\n"
@@ -362,9 +485,31 @@ def main():
         )
     lines.extend([
         "",
+        "## Shared-port reward conflicts",
+        "",
+        "| Task A | Task B | Port | A action | B action | "
+        "B-action reward cost on A | A-action reward cost on B | Eligible |",
+        "|---|---|---:|---|---|---:|---:|---:|",
+    ])
+    for pair in pairs:
+        for conflict in pair["port_conflicts"]:
+            lines.append(
+                f"| {pair['task_a']} | {pair['task_b']} | "
+                f"{conflict['port']} | {conflict['task_a_action']} | "
+                f"{conflict['task_b_action']} | "
+                f"{format_percent(conflict['task_a_reward_penalty'])} | "
+                f"{format_percent(conflict['task_b_reward_penalty'])} | "
+                f"{conflict['eligible']} |"
+            )
+    lines.extend([
+        "",
         "A recommended pair must keep at least 90% completion, activate and "
         "congest at least one shared switch-to-switch port, remain reward/p95 sensitive, select different "
-        "actions, and show at least 3% p95 cost in both directions.",
+        "actions, show at least 3% p95 cost in both directions, and contain at "
+        "least one shared port whose reward-optimal action changes with at "
+        "least 3% reward cost in both directions.",
+        "All ready-port/action measurements are written to "
+        "`port_action_summary.csv` for diagnostics.",
         "",
     ])
     (args.run_dir / "CALIBRATION_REPORT.md").write_text(

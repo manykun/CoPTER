@@ -23,6 +23,7 @@ from TraGen import (
     downsample_flows,
     expand_hosts,
     load_cdf,
+    periodic_destination_index,
     stratified_cdf_value,
 )
 
@@ -256,6 +257,65 @@ class ACCValidationTests(unittest.TestCase):
             means[1] / short_period,
         ]
         self.assertAlmostEqual(expected_rates[0], expected_rates[1], delta=1.0)
+
+    def test_conflict32_pair_preserves_support_and_shifts_hotspot_and_timing(self):
+        traffic = ROOT / "tools" / "traffic" / "acc_validation"
+        pattern = ROOT / "tools" / "traffic" / "pattern"
+        steady = json.loads(
+            (traffic / "samepath32_balanced_steady.json").read_text()
+        )[0]
+        burst = json.loads(
+            (traffic / "samepath32_hotspot_burst.json").read_text()
+        )[0]
+        steady_weights = steady.pop("destination_weights")
+        burst_weights = burst.pop("destination_weights")
+        steady_spread = steady.pop("spread_fraction")
+        burst_spread = burst.pop("spread_fraction")
+        self.assertEqual(steady, burst)
+        self.assertEqual(steady_weights, [1, 1, 1, 1])
+        self.assertEqual(burst_weights, [13, 1, 1, 1])
+        self.assertEqual(steady_spread, 0.25)
+        self.assertEqual(burst_spread, 0.0)
+
+        distribution = CustomRand()
+        self.assertTrue(distribution.setCdf(
+            load_cdf(str(pattern / Path(steady["cdf"]).name))
+        ))
+        source_count = (
+            steady["src_hosts"]["end"]
+            - steady["src_hosts"]["start"]
+            + 1
+        )
+        aggregate_rate = (
+            source_count * distribution.getAvg() * 8 / steady["period_s"]
+        )
+        self.assertAlmostEqual(aggregate_rate / 1e9, 12.0, delta=0.01)
+
+        for weights, expected_counts in (
+            (steady_weights, [8, 8, 8, 8]),
+            (burst_weights, [26, 2, 2, 2]),
+        ):
+            schedule = [
+                index
+                for index, weight in enumerate(weights)
+                for _ in range(weight)
+            ]
+            # The coverage cycles guarantee every source reaches every
+            # destination before the weighted workload begins.
+            for source in range(source_count):
+                covered = {
+                    periodic_destination_index(source, cycle, 4, schedule)
+                    for cycle in range(4)
+                }
+                self.assertEqual(covered, {0, 1, 2, 3})
+            weighted_cycle = [
+                periodic_destination_index(source, 4, 4, schedule)
+                for source in range(source_count)
+            ]
+            self.assertEqual(
+                [weighted_cycle.count(index) for index in range(4)],
+                expected_counts,
+            )
 
     def test_factorial3_grid_decouples_threshold_and_pmax(self):
         runner = (

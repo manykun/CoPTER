@@ -113,6 +113,23 @@ def stratified_cdf_value(distribution, sample_index, sample_count):
     return distribution.getValueFromPercentile(percentile)
 
 
+def periodic_destination_index(
+    src_offset,
+    cycle,
+    destination_count,
+    destination_schedule,
+):
+    """Select a deterministic receiver while preserving endpoint support."""
+    if destination_count <= 0 or not destination_schedule:
+        raise ValueError("periodic destination schedule cannot be empty")
+    if cycle < destination_count:
+        return (src_offset + cycle) % destination_count
+    schedule_index = (
+        src_offset + cycle - destination_count
+    ) % len(destination_schedule)
+    return destination_schedule[schedule_index]
+
+
 def main():
     parser = OptionParser()
     parser.add_option("-b", "--bandwidth", dest="bandwidth", default="10G",
@@ -174,6 +191,7 @@ def main():
         pattern = group.get("pattern", "poisson")
         period = float(group.get("period_s", 1)) * 1e9  # 纳秒
         incast_dst_count = int(group.get("incast_dst_count", 1))
+        destination_weights = group.get("destination_weights")
         reduce_group_size = int(group.get("reduce_group_size", 8))
         burst_jitter_ns = int(group.get("burst_jitter_ns", 1000))
         spread_fraction = float(group.get("spread_fraction", 0.0))
@@ -293,11 +311,41 @@ def main():
                 raise ValueError("burst_jitter_ns cannot be negative")
             if not 0.0 <= spread_fraction < 1.0:
                 raise ValueError("spread_fraction must be in [0, 1)")
-            incast_dsts = random.sample(dst_hosts, k=incast_dst_count)
+            if destination_weights is not None:
+                if len(destination_weights) != incast_dst_count:
+                    raise ValueError(
+                        "destination_weights length must equal incast_dst_count"
+                    )
+                try:
+                    destination_weights = [
+                        int(weight) for weight in destination_weights
+                    ]
+                except (TypeError, ValueError) as exc:
+                    raise ValueError(
+                        "destination_weights must contain positive integers"
+                    ) from exc
+                if any(weight <= 0 for weight in destination_weights):
+                    raise ValueError(
+                        "destination_weights must contain positive integers"
+                    )
+                # Binding weights to the JSON destination order makes a
+                # hotspot task auditable (for example, host 128 remains the
+                # hot receiver).  Existing scenarios without weights retain
+                # their seeded random destination selection.
+                incast_dsts = list(dst_hosts[:incast_dst_count])
+                destination_schedule = [
+                    index
+                    for index, weight in enumerate(destination_weights)
+                    for _ in range(weight)
+                ]
+            else:
+                incast_dsts = random.sample(dst_hosts, k=incast_dst_count)
+                destination_schedule = list(range(incast_dst_count))
             print(
                 f"Periodic Incast: {len(src_hosts)} sources -> "
                 f"{incast_dst_count} destinations ({incast_dsts}), "
-                f"period={period * 1e-9:g}s"
+                f"period={period * 1e-9:g}s, "
+                f"destination_weights={destination_weights or 'uniform'}"
             )
             cycle_count = 0
             while start_time + int(cycle_count * period) < start_time + duration:
@@ -310,7 +358,23 @@ def main():
                 if cycle_start >= start_time + duration:
                     break
                 for src_offset, src in enumerate(src_hosts):
-                    dst = incast_dsts[src_offset % len(incast_dsts)]
+                    # The first N cycles explicitly cover every source-to-
+                    # destination pair.  Later cycles follow the configured
+                    # weighted schedule.  This preserves identical endpoint
+                    # support between balanced and hotspot tasks while still
+                    # producing a strong spatial workload shift.
+                    if destination_weights is None:
+                        # Preserve the original periodic_incast mapping for
+                        # every pre-existing scenario.
+                        dst_index = src_offset % len(incast_dsts)
+                    else:
+                        dst_index = periodic_destination_index(
+                            src_offset,
+                            cycle,
+                            len(incast_dsts),
+                            destination_schedule,
+                        )
+                    dst = incast_dsts[dst_index]
                     if dst == src:
                         alternatives = [candidate for candidate in incast_dsts if candidate != src]
                         if not alternatives:

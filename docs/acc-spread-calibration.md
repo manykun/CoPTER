@@ -199,6 +199,7 @@ bash scripts/continual_validation/run_spread_calibration.sh \
 
 CAL_DIR="experiments/continual_validation/${CAL_ID}/calibration"
 cat "${CAL_DIR}/CALIBRATION_REPORT.md"
+column -s, -t < "${CAL_DIR}/port_action_summary.csv" | less -S
 ```
 
 本轮最多运行3个 spread × 3个动作，共9次冻结仿真。如果三个场景仍全部选择
@@ -312,6 +313,69 @@ bash scripts/continual_validation/run_spread_calibration.sh \
 cat "${CAL_DIR}/CALIBRATION_REPORT.md"
 column -s, -t < "${CAL_DIR}/calibration_summary.csv" | less -S
 ```
+
+### 3.6 空间与时间联合冲突：均衡持续流 → 热点同步突发
+
+仅改变CDF的任务仍可能选择同一个动作。`conflict32`进一步构造一个最大对比、
+但端点支持严格受控的任务对：
+
+- Task A `samepath32_balanced_steady`：32个源以25%周期spread向4个接收端
+  均匀发送；
+- Task B `samepath32_hotspot_burst`：相同源、接收端、CDF、周期、持续时间和
+  期望总字节率，流量在周期起点同步，并以`13:1:1:1`集中到一个热点接收端；
+- 每个源在最初4个周期显式覆盖全部4个目的端，因此两个任务的
+  source/destination endpoint support完全相同；
+- 两边都使用分层AliStorage CDF采样，期望聚合流量为12 Gbps；变化只来自
+  空间偏斜和到达同步；
+- 推荐使用同一个tail-safe目标的`queue_lambda=30`、`ecn_lambda=18.5`，放大
+  热点突发的队列/ECN代价，而不是为两个任务使用不同reward。
+
+先运行两个任务 × 九个动作：
+
+```bash
+CAL_ID=acc_conflict32_calibration_s1
+CAL_ARGS=(
+  --run-id "$CAL_ID"
+  --seed 1
+  --buffer-kb 400
+  --spread-profile conflict32
+  --action-grid factorial3
+  --watch-ports all
+  --port 6256
+  --reward-profile tail_safe
+  --reward-queue-lambda 30.0
+  --reward-ecn-lambda 18.5
+  --reward-weights "0.50,0.30,0.20"
+  --acc-hidden-dims "32,64,64,32"
+)
+
+bash scripts/continual_validation/run_spread_calibration.sh \
+  --stage prepare "${CAL_ARGS[@]}"
+
+nohup bash scripts/continual_validation/run_spread_calibration.sh \
+  --stage run "${CAL_ARGS[@]}" \
+  > "experiments/continual_validation/${CAL_ID}_driver.log" 2>&1 &
+
+echo $! > "experiments/continual_validation/${CAL_ID}_driver.pid"
+tail -f "experiments/continual_validation/${CAL_ID}_driver.log"
+```
+
+完成后运行分析：
+
+```bash
+CAL_DIR="experiments/continual_validation/${CAL_ID}/calibration"
+
+bash scripts/continual_validation/run_spread_calibration.sh \
+  --stage analyze "${CAL_ARGS[@]}"
+
+cat "${CAL_DIR}/CALIBRATION_REPORT.md"
+column -s, -t < "${CAL_DIR}/port_action_summary.csv" | less -S
+```
+
+除网络级动作与p95双向代价外，报告新增`Shared-port reward conflicts`。只有同一
+交换机端口在A/B任务中选择不同reward最优动作，并且互换动作在两个方向上都
+至少损失3% reward，才会进入`RECOMMENDED_WATCH_PORTS`。这避免把“端口只是
+活跃/拥塞”误当成“端口存在可学习的任务冲突”。
 
 ## 4. 使用推荐任务对做正式筛选
 
