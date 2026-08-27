@@ -537,8 +537,12 @@ copy_eval_outputs() {
 evaluate() {
     local method="$1" phase="$2" task="$3" exp="$4" model_dir="$5" port="$6"
     local name="${task}_seed${SEED}"
-    local base
+    local base destination trace
     base="$(output_base "${task}")"
+    destination="${RUN_DIR}/eval/${method}/${phase}/${task}"
+    trace="${destination}/watch_trace.jsonl"
+    mkdir -p "${destination}"
+    rm -f "${trace}"
     local watch_args=()
     [[ -z "${SCREEN_WATCH_PORTS}" ]] || watch_args+=(--watch-ports "${SCREEN_WATCH_PORTS}")
     rm -f "${base}".*
@@ -568,6 +572,7 @@ evaluate() {
         --tb-enable false \
         --run-id "${RUN_ID}" \
         --phase "${phase}" \
+        --watch-trace-file "${trace}" \
         "${watch_args[@]}"
     copy_eval_outputs "${method}" "${phase}" "${task}" "${exp}" "${model_dir}"
 }

@@ -568,7 +568,26 @@ void qp_finish(FILE* fout, Ptr<RdmaQueuePair> q){
 }
 
 void get_pfc(FILE* fout, Ptr<QbbNetDevice> dev, uint32_t type){
-    fprintf(fout, "%lu %u %u %u %u\n", Simulator::Now().GetTimeStep(), dev->GetNode()->GetId(), dev->GetNode()->GetNodeType(), dev->GetIfIndex(), type);
+    // Include the peer node so Python can map a PFC event to the exact
+    // OpenGym identifier "switch-peer".  The original five columns stay in
+    // place for backward compatibility; the sixth column is -1 only for an
+    // unexpectedly disconnected device.
+    int32_t peer_node_id = -1;
+    Ptr<NetDevice> current = dev;
+    Ptr<Channel> channel = current->GetChannel();
+    if (channel) {
+        for (uint32_t index = 0; index < channel->GetNDevices(); ++index) {
+            Ptr<NetDevice> peer = channel->GetDevice(index);
+            if (peer != current && peer->GetNode()) {
+                peer_node_id = static_cast<int32_t>(peer->GetNode()->GetId());
+                break;
+            }
+        }
+    }
+    fprintf(fout, "%lu %u %u %u %u %d\n",
+            Simulator::Now().GetTimeStep(), dev->GetNode()->GetId(),
+            dev->GetNode()->GetNodeType(), dev->GetIfIndex(), type,
+            peer_node_id);
 }
 
 struct QlenDistribution{

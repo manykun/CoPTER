@@ -153,6 +153,11 @@ class AgentHelper:
         self._train_call_count_since_save = 0
         self._recent_rewards = deque(maxlen=self.p.reward_window)
         self._recent_losses = deque(maxlen=self.p.reward_window)
+        # Per-process (one epoch) port-level training diagnostics.  These are
+        # deliberately not persisted in train_state: append_epoch_metrics()
+        # serializes them at the end of the one-epoch process.
+        self._epoch_port_losses = {}
+        self._epoch_port_rewards = {}
         # Current "epoch" id (i.e. how many copter.py invocations) - read from train_state if exists
         self.epoch = 0
 
@@ -257,10 +262,16 @@ class AgentHelper:
                 if loss is not None:
                     self._recent_losses.append(float(loss))
                     per_port_loss[port_idx] = float(loss)
+                    self._epoch_port_losses.setdefault(port_idx, []).append(
+                        float(loss)
+                    )
                 # collect mean reward of the sampled batch as a smoothed proxy
                 batch_mean_reward = float(np.mean(rewards))
                 self._recent_rewards.append(batch_mean_reward)
                 per_port_reward[port_idx] = batch_mean_reward
+                self._epoch_port_rewards.setdefault(port_idx, []).append(
+                    batch_mean_reward
+                )
                 any_trained = True
                 # 定期更新目标网络
                 if current_step % self.p.target_update_interval == 0:
@@ -443,6 +454,20 @@ class AgentHelper:
             "epsilon": float(self.epsilon),
             "mean_reward": mean_reward,
             "mean_loss": mean_loss,
+            "train_port_metrics": {
+                str(port): {
+                    "updates": len(losses),
+                    "loss_mean": float(np.mean(losses)),
+                    "loss_median": float(np.median(losses)),
+                    "loss_max": float(np.max(losses)),
+                    "batch_reward_mean": (
+                        float(np.mean(self._epoch_port_rewards.get(port, [])))
+                        if self._epoch_port_rewards.get(port) else None
+                    ),
+                }
+                for port, losses in sorted(self._epoch_port_losses.items())
+                if losses
+            },
             "time": time.time(),
         }
         record.update({
