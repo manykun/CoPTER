@@ -6,7 +6,9 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 STAGE="all"
 BASE_RUN_ID="acc_local_b5_s1"
-CALIBRATION_RUN_ID="acc_conflict32_calibration_s1"
+CALIBRATION_RUN_ID=""
+ENDPOINT_SOURCE="screen"
+ENDPOINT_SOURCE_EXPLICIT=0
 ENDPOINT_PORT=323
 TARGET_PORTS="323,321"
 ALPHA_STEP="0.1"
@@ -24,7 +26,8 @@ Stages: prepare, sweep, analyze, all
 
 Options:
   --base-run-id ID          Completed ACC A->B5 continual run
-  --calibration-run-id ID   Fixed-action calibration supplying endpoints
+  --endpoint-source NAME    screen (default) or calibration
+  --calibration-run-id ID   Required only for calibration endpoint source
   --endpoint-port N         Port whose A/B optima define the path (default 323)
   --target-ports CSV        Ports receiving the same intervention path
   --alpha-step X            Initial path resolution, e.g. 0.1 or 0.02
@@ -40,7 +43,16 @@ while [[ $# -gt 0 ]]; do
     case "$1" in
         --stage) STAGE="$2"; shift 2 ;;
         --base-run-id) BASE_RUN_ID="$2"; shift 2 ;;
-        --calibration-run-id) CALIBRATION_RUN_ID="$2"; shift 2 ;;
+        --calibration-run-id)
+            CALIBRATION_RUN_ID="$2"
+            [[ "${ENDPOINT_SOURCE_EXPLICIT}" -eq 1 ]] || ENDPOINT_SOURCE="calibration"
+            shift 2
+            ;;
+        --endpoint-source)
+            ENDPOINT_SOURCE="$2"
+            ENDPOINT_SOURCE_EXPLICIT=1
+            shift 2
+            ;;
         --endpoint-port) ENDPOINT_PORT="$2"; shift 2 ;;
         --target-ports) TARGET_PORTS="$2"; shift 2 ;;
         --alpha-step) ALPHA_STEP="$2"; shift 2 ;;
@@ -56,6 +68,9 @@ done
 case "${STAGE}" in prepare|sweep|analyze|all) ;;
     *) echo "invalid stage: ${STAGE}" >&2; exit 2 ;;
 esac
+case "${ENDPOINT_SOURCE}" in screen|calibration) ;;
+    *) echo "endpoint-source must be screen or calibration" >&2; exit 2 ;;
+esac
 
 BASE_DIR="${ROOT}/experiments/continual_validation/${BASE_RUN_ID}"
 CAL_DIR="${ROOT}/experiments/continual_validation/${CALIBRATION_RUN_ID}/calibration"
@@ -69,10 +84,17 @@ MODEL_DIR="${OUT}/model_after_b"
     echo "Completed after-B checkpoint not found under ${BASE_DIR}" >&2
     exit 1
 }
-[[ -s "${CAL_DIR}/port_action_summary.csv" ]] || {
-    echo "Calibration port summary missing: ${CAL_DIR}/port_action_summary.csv" >&2
-    exit 1
-}
+if [[ "${ENDPOINT_SOURCE}" == "calibration" ]]; then
+    [[ -n "${CALIBRATION_RUN_ID}" && -s "${CAL_DIR}/port_action_summary.csv" ]] || {
+        echo "Calibration endpoint source requires --calibration-run-id with port_action_summary.csv" >&2
+        exit 1
+    }
+else
+    [[ -f "${BASE_DIR}/screen/markers/complete" ]] || {
+        echo "Screen endpoint source requires a completed fixed-action screen" >&2
+        exit 1
+    }
+fi
 
 json_value() {
     python - "${MANIFEST}" "$1" <<'PY'
@@ -130,8 +152,14 @@ ensure_model() {
 }
 
 prepare_path() {
+    local source_args=()
+    if [[ "${ENDPOINT_SOURCE}" == "calibration" ]]; then
+        source_args+=(--calibration-dir "${CAL_DIR}")
+    else
+        source_args+=(--screen-dir "${BASE_DIR}/screen")
+    fi
     python "${ROOT}/scripts/continual_validation/prepare_port_path_sweep.py" \
-        --calibration-dir "${CAL_DIR}" \
+        "${source_args[@]}" \
         --base-run-dir "${BASE_DIR}" \
         --output "${PATH_MANIFEST}" \
         --endpoint-port "${ENDPOINT_PORT}" \

@@ -1,5 +1,10 @@
 # ACC catastrophic-forgetting and SOR validation
 
+For trace-derived WebServer/CacheFollower/WebSearch workload shifts, local-only
+ACC training, and post-training causal action interpolation, see
+`docs/acc-realistic-workload-forgetting.md` and
+`scripts/continual_validation/run_realistic_acc.sh`.
+
 This workflow changes traffic from task A to task B while keeping one common
 tail-safe reward:
 

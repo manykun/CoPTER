@@ -179,6 +179,42 @@ def fmt(value, digits=4):
     return "n/a" if value is None else f"{value:.{digits}f}"
 
 
+def reward_preference(rows, tolerance):
+    candidates = [row for row in rows if row.get("reward_selected") is not None]
+    if not candidates:
+        return {
+            "sensitive": False,
+            "reward_spread": 0.0,
+            "best_reward": None,
+            "optimal_alpha_min": None,
+            "optimal_alpha_max": None,
+        }
+    rewards = [row["reward_selected"] for row in candidates]
+    best = max(rewards)
+    scale = max(abs(best), 1e-12)
+    spread = (max(rewards) - min(rewards)) / scale
+    optimal = [
+        row["alpha"] for row in candidates
+        if best - row["reward_selected"] <= tolerance * scale
+    ]
+    return {
+        "sensitive": spread > tolerance,
+        "reward_spread": spread,
+        "best_reward": best,
+        "optimal_alpha_min": min(optimal),
+        "optimal_alpha_max": max(optimal),
+    }
+
+
+def disjoint_preferences(left, right):
+    if not left["sensitive"] or not right["sensitive"]:
+        return False
+    return (
+        left["optimal_alpha_max"] < right["optimal_alpha_min"]
+        or right["optimal_alpha_max"] < left["optimal_alpha_min"]
+    )
+
+
 def write_plots(run_dir, rows, ports, tasks):
     try:
         import matplotlib
@@ -222,7 +258,13 @@ def write_plots(run_dir, rows, ports, tasks):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--run-dir", required=True, type=Path)
+    parser.add_argument(
+        "--preference-tolerance", type=float, default=0.01,
+        help="Relative reward tolerance for flat/tied alpha preferences",
+    )
     args = parser.parse_args()
+    if not 0 <= args.preference_tolerance < 1:
+        parser.error("--preference-tolerance must be in [0, 1)")
     manifest = json.loads(
         (args.run_dir / "path_manifest.json").read_text(encoding="utf-8")
     )
@@ -285,35 +327,24 @@ def main():
     per_port = {}
     for port in manifest["target_ports"]:
         port_rows = [row for row in rows if row["port"] == port]
-        best = {}
+        preferences = {}
         for task in tasks:
-            candidates = [
-                row for row in port_rows
-                if row["task"] == task and row["reward_selected"] is not None
-            ]
-            best[task] = (
-                max(candidates, key=lambda row: row["reward_selected"])
-                if candidates else None
+            preferences[task] = reward_preference(
+                [row for row in port_rows if row["task"] == task],
+                args.preference_tolerance,
             )
         per_port[str(port)] = {
-            "best_alpha": {
-                task: best[task]["alpha"] if best[task] else None
-                for task in tasks
-            },
-            "best_reward": {
-                task: best[task]["reward_selected"] if best[task] else None
-                for task in tasks
-            },
-            "reward_population": {
-                task: best[task]["reward_population"] if best[task] else None
-                for task in tasks
-            },
-            "different_best_alpha": (
-                best[tasks[0]] is not None and best[tasks[1]] is not None
-                and best[tasks[0]]["alpha"] != best[tasks[1]]["alpha"]
+            "preferences": preferences,
+            "different_best_alpha": disjoint_preferences(
+                preferences[tasks[0]], preferences[tasks[1]]
             ),
         }
-    result = {"manifest": manifest, "ports": per_port, "rows": rows}
+    result = {
+        "manifest": manifest,
+        "preference_tolerance": args.preference_tolerance,
+        "ports": per_port,
+        "rows": rows,
+    }
     result["plots"] = write_plots(
         args.run_dir, rows, manifest["target_ports"], tasks
     )
@@ -327,19 +358,26 @@ def main():
         f"- Endpoint source port: **{manifest['endpoint_port']}**",
         f"- Endpoint actions: **{manifest['endpoint_a']['action']} → "
         f"{manifest['endpoint_b']['action']}**",
+        f"- Endpoint source: **{manifest.get('endpoint_source', {'kind': 'calibration'})['kind']}**",
         f"- Alpha step: **{manifest['alpha_step']}**",
+        f"- Degenerate endpoint path: **{manifest.get('degenerate_path', False)}**",
+        f"- Preference tolerance: **{args.preference_tolerance:.1%}**",
         "- Frozen after-B policy; only the selected port is overridden.",
         "- DDQN loss is intentionally absent because evaluation performs no updates.",
         "", "## Port preference summary", "",
-        "| Port | Best alpha on A | Best alpha on B | Different |",
-        "|---:|---:|---:|---:|",
+        "| Port | A sensitivity / optimal alpha | B sensitivity / optimal alpha | Conflict |",
+        "|---:|---|---|---:|",
     ]
     for port, item in per_port.items():
-        alpha_a = item["best_alpha"][tasks[0]]
-        alpha_b = item["best_alpha"][tasks[1]]
+        pref_a = item["preferences"][tasks[0]]
+        pref_b = item["preferences"][tasks[1]]
+        describe = lambda pref: (
+            f"{'sensitive' if pref['sensitive'] else 'flat'} / "
+            f"{fmt(pref['optimal_alpha_min'], 2)}–"
+            f"{fmt(pref['optimal_alpha_max'], 2)}"
+        )
         lines.append(
-            f"| {port} | {fmt(alpha_a, 2)} | "
-            f"{fmt(alpha_b, 2)} | "
+            f"| {port} | {describe(pref_a)} | {describe(pref_b)} | "
             f"{item['different_best_alpha']} |"
         )
     lines += [

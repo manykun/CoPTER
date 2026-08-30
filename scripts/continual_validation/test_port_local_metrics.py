@@ -3,6 +3,7 @@
 
 import csv
 import importlib.util
+import json
 import tempfile
 from pathlib import Path
 
@@ -51,6 +52,51 @@ def test_best_action_uses_congested_reward():
         assert PREPARE.best_action(path, "a", 323) == "low_mid"
 
 
+def test_best_screen_action_prefers_congested_then_active_reward():
+    with tempfile.TemporaryDirectory() as temporary:
+        screen = Path(temporary)
+        for action, congested, active in (
+            ("low_moderate", None, 0.8),
+            ("high_moderate", 0.7, 0.9),
+        ):
+            directory = screen / "task" / action
+            directory.mkdir(parents=True)
+            (directory / "metrics.json").write_text(
+                json.dumps({
+                    "watch_ports_metrics": {
+                        "323": {
+                            "means_congested": {"reward": congested},
+                            "means_active": {"reward": active},
+                        }
+                    }
+                }),
+                encoding="utf-8",
+            )
+        assert PREPARE.best_screen_action(screen, "task", 323) == "high_moderate"
+        assert PREPARE.normalized_action("high_moderate")
+
+
+def test_reward_preference_rejects_flat_and_accepts_disjoint_ranges():
+    flat = ANALYZE.reward_preference([
+        {"alpha": 0.0, "reward_selected": 1.0},
+        {"alpha": 1.0, "reward_selected": 1.005},
+    ], 0.01)
+    high = ANALYZE.reward_preference([
+        {"alpha": 0.0, "reward_selected": 0.8},
+        {"alpha": 0.8, "reward_selected": 1.0},
+        {"alpha": 1.0, "reward_selected": 0.999},
+    ], 0.01)
+    low = ANALYZE.reward_preference([
+        {"alpha": 0.0, "reward_selected": 1.0},
+        {"alpha": 0.2, "reward_selected": 0.999},
+        {"alpha": 1.0, "reward_selected": 0.8},
+    ], 0.01)
+    assert not flat["sensitive"]
+    assert high["optimal_alpha_min"] == 0.8
+    assert high["optimal_alpha_max"] == 1.0
+    assert ANALYZE.disjoint_preferences(low, high)
+
+
 def test_pfc_summary_filters_exact_switch_peer_and_pairs_durations():
     with tempfile.TemporaryDirectory() as temporary:
         path = Path(temporary) / "result.pfc"
@@ -86,10 +132,28 @@ def test_pfc_trace_writes_peer_node_column():
     assert 'fprintf(fout, "%lu %u %u %u %u %d\\n"' in source
 
 
+def test_realistic_driver_disables_global_replay_and_uses_screen_path():
+    source = (HERE / "run_realistic_acc.sh").read_text(encoding="utf-8")
+    assert "--shared-replay false" in source
+    assert "--endpoint-source screen" in source
+    root = HERE.parents[1] / "tools" / "traffic" / "acc_validation"
+    for name in (
+        "realistic_webserver",
+        "realistic_cachefollower",
+        "realistic_websearch",
+    ):
+        config = json.loads((root / f"{name}.json").read_text(encoding="utf-8"))
+        assert config[0]["load"] == 0.60
+        assert config[0]["pattern"] == "poisson_random"
+
+
 if __name__ == "__main__":
     test_alpha_interval_and_interpolation()
     test_best_action_uses_congested_reward()
+    test_best_screen_action_prefers_congested_then_active_reward()
+    test_reward_preference_rejects_flat_and_accepts_disjoint_ranges()
     test_pfc_summary_filters_exact_switch_peer_and_pairs_durations()
     test_epoch_metrics_persist_per_port_loss()
     test_pfc_trace_writes_peer_node_column()
+    test_realistic_driver_disables_global_replay_and_uses_screen_path()
     print("port-local metric tests passed")

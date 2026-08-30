@@ -17,10 +17,12 @@ ACTION_INDICES = {
     "low_gentle": (1, 1),
     "low_mid": (1, 3),
     "low_strong": (1, 5),
+    "low_moderate": (2, 3),
     "mid_gentle": (4, 1),
     "mid": (4, 3),
     "mid_strong": (4, 5),
     "high_gentle": (8, 1),
+    "high_moderate": (6, 2),
     "high_mid": (8, 3),
     "high_strong": (8, 5),
 }
@@ -50,6 +52,42 @@ def best_action(summary_path, scenario, port):
     if not candidates:
         raise ValueError(
             f"no congested-port reward for port {port}, scenario {scenario}"
+        )
+    return max(candidates)[1]
+
+
+def best_screen_action(screen_dir, scenario, port):
+    records = []
+    task_dir = screen_dir / scenario
+    if not task_dir.is_dir():
+        raise ValueError(f"screen task directory is missing: {task_dir}")
+    for action_dir in sorted(task_dir.iterdir()):
+        metrics_path = action_dir / "metrics.json"
+        if not metrics_path.is_file():
+            continue
+        metrics = json.loads(metrics_path.read_text(encoding="utf-8"))
+        detail = metrics.get("watch_ports_metrics", {}).get(str(port), {})
+        congested = detail.get("means_congested", {}).get("reward")
+        active = detail.get("means_active", {}).get("reward")
+        records.append((action_dir.name, congested, active))
+    population = (
+        "congested"
+        if records and all(item[1] is not None for item in records)
+        else "active"
+    )
+    index = 1 if population == "congested" else 2
+    if not records or any(item[index] is None for item in records):
+        raise ValueError(
+            f"screen actions do not share a comparable {population} reward "
+            f"for port {port}, task {scenario}"
+        )
+    candidates = [
+        (float(item[index]), item[0])
+        for item in records
+    ]
+    if not candidates:
+        raise ValueError(
+            f"no comparable screen reward for port {port}, task {scenario}"
         )
     return max(candidates)[1]
 
@@ -113,7 +151,9 @@ def physical(values, config, link_gbps):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--calibration-dir", required=True, type=Path)
+    source = parser.add_mutually_exclusive_group(required=True)
+    source.add_argument("--calibration-dir", type=Path)
+    source.add_argument("--screen-dir", type=Path)
     parser.add_argument("--base-run-dir", required=True, type=Path)
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--endpoint-port", type=int, default=323)
@@ -128,14 +168,32 @@ def main():
         (args.base_run_dir / "manifest.json").read_text(encoding="utf-8")
     )
     task_a, task_b = base_manifest["task_a"], base_manifest["task_b"]
-    summary_path = args.calibration_dir / "port_action_summary.csv"
-    action_a = best_action(summary_path, task_a, args.endpoint_port)
-    action_b = best_action(summary_path, task_b, args.endpoint_port)
+    if args.calibration_dir is not None:
+        summary_path = args.calibration_dir / "port_action_summary.csv"
+        action_a = best_action(summary_path, task_a, args.endpoint_port)
+        action_b = best_action(summary_path, task_b, args.endpoint_port)
+        endpoint_source = {
+            "kind": "calibration",
+            "path": str(args.calibration_dir.resolve()),
+        }
+    else:
+        action_a = best_screen_action(args.screen_dir, task_a, args.endpoint_port)
+        action_b = best_screen_action(args.screen_dir, task_b, args.endpoint_port)
+        endpoint_source = {
+            "kind": "screen",
+            "path": str(args.screen_dir.resolve()),
+        }
     endpoint_a = normalized_action(action_a)
     endpoint_b = normalized_action(action_b)
     config = args.base_run_dir / "runtime" / f"{task_a}_seed{base_manifest['seed']}.conf"
+    degenerate_path = endpoint_a == endpoint_b
+    alphas = (
+        [args.alpha_min]
+        if degenerate_path
+        else alpha_values(args.alpha_step, args.alpha_min, args.alpha_max)
+    )
     points = []
-    for alpha in alpha_values(args.alpha_step, args.alpha_min, args.alpha_max):
+    for alpha in alphas:
         values = interpolate(endpoint_a, endpoint_b, alpha)
         points.append({
             "label": f"alpha_{int(round(alpha * 100)):03d}",
@@ -147,7 +205,7 @@ def main():
         })
     result = {
         "base_run_id": base_manifest["run_id"],
-        "calibration_dir": str(args.calibration_dir.resolve()),
+        "endpoint_source": endpoint_source,
         "task_a": task_a,
         "task_b": task_b,
         "seed": base_manifest["seed"],
@@ -160,6 +218,7 @@ def main():
         "alpha_max": args.alpha_max,
         "endpoint_a": {"action": action_a, "normalized": endpoint_a},
         "endpoint_b": {"action": action_b, "normalized": endpoint_b},
+        "degenerate_path": degenerate_path,
         "points": points,
     }
     args.output.parent.mkdir(parents=True, exist_ok=True)
