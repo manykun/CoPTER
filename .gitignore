@@ -53,6 +53,7 @@ copter/watch_models*/
 
 .ipynb_checkpoints/
 *.png
+!docs/figures/realistic_acc_*.png
 *.pdf
 *.jsonl
 
@@ -63,5 +64,6 @@ sor/forgetting_plots/
 m3_environment copy.yml
 scripts/reward_sensitivity_acc_Hadoop_Shuffle.txt
 sor/run_sor_train (1).sh
+.DS_Store
 
 !.gitignore

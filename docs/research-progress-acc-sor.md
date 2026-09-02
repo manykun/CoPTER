@@ -31,7 +31,8 @@
 - 建立固定 flow、manifest、冻结贪心评估、checkpoint、resume 和自动分析流程；
 - 静态参数、ACC、SOR 使用相同 flow 文件和 common-flow 指标；
 - 将训练预算由“相同 episode 数”改为“相同 optimizer update 数”；
-- 在任务切换时仅重置 phase-local epsilon，不重置网络和 replay；
+- 支持phase-local epsilon重启和跨任务global epsilon连续两种协议，均不重置
+  网络与replay；现实流量主实验采用global连续协议；
 - 增加 acquisition、completion safety、forgetting 和 SOR 对比门槛。
 
 ## 3. 早期固定动作敏感性实验
@@ -496,3 +497,23 @@ bash scripts/continual_validation/run_continual.sh \
 筛选 → ACC A→B 顺序训练”执行。只有先观察到不同最优动作和可测性能敏感性，
 才开展长训练。完整命令和结论边界见
 `docs/acc-forgetting-multiscale-experiment.md`。
+
+## 19. 现实流量持续学习：WebServer → CacheFollower
+
+关闭 global/shared replay 后，ACC 使用相同拓扑、60% offered load、泊松到达
+和每任务 600 次更新，依次学习现实 WebServer 与 CacheFollower 流大小 CDF。
+CacheFollower 的平均流大小为 698.17 KB，约为 WebServer 152.82 KB 的 4.57 倍。
+本节已有数值来自旧的phase-local协议，即任务B将epsilon重新置为1.0；它作为
+exploration-restart对照保留。后续主实验已改为global调度，A→B不重启epsilon。
+
+学习 CacheFollower 后回测 WebServer，全网拥塞端口平均 reward 从 0.37502
+下降至 0.37321（-0.48%），共同流 p95 FCT 从 616.44 us 增至 638.88 us
+（+3.64%），完成率仅下降 0.0032 pp。六个观测端口平均 Kmin/Kmax 从
+41.33/83.67 KB 转为 14.00/30.67 KB，平均 Pmax 从 0.50 增至 0.67；回测
+WebServer 时六端口平均 ECN 标记率增加约 50%，而 Queue p95 降低约 18%。
+结果更符合 CacheFollower 训练造成的过度 ECN 标记，而不是队列积压或 PFC。
+
+端口 347 的旧任务 reward 下降 6.05%、ECN 增加 327.04%，端口 346 的 Queue
+p95 恶化 24.82%，端口 345 保持稳定。当前证据支持轻度全网遗忘与路径局部化
+退化，但不足以宣称严重且广泛的灾难性遗忘。完整数据表、参数对比和五幅汇报图
+见 [`realistic-webserver-cachefollower-results.md`](realistic-webserver-cachefollower-results.md)。
