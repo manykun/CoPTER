@@ -37,6 +37,7 @@ from port_metrics import (
 from structures import (
     AgentHelperParameters,
     DCQCNParameters,
+    EPSILON_SCHEDULES,
     NetworkHelperParameters,
 )
 from sor_agent_helper import SORAgentHelper
@@ -58,6 +59,12 @@ def build_parser():
     parser.add_argument("--epsilon_start", type=float, default=1.0)
     parser.add_argument("--epsilon_end", type=float, default=0.05)
     parser.add_argument("--epsilon_decay_steps", type=int, default=50000)
+    parser.add_argument(
+        "--epsilon_schedule",
+        choices=EPSILON_SCHEDULES,
+        default="phase",
+        help="phase restarts epsilon at task boundaries; global continues one schedule across tasks.",
+    )
     parser.add_argument(
         "--acc_hidden_dims",
         type=str,
@@ -172,6 +179,7 @@ def main():
         epsilon_start=args.epsilon_start,
         epsilon_end=args.epsilon_end,
         epsilon_decay_steps=args.epsilon_decay_steps,
+        epsilon_schedule=args.epsilon_schedule,
         state_save_interval=args.state_save_interval,
     )
     sor_config = SORReplayConfig(

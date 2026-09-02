@@ -18,7 +18,7 @@ COPTER_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "copt
 if COPTER_DIR not in os.sys.path:
     os.sys.path.insert(0, COPTER_DIR)
 
-from structures import AgentHelperParameters, AgentParameters
+from structures import AgentHelperParameters, AgentParameters, scheduled_epsilon
 from sor_agent import SORACC
 from sor_replay import SORReplayConfig, StructuredSORReplayBuffer
 
@@ -126,16 +126,16 @@ class SORAgentHelper:
         os.replace(tmp, path)
 
     def get_current_epsilon(self) -> float:
-        # Match ACC: restart exploration at task boundaries while retaining a
-        # global environment-step counter for diagnostics.
         self.global_env_step += 1
         self.phase_env_step += 1
-        decay = self.p.epsilon_decay_steps
-        if decay <= 0:
-            self.epsilon = self.p.epsilon_end
-            return self.epsilon
-        frac = min(1.0, self.phase_env_step / decay)
-        self.epsilon = self.p.epsilon_start + (self.p.epsilon_end - self.p.epsilon_start) * frac
+        self.epsilon = scheduled_epsilon(
+            self.p.epsilon_start,
+            self.p.epsilon_end,
+            self.p.epsilon_decay_steps,
+            self.global_env_step,
+            self.phase_env_step,
+            self.p.epsilon_schedule,
+        )
         return self.epsilon
 
     def decide(self, port_states, epsi=0.1):
@@ -281,6 +281,7 @@ class SORAgentHelper:
             "global_buffer_size": len(self.global_memory),
             "run_id": self.run_id,
             "phase": self.phase,
+            "epsilon_schedule": self.p.epsilon_schedule,
         }
         if extra:
             record.update(extra)
@@ -308,6 +309,7 @@ class SORAgentHelper:
             "global_env_step": int(self.global_env_step),
             "phase_env_step": int(self.phase_env_step),
             "epsilon": float(self.epsilon),
+            "epsilon_schedule": self.p.epsilon_schedule,
             "epoch": int(self.epoch),
             "run_id": self.run_id,
             "phase": self.phase,
@@ -346,11 +348,18 @@ class SORAgentHelper:
             saved_phase = state.get("phase")
             if self.phase is not None and saved_phase != self.phase:
                 self.phase_env_step = 0
-                self.epsilon = self.p.epsilon_start
-                logger.info(
-                    f"Continual phase changed {saved_phase!r} -> {self.phase!r}; "
-                    "resetting the phase-local epsilon schedule."
-                )
+                if self.p.epsilon_schedule == "phase":
+                    self.epsilon = self.p.epsilon_start
+                    logger.info(
+                        f"Continual phase changed {saved_phase!r} -> {self.phase!r}; "
+                        "resetting the phase-local epsilon schedule."
+                    )
+                else:
+                    self.epsilon = float(state.get("epsilon", self.p.epsilon_start))
+                    logger.info(
+                        f"Continual phase changed {saved_phase!r} -> {self.phase!r}; "
+                        f"continuing global epsilon schedule at {self.epsilon:.4f}."
+                    )
             else:
                 self.phase_env_step = int(
                     state.get("phase_env_step", state.get("global_env_step", 0))

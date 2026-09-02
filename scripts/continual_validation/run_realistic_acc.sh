@@ -40,8 +40,10 @@ Options:
   --resume
   --smoke
 
-The ACC run always uses --shared-replay false. Interpolation endpoints are
-derived from this run's own fixed-action screen; no task-pair search is used.
+The ACC run always uses --shared-replay false and one global epsilon schedule.
+Task B therefore continues task A's exploration state instead of restarting
+from epsilon=1. Interpolation endpoints are derived from this run's own
+fixed-action screen; no task-pair search is used.
 EOF
 }
 
@@ -97,8 +99,7 @@ COMMON_ARGS=(
     --updates-per-task "${UPDATES}"
     --phase-epochs "${PHASE_EPOCHS}"
     --eps-decay 2500
-    --task-b-eps-start 1.0
-    --task-b-eps-decay 2500
+    --epsilon-schedule global
     --acc-hidden-dims "32,64,64,32"
     --reward-profile tail_safe
     --reward-queue-lambda 5.0

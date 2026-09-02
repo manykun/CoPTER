@@ -51,6 +51,7 @@ STATIC_STEPS=4
 EPSILON_START=1.0
 EPSILON_END=0.05
 EPSILON_DECAY=50000
+EPSILON_SCHEDULE="phase"
 WAIT_NS3_SEC=3
 WAIT_BETWEEN_SEC=5
 FORCE_ACTION=""
@@ -111,6 +112,7 @@ while [[ $# -gt 0 ]]; do
         --eps-start)    EPSILON_START="$2";   shift 2 ;;
         --eps-end)      EPSILON_END="$2";     shift 2 ;;
         --eps-decay)    EPSILON_DECAY="$2";   shift 2 ;;
+        --epsilon-schedule) EPSILON_SCHEDULE="$2"; shift 2 ;;
         --force-action) FORCE_ACTION="$2";    shift 2 ;;
         --force-port-action) FORCE_PORT_ACTION="$2"; shift 2 ;;
         --eval-greedy)  EVAL_GREEDY=1; ONE_SHOT=1; shift ;;
@@ -160,6 +162,10 @@ esac
 case "${ACTION_SPACE}" in
     legacy|multiscale) ;;
     *) echo "--action-space must be legacy or multiscale" >&2; exit 2 ;;
+esac
+case "${EPSILON_SCHEDULE}" in
+    phase|global) ;;
+    *) echo "--epsilon-schedule must be phase or global" >&2; exit 2 ;;
 esac
 
 # ==================== Resolve Experiment List ====================
@@ -306,6 +312,7 @@ run_single_experiment() {
                 --epsilon_start "${EPSILON_START}"
                 --epsilon_end "${EPSILON_END}"
                 --epsilon_decay_steps "${EPSILON_DECAY}"
+                --epsilon_schedule "${EPSILON_SCHEDULE}"
                 --seed "${SEED}"
                 --tb_enable "${TB_ENABLE}"
                 --acc_hidden_dims "${ACC_HIDDEN_DIMS}"
@@ -344,6 +351,7 @@ run_single_experiment() {
                 --epsilon_start "${EPSILON_START}"
                 --epsilon_end "${EPSILON_END}"
                 --epsilon_decay_steps "${EPSILON_DECAY}"
+                --epsilon_schedule "${EPSILON_SCHEDULE}"
                 --seed "${SEED}"
                 --tb_enable "${TB_ENABLE}"
                 --acc_hidden_dims "${ACC_HIDDEN_DIMS}"

@@ -11,7 +11,14 @@ from dataclasses import replace
 from collections import deque
 from loguru import logger
 
-from structures import NetworkHelperParameters, DCQCNParameters, PortObservation, AgentParameters, AgentHelperParameters
+from structures import (
+    NetworkHelperParameters,
+    DCQCNParameters,
+    PortObservation,
+    AgentParameters,
+    AgentHelperParameters,
+    scheduled_epsilon,
+)
 from agent import Agent, ACC, CoPTER
 
 
@@ -197,18 +204,17 @@ class AgentHelper:
 
     # ---------- epsilon schedule ----------
     def get_current_epsilon(self) -> float:
-        # Exploration restarts at each continual-learning task boundary.  The
-        # global counter remains available for audit, while the phase-local
-        # counter makes task A and task B receive the same epsilon schedule.
         self.global_env_step += 1
         self.phase_env_step += 1
-        decay = self.p.epsilon_decay_steps
-        if decay <= 0:
-            return self.p.epsilon_end
-        frac = min(1.0, self.phase_env_step / decay)
-        eps = self.p.epsilon_start + (self.p.epsilon_end - self.p.epsilon_start) * frac
-        self.epsilon = eps
-        return eps
+        self.epsilon = scheduled_epsilon(
+            self.p.epsilon_start,
+            self.p.epsilon_end,
+            self.p.epsilon_decay_steps,
+            self.global_env_step,
+            self.phase_env_step,
+            self.p.epsilon_schedule,
+        )
+        return self.epsilon
 
     # 为所有端口生成决策：遍历每个端口对应的智能体，调用智能体的选择动作方法，收集并返回所有决策
     def decide(self, port_states: list[list[float]], epsi=0.1) -> tuple[list[DCQCNParameters], list[tuple[int, int, int]]]:
@@ -356,11 +362,18 @@ class AgentHelper:
                 saved_phase = ts.get("phase")
                 if self.phase is not None and saved_phase != self.phase:
                     self.phase_env_step = 0
-                    self.epsilon = self.p.epsilon_start
-                    logger.info(
-                        f"Continual phase changed {saved_phase!r} -> {self.phase!r}; "
-                        "resetting the phase-local epsilon schedule."
-                    )
+                    if self.p.epsilon_schedule == "phase":
+                        self.epsilon = self.p.epsilon_start
+                        logger.info(
+                            f"Continual phase changed {saved_phase!r} -> {self.phase!r}; "
+                            "resetting the phase-local epsilon schedule."
+                        )
+                    else:
+                        self.epsilon = float(ts.get("epsilon", self.p.epsilon_start))
+                        logger.info(
+                            f"Continual phase changed {saved_phase!r} -> {self.phase!r}; "
+                            f"continuing global epsilon schedule at {self.epsilon:.4f}."
+                        )
                 else:
                     self.phase_env_step = int(
                         ts.get("phase_env_step", ts.get("global_env_step", 0))
@@ -420,6 +433,7 @@ class AgentHelper:
             "replay_size_per_port": [len(rb) for rb in self.rb_pool],
             "shared_replay_size": len(self.shared_rb),
             "shared_replay_enabled": bool(self.p.shared_replay_enabled),
+            "epsilon_schedule": self.p.epsilon_schedule,
         }
         ts.update({
             key: value for key, value in {
@@ -452,6 +466,7 @@ class AgentHelper:
             "phase_env_step": int(self.phase_env_step),
             "train_call_count": int(self.train_call_count),
             "epsilon": float(self.epsilon),
+            "epsilon_schedule": self.p.epsilon_schedule,
             "mean_reward": mean_reward,
             "mean_loss": mean_loss,
             "train_port_metrics": {

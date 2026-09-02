@@ -22,6 +22,7 @@ UPDATES_PER_TASK=600
 UPDATES_TASK_A=""
 UPDATES_TASK_B=""
 EPS_DECAY=2500
+EPSILON_SCHEDULE="phase"
 TASK_B_EPS_START="1.0"
 TASK_B_EPS_DECAY=""
 ACC_HIDDEN_DIMS="32,64,64,32"
@@ -75,6 +76,7 @@ Important options:
   --phase-epochs N       Safety cap; update count is the actual budget
   --buffer-kb N
   --eps-decay N
+  --epsilon-schedule NAME phase resets at A→B; global continues across A→B
   --task-b-eps-start X   Reset task-B exploration to X (default: 1.0)
   --task-b-eps-decay N   Task-B phase-local epsilon decay
   --acc-hidden-dims CSV
@@ -109,6 +111,7 @@ while [[ $# -gt 0 ]]; do
         --updates-task-a) UPDATES_TASK_A="$2"; UPDATES_TASK_A_EXPLICIT=1; shift 2 ;;
         --updates-task-b) UPDATES_TASK_B="$2"; UPDATES_TASK_B_EXPLICIT=1; shift 2 ;;
         --eps-decay) EPS_DECAY="$2"; shift 2 ;;
+        --epsilon-schedule) EPSILON_SCHEDULE="$2"; shift 2 ;;
         --task-b-eps-start) TASK_B_EPS_START="$2"; TASK_B_EPS_EXPLICIT=1; shift 2 ;;
         --task-b-eps-decay) TASK_B_EPS_DECAY="$2"; TASK_B_EPS_EXPLICIT=1; shift 2 ;;
         --acc-hidden-dims) ACC_HIDDEN_DIMS="$2"; shift 2 ;;
@@ -178,6 +181,14 @@ case "${ACTION_SPACE}" in
     legacy|multiscale) ;;
     *) echo "action-space must be legacy or multiscale" >&2; exit 2 ;;
 esac
+case "${EPSILON_SCHEDULE}" in
+    phase|global) ;;
+    *) echo "epsilon-schedule must be phase or global" >&2; exit 2 ;;
+esac
+if [[ "${EPSILON_SCHEDULE}" == "global" && "${TASK_B_EPS_EXPLICIT}" -eq 1 ]]; then
+    echo "task-B epsilon overrides are incompatible with --epsilon-schedule global" >&2
+    exit 2
+fi
 case "${TASK_PAIR_MODE}" in
     independent|same-flows|workload-shift) ;;
     *) echo "task-pair-mode must be independent, same-flows, or workload-shift" >&2; exit 2 ;;
@@ -261,6 +272,7 @@ manifest_json() {
         "${KMAX_RANGE}" "${BASELINE_STOP_TIME}" "${MAX_FLOWS}" \
         "${ACTION_SPACE}" "${SHARED_REPLAY}" "${UPDATES_TASK_A}" \
         "${UPDATES_TASK_B}" "${TASK_B_EPS_START}" "${TASK_B_EPS_DECAY}" \
+        "${EPSILON_SCHEDULE}" \
         "${TASK_PAIR_MODE}" "${SCREEN_WATCH_PORTS}" \
         "${SCREEN_MIN_ACTIVE_SAMPLES}" "${SCREEN_MIN_CONGESTED_SAMPLES}" \
         "${SCREEN_MIN_OLD_TASK_P95_PENALTY}" "${REWARD_WEIGHTS}" \
@@ -302,21 +314,30 @@ shared_replay = sys.argv[18]
 updates_a, updates_b = map(int, sys.argv[19:21])
 task_b_eps_start = float(sys.argv[21])
 task_b_eps_decay = int(sys.argv[22])
-task_pair_mode = sys.argv[23]
-screen_watch_ports = sys.argv[24]
-screen_active = int(sys.argv[25])
-screen_congested = int(sys.argv[26])
-screen_old_p95 = float(sys.argv[27])
-reward_weights = [float(value) for value in sys.argv[28].split(",")]
-updates_explicit = sys.argv[29] == "1" or sys.argv[30] == "1"
-task_b_eps_explicit = sys.argv[31] == "1"
-reward_weights_explicit = sys.argv[32] == "1"
+epsilon_schedule = sys.argv[23]
+task_pair_mode = sys.argv[24]
+screen_watch_ports = sys.argv[25]
+screen_active = int(sys.argv[26])
+screen_congested = int(sys.argv[27])
+screen_old_p95 = float(sys.argv[28])
+reward_weights = [float(value) for value in sys.argv[29].split(",")]
+updates_explicit = sys.argv[30] == "1" or sys.argv[31] == "1"
+task_b_eps_explicit = sys.argv[32] == "1"
+reward_weights_explicit = sys.argv[33] == "1"
 
 record["epsilon_schedule"] = "reset_per_task"
+if epsilon_schedule == "global":
+    record["epsilon_schedule"] = {
+        "scope": "global",
+        "start": 1.0,
+        "end": 0.05,
+        "decay_steps": record["epsilon_decay_steps"],
+        "task_boundary_reset": False,
+    }
 if updates_explicit:
     record["updates_task_a"] = updates_a
     record["updates_task_b"] = updates_b
-if task_b_eps_explicit:
+if task_b_eps_explicit and epsilon_schedule == "phase":
     record["epsilon_schedule"] = {
         "task_a": {"start": 1.0, "end": 0.05, "decay_steps": record["epsilon_decay_steps"]},
         "task_b": {"start": task_b_eps_start, "end": 0.05, "decay_steps": task_b_eps_decay},
@@ -562,6 +583,7 @@ evaluate() {
         --eps-start 1.0 \
         --eps-end 0.05 \
         --eps-decay "${EPS_DECAY}" \
+        --epsilon-schedule "${EPSILON_SCHEDULE}" \
         --acc-hidden-dims "${ACC_HIDDEN_DIMS}" \
         --reward-weights "${REWARD_WEIGHTS}" \
         --reward-profile "${REWARD_PROFILE}" \
@@ -753,6 +775,7 @@ train_method() {
             --eps-start 1.0 \
             --eps-end 0.05 \
             --eps-decay "${EPS_DECAY}" \
+            --epsilon-schedule "${EPSILON_SCHEDULE}" \
             --acc-hidden-dims "${ACC_HIDDEN_DIMS}" \
             --reward-weights "${REWARD_WEIGHTS}" \
             --reward-profile "${REWARD_PROFILE}" \
@@ -819,6 +842,7 @@ PY
             --eps-start "${TASK_B_EPS_START}" \
             --eps-end 0.05 \
             --eps-decay "${TASK_B_EPS_DECAY}" \
+            --epsilon-schedule "${EPSILON_SCHEDULE}" \
             --acc-hidden-dims "${ACC_HIDDEN_DIMS}" \
             --reward-weights "${REWARD_WEIGHTS}" \
             --reward-profile "${REWARD_PROFILE}" \

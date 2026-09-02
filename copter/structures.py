@@ -57,8 +57,26 @@ class AgentHelperParameters:
     epsilon_start: float = 1.0
     epsilon_end: float = 0.05
     epsilon_decay_steps: int = 50000      # global train-call count over which epsilon linearly decays
+    epsilon_schedule: str = "phase"       # phase restarts; global continues across task boundaries
     state_save_interval: int = 1          # save replay buffer / train_state every N train() calls
     reward_window: int = 200              # sliding window size for mean reward metric
+
+
+EPSILON_SCHEDULES = ("phase", "global")
+
+
+def scheduled_epsilon(start, end, decay_steps, global_step, phase_step, schedule="phase"):
+    """Return linear epsilon for either a phase-local or global step counter."""
+    if schedule not in EPSILON_SCHEDULES:
+        raise ValueError(
+            f"unknown epsilon schedule {schedule!r}; expected one of "
+            f"{EPSILON_SCHEDULES}"
+        )
+    if decay_steps <= 0:
+        return float(end)
+    step = global_step if schedule == "global" else phase_step
+    fraction = min(1.0, max(0.0, float(step) / decay_steps))
+    return float(start + (end - start) * fraction)
 
 
 

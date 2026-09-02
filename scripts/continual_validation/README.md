@@ -23,9 +23,11 @@ The workflow can run either with four registered gates or in descriptive
 4. SOR must reduce forgetting while preserving task-B plasticity.
 
 Training uses the same number of optimizer updates per task (default 600), not
-the same number of episodes. Epsilon resets to `1.0` at each task boundary and
-decays with a phase-local environment-step counter. The network and replay
-memory do not reset between tasks.
+the same number of episodes. `--epsilon-schedule phase` preserves the original
+protocol that restarts exploration at each task boundary. The realistic
+workload wrapper uses `--epsilon-schedule global`: epsilon is driven by the
+persisted global environment-step counter and does not restart at A→B. The
+network and replay memory do not reset between tasks in either mode.
 
 ACC normally uses per-port FIFO replay plus cross-port shared/global replay.
 Pass `--shared-replay false` for the local-only ablation: per-port FIFO replay
