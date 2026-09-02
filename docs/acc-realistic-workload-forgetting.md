@@ -34,7 +34,7 @@ cd /mnt/sdb1/xuduokun/projects/CoPTER
 conda activate /mnt/sdb1/xuduokun/conda/envs/m3
 
 PAIR=webserver-cachefollower
-RUN_ID=real_webserver_cachefollower_s1
+RUN_ID=real_webserver_cachefollower_global_eps_s1
 
 bash scripts/continual_validation/run_realistic_acc.sh \
   --stage prepare --pair "$PAIR" --run-id "$RUN_ID"
