@@ -52,6 +52,7 @@ EPSILON_START=1.0
 EPSILON_END=0.05
 EPSILON_DECAY=50000
 EPSILON_SCHEDULE="phase"
+TARGET_UPDATE_INTERVAL=100
 WAIT_NS3_SEC=3
 WAIT_BETWEEN_SEC=5
 FORCE_ACTION=""
@@ -113,6 +114,7 @@ while [[ $# -gt 0 ]]; do
         --eps-end)      EPSILON_END="$2";     shift 2 ;;
         --eps-decay)    EPSILON_DECAY="$2";   shift 2 ;;
         --epsilon-schedule) EPSILON_SCHEDULE="$2"; shift 2 ;;
+        --target-update-interval) TARGET_UPDATE_INTERVAL="$2"; shift 2 ;;
         --force-action) FORCE_ACTION="$2";    shift 2 ;;
         --force-port-action) FORCE_PORT_ACTION="$2"; shift 2 ;;
         --eval-greedy)  EVAL_GREEDY=1; ONE_SHOT=1; shift ;;
@@ -167,6 +169,10 @@ case "${EPSILON_SCHEDULE}" in
     phase|global) ;;
     *) echo "--epsilon-schedule must be phase or global" >&2; exit 2 ;;
 esac
+[[ "${TARGET_UPDATE_INTERVAL}" =~ ^[1-9][0-9]*$ ]] || {
+    echo "--target-update-interval must be a positive integer" >&2
+    exit 2
+}
 
 # ==================== Resolve Experiment List ====================
 # If --experiments was used, EXP_LIST has entries. Otherwise single (config, exp).
@@ -352,6 +358,7 @@ run_single_experiment() {
                 --epsilon_end "${EPSILON_END}"
                 --epsilon_decay_steps "${EPSILON_DECAY}"
                 --epsilon_schedule "${EPSILON_SCHEDULE}"
+                --target_update_interval "${TARGET_UPDATE_INTERVAL}"
                 --seed "${SEED}"
                 --tb_enable "${TB_ENABLE}"
                 --acc_hidden_dims "${ACC_HIDDEN_DIMS}"

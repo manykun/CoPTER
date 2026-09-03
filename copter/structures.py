@@ -52,7 +52,13 @@ class AgentHelperParameters:
     rb_size: int = 1000
     rb_size_global: int = 100000
     shared_replay_enabled: bool = True
-    target_update_interval: int = 16
+    # Hard-copy the ACC policy into its target network after this many
+    # completed optimizer updates.  This is deliberately expressed in
+    # global train steps: one experiment epoch is a separate process and its
+    # environment-step counter restarts at zero.
+    target_update_interval: int = 100
+    q_log_interval: int = 25
+    q_inflation_factor: float = 2.0
     # ---- Continuous training: epsilon schedule + persistence ----
     epsilon_start: float = 1.0
     epsilon_end: float = 0.05

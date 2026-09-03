@@ -77,6 +77,15 @@ if __name__ == "__main__":
     parser.add_argument("--reward_ecn_lambda", type=float, default=5.0)
     parser.add_argument("--state_save_interval", type=int, default=1)
     parser.add_argument(
+        "--target_update_interval",
+        type=int,
+        default=100,
+        help=(
+            "Hard target-network synchronization interval in completed global "
+            "optimizer updates (not episode-local environment steps)."
+        ),
+    )
+    parser.add_argument(
         "--shared_replay",
         choices=("true", "false"),
         default="true",
@@ -115,6 +124,8 @@ if __name__ == "__main__":
     set_random_seed(args.seed)
     if args.reward_queue_lambda < 0 or args.reward_ecn_lambda < 0:
         raise SystemExit("tail-safe reward lambdas must be non-negative")
+    if args.target_update_interval <= 0:
+        raise SystemExit("--target_update_interval must be a positive integer")
 
     # Parse optional forced action (sanity-check for reward sensitivity).
     forced_action_idx = None
@@ -192,6 +203,7 @@ if __name__ == "__main__":
         epsilon_schedule=args.epsilon_schedule,
         state_save_interval=args.state_save_interval,
         shared_replay_enabled=args.shared_replay == "true",
+        target_update_interval=args.target_update_interval,
     )
 
     config_hash = hashlib.sha256(

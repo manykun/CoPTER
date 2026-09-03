@@ -21,6 +21,7 @@ ns3_inter_run_sleep: 5                                     # epoch 之间等待�
 # ----- agent 侧 -----
 static_steps: 4
 train_intervals: 8
+target_update_interval: 100                              # completed optimizer updates; never resets between epochs
 switch_buffer: 10000
 max_steps: 0                                               # 0 = 跑到 ns3 自然结束；>0 = 每 epoch 跑这么多 step 后主动退出
 

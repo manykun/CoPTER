@@ -73,10 +73,16 @@ class ACC(Agent):
         self.policy_net = network_factory().to(self.device)
         # 初始化目标网络，定期更新
         self.target_net = network_factory().to(self.device)
+        # A DQN target must start from the same parameters as the online
+        # network.  The active load_model() implementation returns when no
+        # checkpoint exists, so relying on load-time synchronization leaves a
+        # fresh target independently randomized.
+        self.target_net.load_state_dict(self.policy_net.state_dict())
         # 创建优化器，adam优化算法
         self.optimizer = torch.optim.Adam(self.policy_net.parameters(), lr=self.p.learning_rate)
         # 计算损失函数
         self.loss_fn = torch.nn.SmoothL1Loss()
+        self.last_train_diagnostics = None
 
 
     def save_model(self, save_path):
@@ -174,9 +180,41 @@ class ACC(Agent):
             # 目标网络Q值估计，原文中的yj=r+Q_target
             q_estimation = reward.unsqueeze(1).to(self.device) + self.p.gamma * q_target
 
-        # Calculate the loss, perform backpropagation, and return the loss value for logging purposes.
-        # 计算loss，利用均方误差
+        # Calculate Huber (Smooth L1) TD loss.  It is quadratic near zero and
+        # linear for large errors, making Q-scale diagnostics essential.
         loss = self.loss_fn(q_prediction, q_estimation)
+
+        # Keep compact, structured Q diagnostics for AgentHelper.  Logging the
+        # complete head tensors for hundreds of ports would make the training
+        # logs unusable; the helper emits one aggregate line periodically and
+        # persists per-port summaries at the end of every epoch.
+        td_error = q_prediction - q_estimation
+
+        def tensor_stats(value):
+            flat = value.detach().float().reshape(-1).cpu()
+            absolute = flat.abs()
+            return {
+                "mean": float(flat.mean().item()),
+                "abs_mean": float(absolute.mean().item()),
+                "abs_p95": float(torch.quantile(absolute, 0.95).item()),
+                "abs_max": float(absolute.max().item()),
+            }
+
+        # Both reward profiles are bounded to [-1, 1].  For gamma < 1 the
+        # corresponding infinite-horizon return scale is 1 / (1 - gamma).
+        expected_q_bound = (
+            1.0 / (1.0 - self.p.gamma)
+            if 0.0 <= self.p.gamma < 1.0
+            else float("inf")
+        )
+        self.last_train_diagnostics = {
+            "q_prediction": tensor_stats(q_prediction),
+            "q_target": tensor_stats(q_estimation),
+            "td_error": tensor_stats(td_error),
+            "reward_mean": float(reward.mean().item()),
+            "reward_abs_max": float(reward.abs().max().item()),
+            "expected_q_bound": float(expected_q_bound),
+        }
         # 清空历史梯度
         self.optimizer.zero_grad()
         # 反向传播计算梯度

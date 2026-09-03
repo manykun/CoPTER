@@ -15,6 +15,7 @@ WATCH_PORTS="323,321,320,345,346,347"
 ENDPOINT_PORT=323
 TARGET_PORTS="323,321"
 ALPHA_STEP="0.1"
+TARGET_UPDATE_INTERVAL=100
 PORT=6656
 RESUME=0
 SMOKE=0
@@ -36,6 +37,7 @@ Options:
   --endpoint-port N
   --target-ports CSV
   --alpha-step X
+  --target-update-interval N  Hard target sync interval in global optimizer updates (default: 100)
   --port N
   --resume
   --smoke
@@ -59,6 +61,7 @@ while [[ $# -gt 0 ]]; do
         --endpoint-port) ENDPOINT_PORT="$2"; shift 2 ;;
         --target-ports) TARGET_PORTS="$2"; shift 2 ;;
         --alpha-step) ALPHA_STEP="$2"; shift 2 ;;
+        --target-update-interval) TARGET_UPDATE_INTERVAL="$2"; shift 2 ;;
         --port) PORT="$2"; shift 2 ;;
         --resume) RESUME=1; shift ;;
         --smoke) SMOKE=1; shift ;;
@@ -70,6 +73,10 @@ done
 case "${STAGE}" in prepare|screen|acc|analyze|interpolate|all) ;;
     *) echo "invalid stage: ${STAGE}" >&2; exit 2 ;;
 esac
+[[ "${TARGET_UPDATE_INTERVAL}" =~ ^[1-9][0-9]*$ ]] || {
+    echo "target-update-interval must be a positive integer" >&2
+    exit 2
+}
 case "${PAIR}" in
     webserver-cachefollower)
         TASK_A="realistic_webserver"
@@ -100,6 +107,7 @@ COMMON_ARGS=(
     --phase-epochs "${PHASE_EPOCHS}"
     --eps-decay 2500
     --epsilon-schedule global
+    --target-update-interval "${TARGET_UPDATE_INTERVAL}"
     --acc-hidden-dims "32,64,64,32"
     --reward-profile tail_safe
     --reward-queue-lambda 5.0
@@ -130,6 +138,8 @@ run_analysis() {
     python "${ROOT}/scripts/continual_validation/analyze_port_continual.py" \
         --run-dir "${ROOT}/experiments/continual_validation/${RUN_ID}" \
         --ports "${WATCH_PORTS}"
+    python "${ROOT}/scripts/continual_validation/analyze_acc_q.py" \
+        --run-dir "${ROOT}/experiments/continual_validation/${RUN_ID}"
 }
 
 run_interpolation() {

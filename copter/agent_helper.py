@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 # Author: Tianyu Zuo (@amefumi)
 # Email: ty.zuo@outlook.com
 
@@ -165,6 +167,8 @@ class AgentHelper:
         # serializes them at the end of the one-epoch process.
         self._epoch_port_losses = {}
         self._epoch_port_rewards = {}
+        self._epoch_port_q_diagnostics = {}
+        self._q_inflation_seen_ports = set()
         # Current "epoch" id (i.e. how many copter.py invocations) - read from train_state if exists
         self.epoch = 0
 
@@ -257,6 +261,7 @@ class AgentHelper:
         # Per-train-call metric collectors
         per_port_loss = {}
         per_port_reward = {}
+        per_port_q = {}
         for port_idx, agent in enumerate(self.agent_pool):
             # 判断当前端口的经验回放缓冲区是否有足够多的样本
             if len(self.rb_pool[port_idx]) > sample_size:
@@ -279,16 +284,82 @@ class AgentHelper:
                     batch_mean_reward
                 )
                 any_trained = True
-                # 定期更新目标网络
-                if current_step % self.p.target_update_interval == 0:
-                    logger.info(f"Updating target network for agent {agent.name} at step {current_step}.")
-                    agent.update_target_network()
+                diagnostics = getattr(agent, "last_train_diagnostics", None)
+                if diagnostics:
+                    expected_bound = diagnostics["expected_q_bound"]
+                    inflation_limit = expected_bound * self.p.q_inflation_factor
+                    diagnostics = dict(diagnostics)
+                    diagnostics["inflation_limit"] = float(inflation_limit)
+                    diagnostics["inflated"] = bool(
+                        diagnostics["q_prediction"]["abs_p95"] > inflation_limit
+                        or diagnostics["q_target"]["abs_p95"] > inflation_limit
+                        or diagnostics["q_prediction"]["abs_max"] > inflation_limit
+                        or diagnostics["q_target"]["abs_max"] > inflation_limit
+                    )
+                    per_port_q[port_idx] = diagnostics
+                    self._epoch_port_q_diagnostics.setdefault(port_idx, []).append(
+                        diagnostics
+                    )
             else:
                 # 经验不足需要提前调用sync()
                 logger.warning(f"Agent {agent.name} has insufficient experiences for training. Make sure to call sync() before training.")
 
         if any_trained:
             self.global_train_step += 1
+            # Synchronize by the number of optimizer updates completed across
+            # processes/epochs.  current_step is episode-local and previously
+            # made a nominal interval of 16 equivalent to about two optimizer
+            # updates when train_intervals=8.
+            target_updated = (
+                self.global_train_step % self.p.target_update_interval == 0
+            )
+            if target_updated:
+                for agent in self.agent_pool:
+                    agent.update_target_network()
+                logger.info(
+                    "Target networks synchronized at global_train_step={} "
+                    "(interval={}).",
+                    self.global_train_step,
+                    self.p.target_update_interval,
+                )
+
+            if per_port_q:
+                pred_means = [d["q_prediction"]["mean"] for d in per_port_q.values()]
+                pred_maxes = [d["q_prediction"]["abs_max"] for d in per_port_q.values()]
+                target_means = [d["q_target"]["mean"] for d in per_port_q.values()]
+                target_maxes = [d["q_target"]["abs_max"] for d in per_port_q.values()]
+                td_p95 = [d["td_error"]["abs_p95"] for d in per_port_q.values()]
+                inflated_ports = [p for p, d in per_port_q.items() if d["inflated"]]
+                should_log = (
+                    self.global_train_step == 1
+                    or self.global_train_step % self.p.q_log_interval == 0
+                    or target_updated
+                )
+                newly_inflated = [
+                    port for port in inflated_ports
+                    if port not in self._q_inflation_seen_ports
+                ]
+                self._q_inflation_seen_ports.update(inflated_ports)
+                log_method = logger.warning if inflated_ports else logger.info
+                if should_log or newly_inflated:
+                    log_method(
+                        "ACC Q diagnostics global_train_step={}: ports={}, "
+                        "q_pred_mean={:.4f}, q_pred_abs_max={:.4f}, "
+                        "q_target_mean={:.4f}, q_target_abs_max={:.4f}, "
+                        "td_abs_p95_max={:.4f}, expected_bound={:.2f}, "
+                        "inflation_limit={:.2f}, inflated_ports={}{}",
+                        self.global_train_step,
+                        len(per_port_q),
+                        float(np.mean(pred_means)),
+                        float(np.max(pred_maxes)),
+                        float(np.mean(target_means)),
+                        float(np.max(target_maxes)),
+                        float(np.max(td_p95)),
+                        next(iter(per_port_q.values()))["expected_q_bound"],
+                        next(iter(per_port_q.values()))["inflation_limit"],
+                        len(inflated_ports),
+                        f" sample={inflated_ports[:10]}" if inflated_ports else "",
+                    )
             self._train_call_count_since_save += 1
             # ---- TensorBoard logging (per train() call) ----
             if self._tb is not None:
@@ -306,6 +377,42 @@ class AgentHelper:
                         self._tb.add_scalar("train/reward", float(np.mean(list(per_port_reward.values()))), step)
                         for pi, rv in per_port_reward.items():
                             self._tb.add_scalar(f"train/reward_port{pi}", rv, step)
+                    if per_port_q:
+                        self._tb.add_scalar(
+                            "train/q_prediction_mean",
+                            float(np.mean([
+                                value["q_prediction"]["mean"]
+                                for value in per_port_q.values()
+                            ])),
+                            step,
+                        )
+                        self._tb.add_scalar(
+                            "train/q_prediction_abs_max",
+                            float(np.max([
+                                value["q_prediction"]["abs_max"]
+                                for value in per_port_q.values()
+                            ])),
+                            step,
+                        )
+                        self._tb.add_scalar(
+                            "train/q_target_abs_max",
+                            float(np.max([
+                                value["q_target"]["abs_max"]
+                                for value in per_port_q.values()
+                            ])),
+                            step,
+                        )
+                        self._tb.add_scalar(
+                            "train/td_error_abs_p95_max",
+                            float(np.max([
+                                value["td_error"]["abs_p95"]
+                                for value in per_port_q.values()
+                            ])),
+                            step,
+                        )
+                        self._tb.add_scalar(
+                            "train/q_inflated_ports", len(inflated_ports), step
+                        )
                     for pi, rb in enumerate(self.rb_pool):
                         self._tb.add_scalar(f"train/buffer_size_port{pi}", len(rb), step)
                 except Exception as e:
@@ -434,6 +541,7 @@ class AgentHelper:
             "shared_replay_size": len(self.shared_rb),
             "shared_replay_enabled": bool(self.p.shared_replay_enabled),
             "epsilon_schedule": self.p.epsilon_schedule,
+            "target_update_interval": int(self.p.target_update_interval),
         }
         ts.update({
             key: value for key, value in {
@@ -469,6 +577,8 @@ class AgentHelper:
             "epsilon_schedule": self.p.epsilon_schedule,
             "mean_reward": mean_reward,
             "mean_loss": mean_loss,
+            "target_update_interval": int(self.p.target_update_interval),
+            "q_inflation_factor": float(self.p.q_inflation_factor),
             "train_port_metrics": {
                 str(port): {
                     "updates": len(losses),
@@ -479,6 +589,7 @@ class AgentHelper:
                         float(np.mean(self._epoch_port_rewards.get(port, [])))
                         if self._epoch_port_rewards.get(port) else None
                     ),
+                    **self._summarize_port_q_diagnostics(port),
                 }
                 for port, losses in sorted(self._epoch_port_losses.items())
                 if losses
@@ -522,6 +633,30 @@ class AgentHelper:
             except Exception as e:
                 logger.warning(f"tensorboard epoch log failed: {e}")
         return record
+
+    def _summarize_port_q_diagnostics(self, port):
+        samples = self._epoch_port_q_diagnostics.get(port, [])
+        if not samples:
+            return {}
+
+        def values(group, metric):
+            return [sample[group][metric] for sample in samples]
+
+        return {
+            "q_prediction_mean": float(np.mean(values("q_prediction", "mean"))),
+            "q_prediction_abs_p95_max": float(np.max(values("q_prediction", "abs_p95"))),
+            "q_prediction_abs_max": float(np.max(values("q_prediction", "abs_max"))),
+            "q_target_mean": float(np.mean(values("q_target", "mean"))),
+            "q_target_abs_p95_max": float(np.max(values("q_target", "abs_p95"))),
+            "q_target_abs_max": float(np.max(values("q_target", "abs_max"))),
+            "td_error_abs_mean": float(np.mean(values("td_error", "abs_mean"))),
+            "td_error_abs_p95_max": float(np.max(values("td_error", "abs_p95"))),
+            "td_error_abs_max": float(np.max(values("td_error", "abs_max"))),
+            "expected_q_bound": float(samples[-1]["expected_q_bound"]),
+            "q_inflation_limit": float(samples[-1]["inflation_limit"]),
+            "q_inflation_events": sum(bool(sample["inflated"]) for sample in samples),
+            "q_inflated": any(bool(sample["inflated"]) for sample in samples),
+        }
 
 
      # 修改：记录经验时传入fmap和action以计算融合奖励

@@ -23,6 +23,7 @@ UPDATES_TASK_A=""
 UPDATES_TASK_B=""
 EPS_DECAY=2500
 EPSILON_SCHEDULE="phase"
+TARGET_UPDATE_INTERVAL=100
 TASK_B_EPS_START="1.0"
 TASK_B_EPS_DECAY=""
 ACC_HIDDEN_DIMS="32,64,64,32"
@@ -77,6 +78,7 @@ Important options:
   --buffer-kb N
   --eps-decay N
   --epsilon-schedule NAME phase resets at A→B; global continues across A→B
+  --target-update-interval N  Hard target sync every N global optimizer updates
   --task-b-eps-start X   Reset task-B exploration to X (default: 1.0)
   --task-b-eps-decay N   Task-B phase-local epsilon decay
   --acc-hidden-dims CSV
@@ -112,6 +114,7 @@ while [[ $# -gt 0 ]]; do
         --updates-task-b) UPDATES_TASK_B="$2"; UPDATES_TASK_B_EXPLICIT=1; shift 2 ;;
         --eps-decay) EPS_DECAY="$2"; shift 2 ;;
         --epsilon-schedule) EPSILON_SCHEDULE="$2"; shift 2 ;;
+        --target-update-interval) TARGET_UPDATE_INTERVAL="$2"; shift 2 ;;
         --task-b-eps-start) TASK_B_EPS_START="$2"; TASK_B_EPS_EXPLICIT=1; shift 2 ;;
         --task-b-eps-decay) TASK_B_EPS_DECAY="$2"; TASK_B_EPS_EXPLICIT=1; shift 2 ;;
         --acc-hidden-dims) ACC_HIDDEN_DIMS="$2"; shift 2 ;;
@@ -167,6 +170,10 @@ for value in "${UPDATES_TASK_A}" "${UPDATES_TASK_B}" "${EPS_DECAY}" "${TASK_B_EP
         exit 2
     }
 done
+[[ "${TARGET_UPDATE_INTERVAL}" =~ ^[1-9][0-9]*$ ]] || {
+    echo "target-update-interval must be a positive integer" >&2
+    exit 2
+}
 for value in "${SCREEN_MIN_ACTIVE_SAMPLES}" "${SCREEN_MIN_CONGESTED_SAMPLES}"; do
     [[ "${value}" =~ ^[0-9]+$ ]] || {
         echo "screen sample thresholds must be non-negative integers" >&2
@@ -277,7 +284,8 @@ manifest_json() {
         "${SCREEN_MIN_ACTIVE_SAMPLES}" "${SCREEN_MIN_CONGESTED_SAMPLES}" \
         "${SCREEN_MIN_OLD_TASK_P95_PENALTY}" "${REWARD_WEIGHTS}" \
         "${UPDATES_TASK_A_EXPLICIT}" "${UPDATES_TASK_B_EXPLICIT}" \
-        "${TASK_B_EPS_EXPLICIT}" "${REWARD_WEIGHTS_EXPLICIT}" <<'PY'
+        "${TASK_B_EPS_EXPLICIT}" "${REWARD_WEIGHTS_EXPLICIT}" \
+        "${TARGET_UPDATE_INTERVAL}" <<'PY'
 import json
 import sys
 
@@ -324,6 +332,7 @@ reward_weights = [float(value) for value in sys.argv[29].split(",")]
 updates_explicit = sys.argv[30] == "1" or sys.argv[31] == "1"
 task_b_eps_explicit = sys.argv[32] == "1"
 reward_weights_explicit = sys.argv[33] == "1"
+target_update_interval = int(sys.argv[34])
 
 record["epsilon_schedule"] = "reset_per_task"
 if epsilon_schedule == "global":
@@ -344,6 +353,7 @@ if task_b_eps_explicit and epsilon_schedule == "phase":
     }
 if reward_weights_explicit:
     record["reward_weights"] = reward_weights
+record["target_update_interval"] = target_update_interval
 if task_pair_mode != "independent":
     record["task_pair_mode"] = task_pair_mode
 if screen_watch_ports:
@@ -584,6 +594,7 @@ evaluate() {
         --eps-end 0.05 \
         --eps-decay "${EPS_DECAY}" \
         --epsilon-schedule "${EPSILON_SCHEDULE}" \
+        --target-update-interval "${TARGET_UPDATE_INTERVAL}" \
         --acc-hidden-dims "${ACC_HIDDEN_DIMS}" \
         --reward-weights "${REWARD_WEIGHTS}" \
         --reward-profile "${REWARD_PROFILE}" \
@@ -670,6 +681,7 @@ screen() {
                 --reward-queue-lambda "${REWARD_QUEUE_LAMBDA}" \
                 --reward-ecn-lambda "${REWARD_ECN_LAMBDA}" \
                 --shared-replay "${SHARED_REPLAY}" \
+                --target-update-interval "${TARGET_UPDATE_INTERVAL}" \
                 --tb-enable false --run-id "${RUN_ID}" --phase screen \
                 "${watch_args[@]}"
             copy_screen_outputs "${task}" "${label}" "${exp}" "${model_dir}"
@@ -783,6 +795,7 @@ train_method() {
             --reward-ecn-lambda "${REWARD_ECN_LAMBDA}" \
             --shared-replay "${SHARED_REPLAY}" \
             --action-space "${ACTION_SPACE}" \
+            --target-update-interval "${TARGET_UPDATE_INTERVAL}" \
             --tb-enable false \
             --run-id "${RUN_ID}" \
             --phase train_a \
@@ -850,6 +863,7 @@ PY
             --reward-ecn-lambda "${REWARD_ECN_LAMBDA}" \
             --shared-replay "${SHARED_REPLAY}" \
             --action-space "${ACTION_SPACE}" \
+            --target-update-interval "${TARGET_UPDATE_INTERVAL}" \
             --tb-enable false \
             --run-id "${RUN_ID}" \
             --phase train_b \
