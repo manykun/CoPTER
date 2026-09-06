@@ -3,6 +3,10 @@
 从稳定版ACC实验的 after_b 快照开始，额外训练A累计20、50、100次更新。
 每个节点冻结评估A和B；return_0重新评估复制的after-B模型，作为本轮起点。
 原实验目录不修改。独立目录保存模型、local replay、优化器状态、训练日志和快照。
+原持续学习脚本的阶段快照省略.pkl文件；若after_b不含replay，本脚本会验证acc/models的
+训练步数、环境步数、epoch、epsilon、phase、端口数、replay条数及所有网络文件哈希
+与after_b一致后，复制其本地replay。验证不通过则停止，不会静默使用空replay。
+replay来源和复制文件哈希写入replay_provenance.json。复制期间请勿在原实验目录训练。
 epsilon继续全局衰减，target同步周期沿用原manifest；每次仿真重新启动，网络队列不会跨仿真保留。
 
 在服务器项目根目录执行（BASE必须指向本次稳定版实验，不要按修改时间自动选择）：

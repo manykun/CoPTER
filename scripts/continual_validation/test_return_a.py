@@ -9,6 +9,28 @@ import run_return_a as app
 
 
 class RecoveryTest(unittest.TestCase):
+    def test_live_replay_donor_and_mismatch_rejection(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            snapshot, live = base / 'acc/checkpoints/after_b', base / 'acc/models'
+            snapshot.mkdir(parents=True)
+            live.mkdir(parents=True)
+            state = dict(global_train_step=1200, global_env_step=9600,
+                         epoch=172, epsilon=.05, phase='train_b', node_number=1,
+                         replay_size_per_port=[2])
+            app.write(live / 'old_train_state.json', state)
+            (snapshot / 'old_ACC_0').write_bytes(b'checkpoint')
+            (live / 'old_ACC_0').write_bytes(b'checkpoint')
+            (live / 'old_rb_port0.pkl').write_bytes(b'replay')
+            self.assertEqual(app.replay_source(base, snapshot, state, 'old'), live)
+            (live / 'old_ACC_0').write_bytes(b'changed')
+            with self.assertRaisesRegex(ValueError, 'differs'):
+                app.replay_source(base, snapshot, state, 'old')
+            (live / 'old_ACC_0').write_bytes(b'checkpoint')
+            app.write(live / 'old_train_state.json', dict(state, global_train_step=1201))
+            with self.assertRaisesRegex(ValueError, 'global_train_step'):
+                app.replay_source(base, snapshot, state, 'old')
+
     def test_curriculum(self):
         with tempfile.TemporaryDirectory() as tmp:
             base, out = Path(tmp) / 'base', Path(tmp) / 'recovery'

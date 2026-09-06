@@ -2,6 +2,7 @@
 """Resume a completed ACC after-B snapshot in an isolated A-relearning run."""
 import argparse
 import csv
+import hashlib
 import json
 import shutil
 import subprocess
@@ -25,6 +26,41 @@ def read(path):
 
 def write(path, value):
     path.write_text(json.dumps(value, indent=2) + '\n')
+
+
+def digest(path):
+    result = hashlib.sha256()
+    with path.open('rb') as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b''):
+            result.update(chunk)
+    return result.hexdigest()
+
+
+def replay_source(base, source, state, exp):
+    """Phase snapshots intentionally omit .pkl; validate the live replay donor."""
+    names = [f'{exp}_rb_port{i}.pkl' for i in range(state['node_number'])]
+    weights = [f'{exp}_ACC_{i}' for i in range(state['node_number'])]
+    for name in weights:
+        if not (source / name).is_file():
+            raise ValueError(f'Incomplete after-B snapshot: missing {name}')
+    if all((source / name).is_file() for name in names):
+        return source
+    live = base / 'acc/models'
+    live_state_path = live / f'{exp}_train_state.json'
+    if not live_state_path.is_file():
+        raise ValueError(f'No live replay donor state: {live_state_path}')
+    live_state = read(live_state_path)
+    for key in ('global_train_step', 'global_env_step', 'epoch', 'epsilon',
+                'phase', 'node_number', 'replay_size_per_port'):
+        if key not in state or live_state.get(key) != state[key]:
+            raise ValueError(f'Live models do not match after-B state ({key}); refusing replay reuse')
+    for name in weights:
+        if not (live / name).is_file() or digest(live / name) != digest(source / name):
+            raise ValueError(f'Live checkpoint differs from after-B: {name}; refusing replay reuse')
+    for name in names:
+        if not (live / name).is_file():
+            raise ValueError(f'Missing local replay file: {live / name}')
+    return live
 
 
 def config(source, flow, destination, output):
@@ -156,12 +192,8 @@ def main():
     if args.stage == 'run':
         if out.exists():
             raise ValueError(f'Output already exists: {out}. Use --stage analyze or a fresh output-dir')
-        if not list(source.glob('*_rb_port*.pkl')):
-            raise ValueError('Missing local replay snapshots; refusing a cold replay restart')
-        for i in range(state['node_number']):
-            for name in (f'{old_exp}_ACC_{i}', f'{old_exp}_rb_port{i}.pkl'):
-                if not (source / name).is_file():
-                    raise ValueError(f'Incomplete after-B snapshot: missing {name}')
+        donor = replay_source(base, source, state, old_exp)
+        print(f'Validated local replay donor: {donor}', flush=True)
         out.mkdir(parents=True)
         write(out / 'protocol.json', protocol)
         model = out / 'models'
@@ -169,6 +201,13 @@ def main():
         for path in source.iterdir():
             if path.is_file() and not path.name.endswith('_metrics.jsonl'):
                 shutil.copy2(path, model / path.name.replace(old_exp, exp))
+        for i in range(state['node_number']):
+            name = f'{old_exp}_rb_port{i}.pkl'
+            shutil.copy2(donor / name, model / name.replace(old_exp, exp))
+        write(out / 'replay_provenance.json', dict(source=str(donor),
+              global_train_step=state['global_train_step'],
+              files={f'{exp}_rb_port{i}.pkl': digest(model / f'{exp}_rb_port{i}.pkl')
+                     for i in range(state['node_number'])}))
         state_path = model / (exp + '_train_state.json')
         state['exp_name'] = exp
         write(state_path, state)
