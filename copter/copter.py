@@ -263,6 +263,8 @@ if __name__ == "__main__":
     )
     reward_component_sums = {key: 0.0 for key in reward_component_keys}
     reward_component_count = 0
+    reward_fallback_samples = 0
+    reward_fallback_steps = 0
     action_histogram = {}
 
     try:
@@ -378,6 +380,8 @@ if __name__ == "__main__":
                         # on the ports carrying the strongest DCQCN signal.
                         topk = network_helper.get_topk_congested_ports(k=8)
                         if len(topk) > 0:
+                            reward_fallback_steps += 1
+                            reward_fallback_samples += len(topk)
                             rewards = []
                             for p in topk:
                                 components = network_helper.get_port_current_reward_components(p)
@@ -476,6 +480,10 @@ if __name__ == "__main__":
                 "rollout_mean_reward": (rollout_top30_sum / rollout_top30_count) if rollout_top30_count > 0 else None,
                 # Legacy full-congested-mean, kept for backward compatibility.
                 "rollout_all_congested_mean": (rollout_reward_sum / rollout_reward_count) if rollout_reward_count > 0 else None,
+                "rollout_reward_population": "congested_ports_with_topk_fallback",
+                "rollout_reward_samples": rollout_reward_count,
+                "rollout_reward_fallback_samples": reward_fallback_samples,
+                "rollout_reward_fallback_steps": reward_fallback_steps,
                 # Median reward — robust to both tails.
                 "rollout_median_reward": (rollout_median_sum / rollout_median_count) if rollout_median_count > 0 else None,
                 "congested_step_ratio": (congested_step_count / current_step) if current_step > 0 else 0.0,
