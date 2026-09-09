@@ -20,6 +20,7 @@ COMPONENT_KEYS = (
     "queue_cost_sq",
     "ecn_cost_sq",
     "tail_safe_raw",
+    "tail_safe_clipped",
 )
 
 

@@ -144,18 +144,19 @@ def analyze(root, out, ports):
             identity = dict(task=task, label=label, repeat=rep)
             network.append(dict(identity, **summarize(run, common)))
             metrics = run['metrics']
+            generating_manifest = dict(manifest, reward_profile=metrics.get('reward_profile', manifest['reward_profile']))
             global_values = {k[len('reward_'):-len('_mean')]: v for k, v in metrics.items()
                              if k.startswith('reward_') and k.endswith('_mean') and isinstance(v, (float, int))}
             global_values['reward'] = metrics.get('rollout_all_congested_mean')
             components.append(dict(identity, port='network', population='congested_with_topk_fallback',
                 samples=metrics.get('rollout_reward_samples'),
                 fallback_samples=metrics.get('rollout_reward_fallback_samples'),
-                **contributions(global_values, manifest)))
+                **contributions(global_values, generating_manifest)))
             for port in ports:
                 detail = metrics.get('watch_ports_metrics', {}).get(str(port), {})
                 for population, count in [('all', 'samples'), ('active', 'active_steps'), ('congested', 'congested_steps')]:
                     components.append(dict(identity, port=port, population=population,
-                        samples=detail.get(count), **contributions(detail.get('means_' + population, {}), manifest)))
+                        samples=detail.get(count), **contributions(detail.get('means_' + population, {}), generating_manifest)))
                 physical.append(dict(identity, port=port,
                     **frozen_port_summary(run['directory'], port, manifest['buffer_kb'])))
     out.mkdir(parents=True, exist_ok=True)
@@ -179,7 +180,7 @@ def analyze(root, out, ports):
             f"{fmt(r['reward_min'])}–{fmt(r['reward_max'])} | {fmt(r['p95_fct_us_mean'])} | "
             f"{fmt(r['p95_fct_us_min'])}–{fmt(r['p95_fct_us_max'])} | {r['completion_ratio_mean']:.4%} |")
     lines += ['', '## Frozen network reward decomposition (repeat means)', '',
-        '| Task | Checkpoint | Throughput term | Queue contribution | ECN contribution | Raw reward | Clipped reward |',
+        '| Task | Checkpoint | Throughput term | Tail-safe queue contribution | Tail-safe ECN contribution | Tail-safe raw | Native reward |',
         '|---|---|---:|---:|---:|---:|---:|']
     for r in grouped:
         selected = [c for c in components if c['port'] == 'network'

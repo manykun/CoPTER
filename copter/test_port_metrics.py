@@ -32,6 +32,7 @@ class FakeNetwork:
             "queue_cost_sq": 0.03,
             "ecn_cost_sq": 0.04,
             "tail_safe_raw": -0.25,
+            "tail_safe_clipped": -0.25,
         }
 
     def is_port_active(self, port):

@@ -218,6 +218,19 @@ if __name__ == "__main__":
     checkpoint_name = args.checkpoint if args.resume and args.checkpoint else args.override_name
     agent_helper.load(checkpoint_name)
 
+    # Audit common random initialization without changing RNG or training.
+    startup_hashes = {}
+    if args.mode == "ACC":
+        for name in ("policy_net", "target_net"):
+            hasher = hashlib.sha256()
+            for agent in agent_helper.agent_pool:
+                for key, tensor in sorted(getattr(agent, name).state_dict().items()):
+                    hasher.update(key.encode())
+                    hasher.update(tensor.detach().cpu().numpy().tobytes())
+            startup_hashes[name] = hasher.hexdigest()
+    startup_train_step = agent_helper.global_train_step
+    startup_replay_entries = sum(len(rb) for rb in agent_helper.rb_pool)
+
     # ---- Initialize TensorBoard SummaryWriter (跨 epoch 续写到同一目录，曲线连续) ----
     tb_enabled = str(args.tb_enable).lower() in ("1", "true", "yes", "on")
     tb_writer = None
@@ -259,7 +272,7 @@ if __name__ == "__main__":
     reward_component_keys = (
         "throughput", "queue", "ecn", "avg_tx_rate", "avg_queue",
         "peak_queue", "avg_ecn", "peak_ecn", "combined_queue",
-        "combined_ecn", "queue_cost_sq", "ecn_cost_sq", "tail_safe_raw",
+        "combined_ecn", "queue_cost_sq", "ecn_cost_sq", "tail_safe_raw", "tail_safe_clipped",
     )
     reward_component_sums = {key: 0.0 for key in reward_component_keys}
     reward_component_count = 0
@@ -467,6 +480,9 @@ if __name__ == "__main__":
                 agent_helper.save()
             agent_helper.append_epoch_metrics({
                 "steps_this_epoch": current_step,
+                "startup_network_hashes": startup_hashes,
+                "startup_train_step": startup_train_step,
+                "startup_replay_entries": startup_replay_entries,
                 "eval_greedy": bool(args.eval_greedy),
                 "eval_tag": args.eval_tag,
                 "reward_profile": args.reward_profile,

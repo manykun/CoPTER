@@ -314,6 +314,7 @@ class NetworkHelper:
             "queue_cost_sq": float(tail_safe["queue_cost_sq"]),
             "ecn_cost_sq": float(tail_safe["ecn_cost_sq"]),
             "tail_safe_raw": float(tail_safe["raw"]),
+            "tail_safe_clipped": float(tail_safe["reward"]),
         }
 
     def get_port_current_reward(self, port_idx):
