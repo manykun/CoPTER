@@ -98,7 +98,9 @@ def main():
                 if list(model.iterdir()):
                     raise ValueError('Model directory contains files but no valid state; inspect interrupted bootstrap')
                 execute(base, tasks[0], out/profile/'train/bootstrap', cmd,
-                        ['--phase', 'train_a', '--one-shot', '--episodes', '1',
+                        # A single episode may not fill the local replay
+                        # batch, so it can legitimately produce zero updates.
+                        ['--phase', 'train_a', '--episodes', '200',
                          '--target-train-steps', '1'])
             verify_start(first_training_record(model, exp), initial_hashes)
             for index, (phase, task) in enumerate(zip(['after_a', 'after_b'], tasks), 1):

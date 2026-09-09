@@ -93,7 +93,11 @@ def worker(root_string, profile, scope):
                 raise ValueError('Interrupted bootstrap without valid state; inspect before restarting')
             execute(base, a, root / profile / 'a/train/bootstrap',
                     command(m, model, exp, port, ports),
-                    ['--phase', 'train_a', '--one-shot', '--episodes', '1',
+                    # One-shot is too short for a replay warm-up: a whole
+                    # episode can finish with zero optimizer updates when
+                    # each local buffer has not crossed train_set_size yet.
+                    # Let the launcher run bounded episodes until update 1.
+                    ['--phase', 'train_a', '--episodes', '200',
                      '--target-train-steps', '1'])
         verify_start(first_training_record(model, exp), expected)
         for n in p['a_points']:

@@ -42,9 +42,7 @@ class StudyTests(unittest.TestCase):
                 start=s['global_train_step']; frozen='--eval-greedy' in cmd
                 if not frozen:
                     target=int(arg('--target-train-steps'))
-                    s.update(global_train_step=min(start+3,target) if '--one-shot' in cmd else target,epoch=s['epoch']+1)
-                    if '--one-shot' in cmd and s['global_train_step'] < target:
-                        raise RuntimeError('Real shell rejects one-shot runs below target budget')
+                    s.update(global_train_step=target,epoch=s['epoch']+1)
                     app.write(state_path,s)
                     (model/(exp+'_ACC_0')).write_bytes(b'weights')
                     (model/(exp+'_rb_port0.pkl')).write_bytes(b'replay')
