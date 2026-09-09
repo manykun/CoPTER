@@ -484,7 +484,7 @@ else:
 }
 
 # ==================== Main Entry ====================
-LOG_BASE="${COPTER_ROOT}/copter/training_logs"
+LOG_BASE="${COPTER_LOG_BASE:-${COPTER_ROOT}/copter/training_logs}"
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 
 if [ ${#RESOLVED_LIST[@]} -eq 1 ]; then

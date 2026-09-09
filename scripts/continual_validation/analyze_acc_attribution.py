@@ -249,7 +249,9 @@ def analyze(root, out, ports):
                 rs.sort(key=lambda r: r['global_train_step'])
                 for ax, key in zip(axes, ['batch_reward', 'online_rollout_reward', 'loss']):
                     valid = [r for r in rs if r[key] is not None]
-                    ax.plot([r['global_train_step'] for r in valid], [r[key] for r in valid], label=phase)
+                    curve_label = ('/'.join(Path(source).parts[:2]) + ':' + str(phase)
+                                   if protocol.get('stage') == 'learning_study' else phase)
+                    ax.plot([r['global_train_step'] for r in valid], [r[key] for r in valid], label=curve_label)
                     ax.set_ylabel(key)
                     ax.grid(alpha=.25)
             axes[1].set_ylabel('Online NETWORK reward\n(not port reward)')

@@ -99,7 +99,7 @@ def main():
                     raise ValueError('Model directory contains files but no valid state; inspect interrupted bootstrap')
                 execute(base, tasks[0], out/profile/'train/bootstrap', cmd,
                         ['--phase', 'train_a', '--one-shot', '--episodes', '1',
-                         '--target-train-steps', str(args.updates_per_task)])
+                         '--target-train-steps', '1'])
             verify_start(first_training_record(model, exp), initial_hashes)
             for index, (phase, task) in enumerate(zip(['after_a', 'after_b'], tasks), 1):
                 target = args.updates_per_task * index
