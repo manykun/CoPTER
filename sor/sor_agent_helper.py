@@ -1,10 +1,14 @@
 import json
 import os
 import pickle
+import random
+import resource
+import time
 from collections import deque
 from dataclasses import replace
 
 import numpy as np
+import torch
 
 try:
     from loguru import logger
@@ -18,7 +22,12 @@ COPTER_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "copt
 if COPTER_DIR not in os.sys.path:
     os.sys.path.insert(0, COPTER_DIR)
 
-from structures import AgentHelperParameters, AgentParameters, scheduled_epsilon
+from structures import (
+    AgentHelperParameters,
+    AgentParameters,
+    acc_action_dimensions,
+    scheduled_epsilon,
+)
 from sor_agent import SORACC
 from sor_replay import SORReplayConfig, StructuredSORReplayBuffer
 
@@ -43,8 +52,10 @@ class SORAgentHelper:
         sync_interval: int = 8,
         save_buffer_every: int = 5,
         acc_hidden_dims=None,
+        acc_action_space="legacy",
         run_id: str = None,
         phase: str = None,
+        config_hash: str = None,
     ):
         self.node_number = node_number
         self.p = ahp
@@ -54,9 +65,15 @@ class SORAgentHelper:
         self.network_helper = network_helper
         self.run_id = run_id
         self.phase = phase
+        self.config_hash = config_hash
+        self.acc_action_space = acc_action_space
         self.sor_config = sor_config or SORReplayConfig(rb_size=ahp.rb_size, rb_size_global=ahp.rb_size_global)
+        action_dims = acc_action_dimensions(acc_action_space)
         self.acc_parameters = replace(
             DEFAULT_SOR_ACC_PARAMETER,
+            kmin_dim=action_dims[0],
+            kmax_dim=action_dims[1],
+            pmax_dim=(action_dims[2] if len(action_dims) == 3 else 1),
             hidden_dims=(
                 tuple(acc_hidden_dims)
                 if acc_hidden_dims
@@ -71,10 +88,20 @@ class SORAgentHelper:
                 lambda_reg=lambda_reg,
                 drift_reg_threshold=drift_reg_threshold,
                 ref_update_interval=ref_update_interval,
+                action_space=acc_action_space,
             )
             for port_idx in range(node_number)
         ]
-        self.rb_pool = [StructuredSORReplayBuffer(self.sor_config) for _ in range(node_number)]
+        # Every port receives the same total transition budget as ACC's FIFO
+        # replay.  Without the total cap, rb_size was applied per cluster and
+        # SOR could retain max_clusters times more experience.
+        local_cfg = replace(
+            self.sor_config,
+            global_total_cap=self.p.rb_size,
+            recent_size=min(self.sor_config.recent_size, self.p.rb_size),
+            boundary_size=min(self.sor_config.boundary_size, self.p.rb_size),
+        )
+        self.rb_pool = [StructuredSORReplayBuffer(local_cfg) for _ in range(node_number)]
         global_cfg = replace(
             self.sor_config,
             rb_size=self.sor_config.rb_size_global,
@@ -90,11 +117,19 @@ class SORAgentHelper:
         self._train_call_count_since_save = 0
         self._recent_rewards = deque(maxlen=self.p.reward_window)
         self._recent_losses = deque(maxlen=self.p.reward_window)
+        self._epoch_port_losses = {}
+        self._epoch_port_rewards = {}
+        self._epoch_port_q_diagnostics = {}
+        self._epoch_loss_components = {}
+        self._q_inflation_seen_ports = set()
         self.epoch = 0
         self._tb = None
         self.sync_interval = max(1, int(sync_interval))
         self.save_buffer_every = max(1, int(save_buffer_every))
         self._train_call_count_since_sync = 0
+        self._target_update_count = 0
+        self._last_target_update_step = 0
+        self._started_at = time.time()
 
     def attach_tb(self, tb_writer):
         self._tb = tb_writer
@@ -107,6 +142,9 @@ class SORAgentHelper:
 
     def _global_rb_path(self):
         return os.path.join(self.model_dir, f"{self.exp_name}_sor_global_rb.pkl")
+
+    def _rng_state_path(self):
+        return os.path.join(self.model_dir, f"{self.exp_name}_sor_rng.pkl")
 
     def _metrics_path(self):
         return os.path.join(self.model_dir, f"{self.exp_name}_metrics.jsonl")
@@ -154,7 +192,8 @@ class SORAgentHelper:
         reward = self.network_helper.get_port_current_reward(port_idx=port_idx)
         embedding = self.agent_pool[port_idx].encode_state(state)
         transition = self.rb_pool[port_idx].push(
-            state, action, reward, next_state, embedding, stream_id=port_idx
+            state, action, reward, next_state, embedding, stream_id=port_idx,
+            task_label=self.phase or "unknown",
         )
         self.global_memory.push(
             state,
@@ -164,6 +203,7 @@ class SORAgentHelper:
             embedding,
             td_error=transition.td_error,
             stream_id=port_idx,
+            task_label=self.phase or "unknown",
         )
         logger.info(
             f"SOR recorded port={port_idx} reward={reward:.3f} cluster={transition.cluster_id} boundary={transition.boundary}"
@@ -220,18 +260,93 @@ class SORAgentHelper:
             replay.update_td_errors(transitions, result["td_errors"])
             self._recent_losses.append(result["loss"])
             per_port_loss[port_idx] = result["loss"]
+            self._epoch_port_losses.setdefault(port_idx, []).append(
+                float(result["loss"])
+            )
+            self._epoch_loss_components.setdefault(port_idx, []).append({
+                "td": float(result["loss_td"]),
+                "cons": float(result["loss_cons"]),
+                "reg": float(result["loss_reg"]),
+            })
             batch_mean_reward = float(np.mean(rewards))
             self._recent_rewards.append(batch_mean_reward)
             per_port_reward[port_idx] = batch_mean_reward
+            self._epoch_port_rewards.setdefault(port_idx, []).append(
+                batch_mean_reward
+            )
+            inflation_limit = (
+                result["expected_q_bound"] * self.p.q_inflation_factor
+            )
+            diagnostic = {
+                key: result[key]
+                for key in ("q_prediction", "q_target", "td_error")
+            }
+            diagnostic.update({
+                "expected_q_bound": float(result["expected_q_bound"]),
+                "inflation_limit": float(inflation_limit),
+                "inflated": bool(
+                    result["q_prediction"]["abs_p95"] > inflation_limit
+                    or result["q_target"]["abs_p95"] > inflation_limit
+                    or result["q_prediction"]["abs_max"] > inflation_limit
+                    or result["q_target"]["abs_max"] > inflation_limit
+                ),
+            })
+            self._epoch_port_q_diagnostics.setdefault(port_idx, []).append(
+                diagnostic
+            )
             any_trained = True
             logger.info(
                 f"SOR trained {agent.name}: loss={result['loss']:.6f}, td={result['loss_td']:.6f}, cons={result['loss_cons']:.6f}, reg={result['loss_reg']:.6f}"
             )
-            if current_step % self.p.target_update_interval == 0:
-                agent.update_target_network()
-
         if any_trained:
             self.global_train_step += 1
+            target_updated = (
+                self.global_train_step % self.p.target_update_interval == 0
+            )
+            if target_updated:
+                for agent in self.agent_pool:
+                    agent.update_target_network()
+                self._target_update_count += 1
+                self._last_target_update_step = self.global_train_step
+                logger.info(
+                    "SOR target networks synchronized at global_train_step={} "
+                    "(interval={}).",
+                    self.global_train_step,
+                    self.p.target_update_interval,
+                )
+            if self._epoch_port_q_diagnostics:
+                current = {
+                    port: samples[-1]
+                    for port, samples in self._epoch_port_q_diagnostics.items()
+                    if samples
+                }
+                inflated = [
+                    port for port, detail in current.items()
+                    if detail["inflated"]
+                ]
+                should_log = (
+                    self.global_train_step == 1
+                    or self.global_train_step % self.p.q_log_interval == 0
+                    or target_updated
+                )
+                newly_inflated = [
+                    port for port in inflated
+                    if port not in self._q_inflation_seen_ports
+                ]
+                self._q_inflation_seen_ports.update(inflated)
+                if should_log or newly_inflated:
+                    log_method = logger.warning if inflated else logger.info
+                    log_method(
+                        "SOR Q diagnostics global_train_step={}: ports={}, "
+                        "q_pred_abs_max={:.4f}, q_target_abs_max={:.4f}, "
+                        "td_abs_p95_max={:.4f}, inflated_ports={}",
+                        self.global_train_step,
+                        len(current),
+                        max(v["q_prediction"]["abs_max"] for v in current.values()),
+                        max(v["q_target"]["abs_max"] for v in current.values()),
+                        max(v["td_error"]["abs_p95"] for v in current.values()),
+                        len(inflated),
+                    )
             self._train_call_count_since_save += 1
             self._log_train_metrics(current_step, per_port_loss, per_port_reward)
             if self._train_call_count_since_save >= self.p.state_save_interval:
@@ -243,6 +358,22 @@ class SORAgentHelper:
     def load(self, override_name=None):
         for agent in self.agent_pool:
             agent.load_model(self.model_dir, override_name)
+        missing_local = []
+        for port_idx, replay in enumerate(self.rb_pool):
+            path = self._rb_path(port_idx)
+            if os.path.exists(path):
+                try:
+                    replay.load(path)
+                    logger.info(
+                        f"Loaded SOR local replay port={port_idx} "
+                        f"size={len(replay)} from {path}"
+                    )
+                except Exception as exc:
+                    raise RuntimeError(
+                        f"Failed to restore required SOR local replay {path}"
+                    ) from exc
+            else:
+                missing_local.append(path)
         global_path = self._global_rb_path()
         if os.path.exists(global_path):
             try:
@@ -250,10 +381,18 @@ class SORAgentHelper:
                 logger.info(f"Loaded SOR global replay from {global_path}")
             except Exception as exc:
                 logger.warning(f"Failed to load SOR global replay {global_path}: {exc}")
-            # Per-port buffers cold-start from empty; sync() is now throttled
-            # via maybe_sync() and triggered by train() rather than load(),
-            # so startup latency stays bounded regardless of global buffer size.
         self._load_train_state()
+        if self.global_train_step > 0:
+            if missing_local:
+                raise RuntimeError(
+                    "Missing local SOR replay snapshots; refusing an inexact "
+                    f"restart ({len(missing_local)} files missing)"
+                )
+            if not os.path.exists(global_path):
+                raise RuntimeError(
+                    "Missing global SOR replay snapshot; refusing an inexact restart"
+                )
+        self._load_rng_state()
         # ref_update_interval is defined over continual training, not one
         # short Python invocation/episode.  Restore its clock from the shared
         # persistent counter so reference updates do not reset every epoch.
@@ -264,8 +403,9 @@ class SORAgentHelper:
     def save(self):
         for agent in self.agent_pool:
             agent.save_model(self.model_dir)
-        # Only persist the heavy global buffer pickle every N epochs to avoid
-        # epoch-end stalls; train_state.json is always written.
+        # Formal continual experiments use cadence=1 so every episode is an
+        # exact resumable checkpoint.  Larger values remain available only for
+        # exploratory runs where approximate restart is acceptable.
         write_buffer = (self.epoch % self.save_buffer_every == 0)
         self._save_train_state_and_buffers(write_buffer=write_buffer)
 
@@ -275,13 +415,36 @@ class SORAgentHelper:
         record = {
             "epoch": int(self.epoch),
             "global_step": int(self.global_train_step),
+            "global_train_step": int(self.global_train_step),
             "epsilon": float(self.epsilon),
             "mean_reward": mean_reward,
             "mean_loss": mean_loss,
             "global_buffer_size": len(self.global_memory),
+            "global_env_step": int(self.global_env_step),
+            "phase_env_step": int(self.phase_env_step),
             "run_id": self.run_id,
             "phase": self.phase,
+            "config_hash": self.config_hash,
+            "action_space": self.acc_action_space,
             "epsilon_schedule": self.p.epsilon_schedule,
+            "target_update_interval": int(self.p.target_update_interval),
+            "target_update_count": int(self._target_update_count),
+            "last_target_update_step": int(self._last_target_update_step),
+            "wall_time_seconds": float(time.time() - self._started_at),
+            "process_max_rss_mb": float(
+                resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024.0
+            ),
+            "replay": {
+                "local_capacity": int(self.p.rb_size),
+                "global_capacity": int(self.p.rb_size_global),
+                "local_size_total": sum(len(rb) for rb in self.rb_pool),
+                "global": self.global_memory.diagnostics(),
+            },
+            "train_port_metrics": {
+                str(port): self._summarize_port_training(port, losses)
+                for port, losses in sorted(self._epoch_port_losses.items())
+                if losses
+            },
         }
         if extra:
             record.update(extra)
@@ -313,6 +476,16 @@ class SORAgentHelper:
             "epoch": int(self.epoch),
             "run_id": self.run_id,
             "phase": self.phase,
+            "config_hash": self.config_hash,
+            "action_space": self.acc_action_space,
+            "node_number": int(self.node_number),
+            "replay_size_per_port": [len(rb) for rb in self.rb_pool],
+            "global_replay_size": len(self.global_memory),
+            "local_replay_capacity": int(self.p.rb_size),
+            "global_replay_capacity": int(self.p.rb_size_global),
+            "target_update_interval": int(self.p.target_update_interval),
+            "target_update_count": int(self._target_update_count),
+            "last_target_update_step": int(self._last_target_update_step),
         }
         try:
             self._atomic_write_text(self._train_state_path(), json.dumps(state))
@@ -321,17 +494,32 @@ class SORAgentHelper:
 
     def _save_train_state_and_buffers(self, write_buffer: bool = True):
         os.makedirs(self.model_dir, exist_ok=True)
-        # Persist only the global structured buffer; per-port buffers are
-        # rebuilt from the global buffer via sync() after restart. This cuts
-        # per-save IO from O(n_ports * 17MB) to a single file.
         if write_buffer:
             try:
-                import time as _time
-                t0 = _time.time()
-                self.global_memory.save(self._global_rb_path())
-                logger.info(f"SOR global replay pickled in {_time.time() - t0:.2f}s (size={len(self.global_memory)})")
+                t0 = time.time()
+                for port_idx, replay in enumerate(self.rb_pool):
+                    self._atomic_write_bytes(
+                        self._rb_path(port_idx),
+                        pickle.dumps(
+                            replay.state_dict(), protocol=pickle.HIGHEST_PROTOCOL
+                        ),
+                    )
+                self._atomic_write_bytes(
+                    self._global_rb_path(),
+                    pickle.dumps(
+                        self.global_memory.state_dict(),
+                        protocol=pickle.HIGHEST_PROTOCOL,
+                    ),
+                )
+                self._save_rng_state()
+                logger.info(
+                    f"SOR full replay checkpoint written in "
+                    f"{time.time() - t0:.2f}s "
+                    f"(local_total={sum(len(rb) for rb in self.rb_pool)}, "
+                    f"global={len(self.global_memory)})"
+                )
             except Exception as exc:
-                logger.warning(f"Failed to save SOR global replay: {exc}")
+                raise RuntimeError("Failed to save complete SOR replay state") from exc
         else:
             logger.info(f"SOR epoch={self.epoch} skipping global replay pickle (cadence={self.save_buffer_every})")
         self._save_train_state()
@@ -343,6 +531,20 @@ class SORAgentHelper:
         try:
             with open(path, "r") as handle:
                 state = json.load(handle)
+            saved_space = state.get("action_space", "legacy")
+            if saved_space != self.acc_action_space:
+                raise ValueError(
+                    f"SOR action-space mismatch: checkpoint={saved_space}, "
+                    f"requested={self.acc_action_space}"
+                )
+            saved_interval = int(
+                state.get("target_update_interval", self.p.target_update_interval)
+            )
+            if saved_interval != self.p.target_update_interval:
+                raise ValueError(
+                    f"SOR target interval mismatch: checkpoint={saved_interval}, "
+                    f"requested={self.p.target_update_interval}"
+                )
             self.global_train_step = int(state.get("global_train_step", 0))
             self.global_env_step = int(state.get("global_env_step", 0))
             saved_phase = state.get("phase")
@@ -366,12 +568,85 @@ class SORAgentHelper:
                 )
                 self.epsilon = float(state.get("epsilon", self.p.epsilon_start))
             self.epoch = int(state.get("epoch", 0))
+            self._target_update_count = int(
+                state.get("target_update_count", 0)
+            )
+            self._last_target_update_step = int(
+                state.get("last_target_update_step", 0)
+            )
             if self.run_id is None:
                 self.run_id = state.get("run_id")
             if self.phase is None:
                 self.phase = state.get("phase")
         except Exception as exc:
-            logger.warning(f"Failed to load SOR train_state {path}: {exc}")
+            raise RuntimeError(f"Failed to load SOR train_state {path}") from exc
+
+    def _save_rng_state(self):
+        state = {
+            "python": random.getstate(),
+            "numpy": np.random.get_state(),
+            "torch": torch.get_rng_state(),
+            "torch_cuda": (
+                torch.cuda.get_rng_state_all()
+                if torch.cuda.is_available() else None
+            ),
+        }
+        self._atomic_write_bytes(
+            self._rng_state_path(),
+            pickle.dumps(state, protocol=pickle.HIGHEST_PROTOCOL),
+        )
+
+    def _load_rng_state(self):
+        path = self._rng_state_path()
+        if not os.path.exists(path):
+            return
+        with open(path, "rb") as handle:
+            state = pickle.load(handle)
+        random.setstate(state["python"])
+        np.random.set_state(state["numpy"])
+        torch.set_rng_state(state["torch"].cpu())
+        if torch.cuda.is_available() and state.get("torch_cuda") is not None:
+            torch.cuda.set_rng_state_all(state["torch_cuda"])
+
+    def _summarize_port_training(self, port, losses):
+        q_samples = self._epoch_port_q_diagnostics.get(port, [])
+        components = self._epoch_loss_components.get(port, [])
+        result = {
+            "updates": len(losses),
+            "loss_mean": float(np.mean(losses)),
+            "loss_median": float(np.median(losses)),
+            "loss_max": float(np.max(losses)),
+            "batch_reward_mean": (
+                float(np.mean(self._epoch_port_rewards.get(port, [])))
+                if self._epoch_port_rewards.get(port) else None
+            ),
+            "loss_td_mean": float(np.mean([v["td"] for v in components])),
+            "loss_cons_mean": float(np.mean([v["cons"] for v in components])),
+            "loss_reg_mean": float(np.mean([v["reg"] for v in components])),
+            "replay": self.rb_pool[port].diagnostics(),
+        }
+        if not q_samples:
+            return result
+
+        def values(group, metric):
+            return [sample[group][metric] for sample in q_samples]
+
+        result.update({
+            "q_prediction_mean": float(np.mean(values("q_prediction", "mean"))),
+            "q_prediction_abs_p95_max": float(np.max(values("q_prediction", "abs_p95"))),
+            "q_prediction_abs_max": float(np.max(values("q_prediction", "abs_max"))),
+            "q_target_mean": float(np.mean(values("q_target", "mean"))),
+            "q_target_abs_p95_max": float(np.max(values("q_target", "abs_p95"))),
+            "q_target_abs_max": float(np.max(values("q_target", "abs_max"))),
+            "td_error_abs_mean": float(np.mean(values("td_error", "abs_mean"))),
+            "td_error_abs_p95_max": float(np.max(values("td_error", "abs_p95"))),
+            "td_error_abs_max": float(np.max(values("td_error", "abs_max"))),
+            "expected_q_bound": float(q_samples[-1]["expected_q_bound"]),
+            "q_inflation_limit": float(q_samples[-1]["inflation_limit"]),
+            "q_inflation_events": sum(bool(v["inflated"]) for v in q_samples),
+            "q_inflated": any(bool(v["inflated"]) for v in q_samples),
+        })
+        return result
 
     def _log_train_metrics(self, current_step, per_port_loss, per_port_reward):
         if self._tb is None:

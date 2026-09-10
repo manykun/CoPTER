@@ -8,6 +8,7 @@ import os
 import json
 import pickle
 import random
+import resource
 import time
 from dataclasses import replace
 from collections import deque
@@ -95,6 +96,9 @@ class AgentHelper:
         self.phase = phase
         self.config_hash = config_hash
         self.acc_action_space = acc_action_space
+        self._started_at = time.time()
+        self._target_update_count = 0
+        self._last_target_update_step = 0
         self.acc_parameters = replace(
             DEFAULT_ACC_PARAMETER,
             hidden_dims=tuple(acc_hidden_dims) if acc_hidden_dims else DEFAULT_ACC_PARAMETER.hidden_dims,
@@ -316,6 +320,8 @@ class AgentHelper:
             if target_updated:
                 for agent in self.agent_pool:
                     agent.update_target_network()
+                self._target_update_count += 1
+                self._last_target_update_step = self.global_train_step
                 logger.info(
                     "Target networks synchronized at global_train_step={} "
                     "(interval={}).",
@@ -489,6 +495,8 @@ class AgentHelper:
                 if self.phase is None or saved_phase == self.phase:
                     self.epsilon = float(ts.get("epsilon", self.p.epsilon_start))
                 self.epoch = int(ts.get("epoch", 0))
+                self._target_update_count = int(ts.get("target_update_count", 0))
+                self._last_target_update_step = int(ts.get("last_target_update_step", 0))
                 if self.run_id is None:
                     self.run_id = ts.get("run_id")
                 if self.phase is None:
@@ -542,6 +550,8 @@ class AgentHelper:
             "shared_replay_enabled": bool(self.p.shared_replay_enabled),
             "epsilon_schedule": self.p.epsilon_schedule,
             "target_update_interval": int(self.p.target_update_interval),
+            "target_update_count": int(self._target_update_count),
+            "last_target_update_step": int(self._last_target_update_step),
         }
         ts.update({
             key: value for key, value in {
@@ -578,7 +588,22 @@ class AgentHelper:
             "mean_reward": mean_reward,
             "mean_loss": mean_loss,
             "target_update_interval": int(self.p.target_update_interval),
+            "target_update_count": int(self._target_update_count),
+            "last_target_update_step": int(self._last_target_update_step),
             "q_inflation_factor": float(self.p.q_inflation_factor),
+            "wall_time_seconds": float(time.time() - self._started_at),
+            "process_max_rss_mb": float(
+                resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024.0
+            ),
+            "replay": {
+                "local_capacity": int(self.p.rb_size),
+                "local_size_total": sum(len(rb) for rb in self.rb_pool),
+                "global_capacity": (
+                    int(self.p.rb_size_global)
+                    if self.p.shared_replay_enabled else 0
+                ),
+                "global_size": len(self.shared_rb),
+            },
             "train_port_metrics": {
                 str(port): {
                     "updates": len(losses),

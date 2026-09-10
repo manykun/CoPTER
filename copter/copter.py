@@ -220,14 +220,19 @@ if __name__ == "__main__":
 
     # Audit common random initialization without changing RNG or training.
     startup_hashes = {}
+    startup_parameter_hashes = {}
     if args.mode == "ACC":
         for name in ("policy_net", "target_net"):
             hasher = hashlib.sha256()
+            parameter_hasher = hashlib.sha256()
             for agent in agent_helper.agent_pool:
                 for key, tensor in sorted(getattr(agent, name).state_dict().items()):
                     hasher.update(key.encode())
                     hasher.update(tensor.detach().cpu().numpy().tobytes())
+                for tensor in getattr(agent, name).parameters():
+                    parameter_hasher.update(tensor.detach().cpu().numpy().tobytes())
             startup_hashes[name] = hasher.hexdigest()
+            startup_parameter_hashes[name] = parameter_hasher.hexdigest()
     startup_train_step = agent_helper.global_train_step
     startup_replay_entries = sum(len(rb) for rb in agent_helper.rb_pool)
 
@@ -481,6 +486,7 @@ if __name__ == "__main__":
             agent_helper.append_epoch_metrics({
                 "steps_this_epoch": current_step,
                 "startup_network_hashes": startup_hashes,
+                "startup_parameter_hashes": startup_parameter_hashes,
                 "startup_train_step": startup_train_step,
                 "startup_replay_entries": startup_replay_entries,
                 "eval_greedy": bool(args.eval_greedy),

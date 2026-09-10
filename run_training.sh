@@ -86,6 +86,7 @@ SOR_BETA_UNDER_SAMPLE=0.2
 SOR_GAMMA_DRIFT=0.5
 SOR_RHO_BOUNDARY=0.5
 SOR_TEMPERATURE=1.0
+SOR_UNIFORM_MIX=0.01
 SOR_LAMBDA_CONS=0.01
 SOR_LAMBDA_REG=0.001
 SOR_DRIFT_REG_THRESHOLD=0.5
@@ -146,6 +147,7 @@ while [[ $# -gt 0 ]]; do
         --sor-gamma-drift) SOR_GAMMA_DRIFT="$2"; shift 2 ;;
         --sor-rho-boundary) SOR_RHO_BOUNDARY="$2"; shift 2 ;;
         --sor-temperature) SOR_TEMPERATURE="$2"; shift 2 ;;
+        --sor-uniform-mix) SOR_UNIFORM_MIX="$2"; shift 2 ;;
         --sor-lambda-cons) SOR_LAMBDA_CONS="$2"; shift 2 ;;
         --sor-lambda-reg) SOR_LAMBDA_REG="$2"; shift 2 ;;
         --sor-drift-reg-threshold) SOR_DRIFT_REG_THRESHOLD="$2"; shift 2 ;;
@@ -319,9 +321,11 @@ run_single_experiment() {
                 --epsilon_end "${EPSILON_END}"
                 --epsilon_decay_steps "${EPSILON_DECAY}"
                 --epsilon_schedule "${EPSILON_SCHEDULE}"
+                --target_update_interval "${TARGET_UPDATE_INTERVAL}"
                 --seed "${SEED}"
                 --tb_enable "${TB_ENABLE}"
                 --acc_hidden_dims "${ACC_HIDDEN_DIMS}"
+                --action_space "${ACTION_SPACE}"
                 --reward_weights "${REWARD_WEIGHTS}"
                 --reward_profile "${REWARD_PROFILE}"
                 --reward_queue_lambda "${REWARD_QUEUE_LAMBDA}"
@@ -337,6 +341,7 @@ run_single_experiment() {
                 --sor_gamma_drift "${SOR_GAMMA_DRIFT}"
                 --sor_rho_boundary "${SOR_RHO_BOUNDARY}"
                 --sor_temperature "${SOR_TEMPERATURE}"
+                --sor_uniform_mix "${SOR_UNIFORM_MIX}"
                 --sor_lambda_cons "${SOR_LAMBDA_CONS}"
                 --sor_lambda_reg "${SOR_LAMBDA_REG}"
                 --sor_drift_reg_threshold "${SOR_DRIFT_REG_THRESHOLD}"

@@ -1,4 +1,6 @@
 import argparse
+import hashlib
+import json
 import math
 import os
 import random
@@ -35,6 +37,7 @@ from port_metrics import (
     parse_watch_ports,
 )
 from structures import (
+    ACC_ACTION_SPACES,
     AgentHelperParameters,
     DCQCNParameters,
     EPSILON_SCHEDULES,
@@ -72,6 +75,18 @@ def build_parser():
         help="Comma-separated hidden layer widths; identical to ACC.",
     )
     parser.add_argument(
+        "--action_space",
+        choices=ACC_ACTION_SPACES,
+        default="legacy",
+        help="ACC/SOR categorical action parameterization.",
+    )
+    parser.add_argument(
+        "--target_update_interval",
+        type=int,
+        default=100,
+        help="Hard target sync interval in global optimizer updates.",
+    )
+    parser.add_argument(
         "--reward_weights",
         type=str,
         default="0.50,0.30,0.20",
@@ -103,6 +118,7 @@ def build_parser():
     parser.add_argument("--sor_gamma_drift", type=float, default=0.5)
     parser.add_argument("--sor_rho_boundary", type=float, default=0.5)
     parser.add_argument("--sor_temperature", type=float, default=1.0)
+    parser.add_argument("--sor_uniform_mix", type=float, default=0.01)
     parser.add_argument("--sor_lambda_cons", type=float, default=0.01)
     parser.add_argument("--sor_lambda_reg", type=float, default=0.001)
     parser.add_argument("--sor_drift_reg_threshold", type=float, default=0.5)
@@ -135,6 +151,10 @@ def main():
     set_random_seed(args.seed)
     if args.reward_queue_lambda < 0 or args.reward_ecn_lambda < 0:
         raise SystemExit("tail-safe reward lambdas must be non-negative")
+    if args.target_update_interval <= 0:
+        raise SystemExit("--target_update_interval must be positive")
+    if not 0.0 <= args.sor_uniform_mix <= 1.0:
+        raise SystemExit("--sor_uniform_mix must be in [0, 1]")
     try:
         watch_ports = parse_watch_ports(args.watch_ports)
     except ValueError as exc:
@@ -181,6 +201,7 @@ def main():
         epsilon_decay_steps=args.epsilon_decay_steps,
         epsilon_schedule=args.epsilon_schedule,
         state_save_interval=args.state_save_interval,
+        target_update_interval=args.target_update_interval,
     )
     sor_config = SORReplayConfig(
         rb_size=agent_helper_params.rb_size,
@@ -196,6 +217,7 @@ def main():
         gamma_drift=args.sor_gamma_drift,
         rho_boundary=args.sor_rho_boundary,
         temperature=args.sor_temperature,
+        uniform_mix=args.sor_uniform_mix,
     )
     agent_helper = SORAgentHelper(
         node_number=network_helper.get_n_port(),
@@ -212,10 +234,28 @@ def main():
         sync_interval=args.sor_sync_interval,
         save_buffer_every=args.sor_save_buffer_every,
         acc_hidden_dims=acc_hidden_dims,
+        acc_action_space=args.action_space,
         run_id=args.run_id,
         phase=args.phase,
+        config_hash=hashlib.sha256(
+            json.dumps(vars(args), sort_keys=True, default=str).encode("utf-8")
+        ).hexdigest(),
     )
     agent_helper.load(args.override_name)
+
+    startup_hashes = {}
+    startup_parameter_hashes = {}
+    for name in ("policy_net", "target_net", "reference_net"):
+        hasher = hashlib.sha256()
+        parameter_hasher = hashlib.sha256()
+        for agent in agent_helper.agent_pool:
+            for key, tensor in sorted(getattr(agent, name).state_dict().items()):
+                hasher.update(key.encode())
+                hasher.update(tensor.detach().cpu().numpy().tobytes())
+            for tensor in getattr(agent, name).parameters():
+                parameter_hasher.update(tensor.detach().cpu().numpy().tobytes())
+        startup_hashes[name] = hasher.hexdigest()
+        startup_parameter_hashes[name] = parameter_hasher.hexdigest()
 
     tb_enabled = str(args.tb_enable).lower() in ("1", "true", "yes", "on")
     tb_writer = None
@@ -378,6 +418,10 @@ def main():
                 "eval_greedy": bool(args.eval_greedy),
                 "eval_tag": args.eval_tag,
                 "reward_profile": args.reward_profile,
+                "action_space": args.action_space,
+                "target_update_interval": args.target_update_interval,
+                "startup_network_hashes": startup_hashes,
+                "startup_parameter_hashes": startup_parameter_hashes,
                 "reward_queue_lambda": args.reward_queue_lambda,
                 "reward_ecn_lambda": args.reward_ecn_lambda,
                 "rollout_mean_reward": (

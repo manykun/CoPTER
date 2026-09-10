@@ -88,8 +88,35 @@ class ACC(Agent):
     def save_model(self, save_path):
         if not os.path.exists(save_path):
             os.makedirs(save_path)
-        torch.save(self.policy_net.state_dict(), os.path.join(save_path, f"{self.name}_policy.pt"))
-        torch.save(self.target_net.state_dict(), os.path.join(save_path, f"{self.name}_target.pt"))
+        checkpoint_path = os.path.join(save_path, self.name)
+        checkpoint = {
+            "format_version": 2,
+            "action_space": self.action_space,
+            "policy": self.policy_net.state_dict(),
+            "target": self.target_net.state_dict(),
+            "optimizer": self.optimizer.state_dict(),
+            "rng": {
+                "python": random.getstate(),
+                "numpy": np.random.get_state(),
+                "torch": torch.get_rng_state(),
+                "torch_cuda": (
+                    torch.cuda.get_rng_state_all()
+                    if torch.cuda.is_available() else None
+                ),
+            },
+        }
+        temporary = f"{checkpoint_path}.tmp.{os.getpid()}"
+        try:
+            torch.save(checkpoint, temporary)
+            os.replace(temporary, checkpoint_path)
+        finally:
+            if os.path.exists(temporary):
+                os.remove(temporary)
+        # Preserve historical files unless a registered experiment explicitly
+        # opts into the space-efficient complete-checkpoint-only format.
+        if os.environ.get("COPTER_COMPLETE_CHECKPOINT_ONLY") != "1":
+            torch.save(self.policy_net.state_dict(), os.path.join(save_path, f"{self.name}_policy.pt"))
+            torch.save(self.target_net.state_dict(), os.path.join(save_path, f"{self.name}_target.pt"))
         logger.info(f"ACC Agent {self.name} - Model saved to {save_path}")
 
     
@@ -102,6 +129,33 @@ class ACC(Agent):
 
         policy_path = os.path.join(save_path, f"{name}_policy.pt")
         target_path = os.path.join(save_path, f"{name}_target.pt")
+        checkpoint_path = os.path.join(save_path, name)
+
+        if os.path.isfile(checkpoint_path):
+            checkpoint = torch.load(checkpoint_path, map_location=self.device)
+            saved_space = checkpoint.get("action_space", "legacy")
+            if saved_space != self.action_space:
+                raise ValueError(
+                    f"ACC action-space mismatch: checkpoint={saved_space}, "
+                    f"requested={self.action_space}"
+                )
+            self.policy_net.load_state_dict(checkpoint["policy"])
+            self.target_net.load_state_dict(
+                checkpoint.get("target", checkpoint["policy"])
+            )
+            if checkpoint.get("optimizer") is not None:
+                self.optimizer.load_state_dict(checkpoint["optimizer"])
+            rng = checkpoint.get("rng", {})
+            if rng.get("python") is not None:
+                random.setstate(rng["python"])
+            if rng.get("numpy") is not None:
+                np.random.set_state(rng["numpy"])
+            if rng.get("torch") is not None:
+                torch.set_rng_state(rng["torch"].cpu())
+            if torch.cuda.is_available() and rng.get("torch_cuda") is not None:
+                torch.cuda.set_rng_state_all(rng["torch_cuda"])
+            logger.info(f"ACC Agent {self.name} - complete checkpoint loaded from {checkpoint_path}")
+            return
 
         if os.path.isfile(policy_path) and os.path.isfile(target_path):
             self.policy_net.load_state_dict(torch.load(policy_path))

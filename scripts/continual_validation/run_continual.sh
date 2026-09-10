@@ -91,7 +91,7 @@ Important options:
   --resume
   --report-only          Record all measurements without PASS/FAIL gating
   --shared-replay BOOL   ACC cross-port global replay: true (default) or false
-  --action-space NAME    legacy or multiscale (ACC only)
+  --action-space NAME    legacy or multiscale (ACC and SOR)
   --task-pair-mode NAME  independent, same-flows, or workload-shift
   --screen-watch-ports CSV
   --screen-min-active-samples N
@@ -205,10 +205,6 @@ if [[ "${ACTION_SPACE}" == "multiscale" ]]; then
     [[ "${KMAX_RANGE_EXPLICIT}" -eq 1 ]] || KMAX_RANGE="15000,100000"
     [[ "${KMIN_RANGE}" == "5000,50000" && "${KMAX_RANGE}" == "15000,100000" ]] || {
         echo "multiscale requires --kmin-range 5000,50000 and --kmax-range 15000,100000" >&2
-        exit 2
-    }
-    [[ "${STAGE}" != "sor" && "${STAGE}" != "all" ]] || {
-        echo "multiscale is an ACC-only experiment; run prepare, screen, and acc separately" >&2
         exit 2
     }
 fi

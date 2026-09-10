@@ -29,6 +29,9 @@ MAX_STEPS="${CFG_max_steps:-0}"
 EPS_START="${CFG_epsilon_start:-1.0}"
 EPS_END="${CFG_epsilon_end:-0.05}"
 EPS_DECAY="${CFG_epsilon_decay_steps:-50000}"
+EPS_SCHEDULE="${CFG_epsilon_schedule:-phase}"
+ACTION_SPACE="${CFG_action_space:-legacy}"
+TARGET_UPDATE_INTERVAL="${CFG_target_update_interval:-100}"
 SAVE_INTERVAL="${CFG_state_save_interval:-1}"
 SEED="${CFG_seed:-1}"
 MODEL_DIR="${CFG_model_dir:-sor_models}"
@@ -54,6 +57,7 @@ SOR_BETA_UNDER_SAMPLE="${CFG_sor_beta_under_sample:-0.2}"
 SOR_GAMMA_DRIFT="${CFG_sor_gamma_drift:-0.5}"
 SOR_RHO_BOUNDARY="${CFG_sor_rho_boundary:-0.5}"
 SOR_TEMPERATURE="${CFG_sor_temperature:-1.0}"
+SOR_UNIFORM_MIX="${CFG_sor_uniform_mix:-0.01}"
 SOR_LAMBDA_CONS="${CFG_sor_lambda_cons:-0.01}"
 SOR_LAMBDA_REG="${CFG_sor_lambda_reg:-0.001}"
 SOR_DRIFT_REG_THRESHOLD="${CFG_sor_drift_reg_threshold:-0.5}"
@@ -114,6 +118,9 @@ for ((i = 1; i <= TOTAL_EPOCHS; i++)); do
         --epsilon_start "$EPS_START" \
         --epsilon_end "$EPS_END" \
         --epsilon_decay_steps "$EPS_DECAY" \
+        --epsilon_schedule "$EPS_SCHEDULE" \
+        --action_space "$ACTION_SPACE" \
+        --target_update_interval "$TARGET_UPDATE_INTERVAL" \
         --state_save_interval "$SAVE_INTERVAL" \
         --seed "$SEED" \
         --tb_enable "$TB_ENABLE" \
@@ -130,6 +137,7 @@ for ((i = 1; i <= TOTAL_EPOCHS; i++)); do
         --sor_gamma_drift "$SOR_GAMMA_DRIFT" \
         --sor_rho_boundary "$SOR_RHO_BOUNDARY" \
         --sor_temperature "$SOR_TEMPERATURE" \
+        --sor_uniform_mix "$SOR_UNIFORM_MIX" \
         --sor_lambda_cons "$SOR_LAMBDA_CONS" \
         --sor_lambda_reg "$SOR_LAMBDA_REG" \
         --sor_drift_reg_threshold "$SOR_DRIFT_REG_THRESHOLD" \

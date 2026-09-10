@@ -214,6 +214,25 @@ def test_sampling_probability_valid():
     assert abs(probs.sum() - 1.0) < 1e-9
 
 
+def test_td_updates_do_not_duplicate_observations():
+    config = SORReplayConfig(rb_size=8, recent_size=4, boundary_size=4,
+                             max_clusters=1, prototype_distance=1e9,
+                             stats_window=32)
+    replay = StructuredSORReplayBuffer(config)
+    state = np.zeros(18, dtype=np.float32)
+    embedding = np.zeros(32, dtype=np.float32)
+    transition = replay.push(
+        state, (0, 0, 0), 0.5, state, embedding, td_error=1.0
+    )
+    current = replay.drift_tracker.current[transition.cluster_id]
+    before = (len(current["embeddings"]), len(current["reward"]))
+    for td_error in (2.0, 3.0, 4.0):
+        replay.update_td_errors([transition], [td_error])
+    after = (len(current["embeddings"]), len(current["reward"]))
+    assert after == before == (1, 1)
+    assert len(current["td"]) == 4
+
+
 if __name__ == "__main__":
     test_sor_replay_push_sample_and_persist()
     test_extreme_td_error_sampling_no_crash()
@@ -224,4 +243,5 @@ if __name__ == "__main__":
     test_boundary_detection_is_stream_local()
     test_candidate_cache_invalidates_on_push()
     test_sampling_probability_valid()
-    print("SOR replay tests passed (9/9)")
+    test_td_updates_do_not_duplicate_observations()
+    print("SOR replay tests passed (10/10)")
