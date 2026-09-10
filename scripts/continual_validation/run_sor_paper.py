@@ -279,9 +279,18 @@ def main():
     }
     if root.exists():
         previous = read(root / "protocol.json")
-        extending = (args.stage == "continue" and args.resume and
-                     previous["b_points"] == args.b_points[:len(previous["b_points"])] and
-                     dict(previous, b_points=args.b_points) == protocol)
+        extending_b = (args.stage == "continue" and args.resume and
+                       previous["b_points"] == args.b_points[:len(previous["b_points"])] and
+                       dict(previous, b_points=args.b_points) == protocol)
+        continuation_exists = any(
+            (root / method / arm).exists()
+            for method in previous["methods"] for arm in ("aa", "ab")
+        )
+        extending_a = (args.stage == "acquire" and args.resume and
+                       not continuation_exists and
+                       previous["a_points"] == args.a_points[:len(previous["a_points"])] and
+                       dict(previous, a_points=args.a_points) == protocol)
+        extending = extending_a or extending_b
         if previous != protocol and not extending:
             parser.error("existing output requires identical protocol and --resume")
         if extending:
