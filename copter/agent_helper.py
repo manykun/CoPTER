@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 # Author: Tianyu Zuo (@amefumi)
 # Email: ty.zuo@outlook.com
 
@@ -6,11 +8,20 @@ import os
 import json
 import pickle
 import random
+import resource
 import time
+from dataclasses import replace
 from collections import deque
 from loguru import logger
 
-from structures import NetworkHelperParameters, DCQCNParameters, PortObservation, AgentParameters, AgentHelperParameters
+from structures import (
+    NetworkHelperParameters,
+    DCQCNParameters,
+    PortObservation,
+    AgentParameters,
+    AgentHelperParameters,
+    scheduled_epsilon,
+)
 from agent import Agent, ACC, CoPTER
 
 
@@ -63,7 +74,9 @@ class AgentHelper:
             fmap_dir: str = None,  # 确保保留fmap_dir参数
             run_id: str = None,
             phase: str = None,
-            config_hash: str = None
+            config_hash: str = None,
+            acc_hidden_dims=None,
+            acc_action_space="legacy",
             ):
         # Assert fmap_dir is provided if mode is CoPTER
         if mode == "CoPTER" and fmap_dir is None:
@@ -82,6 +95,14 @@ class AgentHelper:
         self.run_id = run_id
         self.phase = phase
         self.config_hash = config_hash
+        self.acc_action_space = acc_action_space
+        self._started_at = time.time()
+        self._target_update_count = 0
+        self._last_target_update_step = 0
+        self.acc_parameters = replace(
+            DEFAULT_ACC_PARAMETER,
+            hidden_dims=tuple(acc_hidden_dims) if acc_hidden_dims else DEFAULT_ACC_PARAMETER.hidden_dims,
+        )
 
         # Load fmap if mode is CoPTER
         # self.fmap = self._load_fmap(fmap_dir, 0) if mode == "CoPTER" else None
@@ -109,7 +130,11 @@ class AgentHelper:
         for port_idx in range(node_number):
             # 根据模式初始化智能体
             if mode == "ACC":
-                agent = ACC(f"{self.exp_name}_ACC_{port_idx}", DEFAULT_ACC_PARAMETER)
+                agent = ACC(
+                    f"{self.exp_name}_ACC_{port_idx}",
+                    self.acc_parameters,
+                    action_space=self.acc_action_space,
+                )
             else:  # CoPTER模式
                 agent = CoPTER(
                     f"{self.exp_name}_CoPTER_{port_idx}", 
@@ -122,15 +147,32 @@ class AgentHelper:
             self.rb_pool.append(ReplayBuffer(capacity=self.p.rb_size))
 
         self.shared_rb = deque(maxlen=self.p.rb_size_global)
+        logger.info(
+            "ACC shared replay is {} (local={}, global={}, sync_up={}, "
+            "sync_down={})",
+            "enabled" if self.p.shared_replay_enabled else "disabled",
+            self.p.rb_size,
+            self.p.rb_size_global,
+            self.p.sync_up_size,
+            self.p.sync_down_size,
+        )
 
         # ---- Continuous-training state (cross-run persistence) ----
         self.global_train_step = 0           # number of agent_helper.train() calls completed (across runs)
         self.global_env_step = 0             # number of environment steps observed (across runs); drives epsilon decay
+        self.phase_env_step = 0              # environment steps in the current continual-learning phase
         self.epsilon = self.p.epsilon_start
         self.train_call_count = 0
         self._train_call_count_since_save = 0
         self._recent_rewards = deque(maxlen=self.p.reward_window)
         self._recent_losses = deque(maxlen=self.p.reward_window)
+        # Per-process (one epoch) port-level training diagnostics.  These are
+        # deliberately not persisted in train_state: append_epoch_metrics()
+        # serializes them at the end of the one-epoch process.
+        self._epoch_port_losses = {}
+        self._epoch_port_rewards = {}
+        self._epoch_port_q_diagnostics = {}
+        self._q_inflation_seen_ports = set()
         # Current "epoch" id (i.e. how many copter.py invocations) - read from train_state if exists
         self.epoch = 0
 
@@ -170,16 +212,17 @@ class AgentHelper:
 
     # ---------- epsilon schedule ----------
     def get_current_epsilon(self) -> float:
-        # Decay by ENVIRONMENT steps (~98/epoch), not train-call count, so the
-        # schedule actually progresses within a realistic number of epochs.
         self.global_env_step += 1
-        decay = self.p.epsilon_decay_steps
-        if decay <= 0:
-            return self.p.epsilon_end
-        frac = min(1.0, self.global_env_step / decay)
-        eps = self.p.epsilon_start + (self.p.epsilon_end - self.p.epsilon_start) * frac
-        self.epsilon = eps
-        return eps
+        self.phase_env_step += 1
+        self.epsilon = scheduled_epsilon(
+            self.p.epsilon_start,
+            self.p.epsilon_end,
+            self.p.epsilon_decay_steps,
+            self.global_env_step,
+            self.phase_env_step,
+            self.p.epsilon_schedule,
+        )
+        return self.epsilon
 
     # 为所有端口生成决策：遍历每个端口对应的智能体，调用智能体的选择动作方法，收集并返回所有决策
     def decide(self, port_states: list[list[float]], epsi=0.1) -> tuple[list[DCQCNParameters], list[tuple[int, int, int]]]:
@@ -222,6 +265,7 @@ class AgentHelper:
         # Per-train-call metric collectors
         per_port_loss = {}
         per_port_reward = {}
+        per_port_q = {}
         for port_idx, agent in enumerate(self.agent_pool):
             # 判断当前端口的经验回放缓冲区是否有足够多的样本
             if len(self.rb_pool[port_idx]) > sample_size:
@@ -233,21 +277,95 @@ class AgentHelper:
                 if loss is not None:
                     self._recent_losses.append(float(loss))
                     per_port_loss[port_idx] = float(loss)
+                    self._epoch_port_losses.setdefault(port_idx, []).append(
+                        float(loss)
+                    )
                 # collect mean reward of the sampled batch as a smoothed proxy
                 batch_mean_reward = float(np.mean(rewards))
                 self._recent_rewards.append(batch_mean_reward)
                 per_port_reward[port_idx] = batch_mean_reward
+                self._epoch_port_rewards.setdefault(port_idx, []).append(
+                    batch_mean_reward
+                )
                 any_trained = True
-                # 定期更新目标网络
-                if current_step % self.p.target_update_interval == 0:
-                    logger.info(f"Updating target network for agent {agent.name} at step {current_step}.")
-                    agent.update_target_network()
+                diagnostics = getattr(agent, "last_train_diagnostics", None)
+                if diagnostics:
+                    expected_bound = diagnostics["expected_q_bound"]
+                    inflation_limit = expected_bound * self.p.q_inflation_factor
+                    diagnostics = dict(diagnostics)
+                    diagnostics["inflation_limit"] = float(inflation_limit)
+                    diagnostics["inflated"] = bool(
+                        diagnostics["q_prediction"]["abs_p95"] > inflation_limit
+                        or diagnostics["q_target"]["abs_p95"] > inflation_limit
+                        or diagnostics["q_prediction"]["abs_max"] > inflation_limit
+                        or diagnostics["q_target"]["abs_max"] > inflation_limit
+                    )
+                    per_port_q[port_idx] = diagnostics
+                    self._epoch_port_q_diagnostics.setdefault(port_idx, []).append(
+                        diagnostics
+                    )
             else:
                 # 经验不足需要提前调用sync()
                 logger.warning(f"Agent {agent.name} has insufficient experiences for training. Make sure to call sync() before training.")
 
         if any_trained:
             self.global_train_step += 1
+            # Synchronize by the number of optimizer updates completed across
+            # processes/epochs.  current_step is episode-local and previously
+            # made a nominal interval of 16 equivalent to about two optimizer
+            # updates when train_intervals=8.
+            target_updated = (
+                self.global_train_step % self.p.target_update_interval == 0
+            )
+            if target_updated:
+                for agent in self.agent_pool:
+                    agent.update_target_network()
+                self._target_update_count += 1
+                self._last_target_update_step = self.global_train_step
+                logger.info(
+                    "Target networks synchronized at global_train_step={} "
+                    "(interval={}).",
+                    self.global_train_step,
+                    self.p.target_update_interval,
+                )
+
+            if per_port_q:
+                pred_means = [d["q_prediction"]["mean"] for d in per_port_q.values()]
+                pred_maxes = [d["q_prediction"]["abs_max"] for d in per_port_q.values()]
+                target_means = [d["q_target"]["mean"] for d in per_port_q.values()]
+                target_maxes = [d["q_target"]["abs_max"] for d in per_port_q.values()]
+                td_p95 = [d["td_error"]["abs_p95"] for d in per_port_q.values()]
+                inflated_ports = [p for p, d in per_port_q.items() if d["inflated"]]
+                should_log = (
+                    self.global_train_step == 1
+                    or self.global_train_step % self.p.q_log_interval == 0
+                    or target_updated
+                )
+                newly_inflated = [
+                    port for port in inflated_ports
+                    if port not in self._q_inflation_seen_ports
+                ]
+                self._q_inflation_seen_ports.update(inflated_ports)
+                log_method = logger.warning if inflated_ports else logger.info
+                if should_log or newly_inflated:
+                    log_method(
+                        "ACC Q diagnostics global_train_step={}: ports={}, "
+                        "q_pred_mean={:.4f}, q_pred_abs_max={:.4f}, "
+                        "q_target_mean={:.4f}, q_target_abs_max={:.4f}, "
+                        "td_abs_p95_max={:.4f}, expected_bound={:.2f}, "
+                        "inflation_limit={:.2f}, inflated_ports={}{}",
+                        self.global_train_step,
+                        len(per_port_q),
+                        float(np.mean(pred_means)),
+                        float(np.max(pred_maxes)),
+                        float(np.mean(target_means)),
+                        float(np.max(target_maxes)),
+                        float(np.max(td_p95)),
+                        next(iter(per_port_q.values()))["expected_q_bound"],
+                        next(iter(per_port_q.values()))["inflation_limit"],
+                        len(inflated_ports),
+                        f" sample={inflated_ports[:10]}" if inflated_ports else "",
+                    )
             self._train_call_count_since_save += 1
             # ---- TensorBoard logging (per train() call) ----
             if self._tb is not None:
@@ -265,6 +383,42 @@ class AgentHelper:
                         self._tb.add_scalar("train/reward", float(np.mean(list(per_port_reward.values()))), step)
                         for pi, rv in per_port_reward.items():
                             self._tb.add_scalar(f"train/reward_port{pi}", rv, step)
+                    if per_port_q:
+                        self._tb.add_scalar(
+                            "train/q_prediction_mean",
+                            float(np.mean([
+                                value["q_prediction"]["mean"]
+                                for value in per_port_q.values()
+                            ])),
+                            step,
+                        )
+                        self._tb.add_scalar(
+                            "train/q_prediction_abs_max",
+                            float(np.max([
+                                value["q_prediction"]["abs_max"]
+                                for value in per_port_q.values()
+                            ])),
+                            step,
+                        )
+                        self._tb.add_scalar(
+                            "train/q_target_abs_max",
+                            float(np.max([
+                                value["q_target"]["abs_max"]
+                                for value in per_port_q.values()
+                            ])),
+                            step,
+                        )
+                        self._tb.add_scalar(
+                            "train/td_error_abs_p95_max",
+                            float(np.max([
+                                value["td_error"]["abs_p95"]
+                                for value in per_port_q.values()
+                            ])),
+                            step,
+                        )
+                        self._tb.add_scalar(
+                            "train/q_inflated_ports", len(inflated_ports), step
+                        )
                     for pi, rb in enumerate(self.rb_pool):
                         self._tb.add_scalar(f"train/buffer_size_port{pi}", len(rb), step)
                 except Exception as e:
@@ -296,7 +450,9 @@ class AgentHelper:
 
         # ---- Load shared replay buffer ----
         shared_rb_path = self._shared_rb_path()
-        if os.path.exists(shared_rb_path):
+        if not self.p.shared_replay_enabled:
+            logger.info("Shared replay disabled; not loading {}", shared_rb_path)
+        elif os.path.exists(shared_rb_path):
             try:
                 with open(shared_rb_path, "rb") as f:
                     shared_data = pickle.load(f)
@@ -316,9 +472,31 @@ class AgentHelper:
                     ts = json.load(f)
                 self.global_train_step = int(ts.get("global_train_step", 0))
                 self.global_env_step = int(ts.get("global_env_step", 0))
+                saved_phase = ts.get("phase")
+                if self.phase is not None and saved_phase != self.phase:
+                    self.phase_env_step = 0
+                    if self.p.epsilon_schedule == "phase":
+                        self.epsilon = self.p.epsilon_start
+                        logger.info(
+                            f"Continual phase changed {saved_phase!r} -> {self.phase!r}; "
+                            "resetting the phase-local epsilon schedule."
+                        )
+                    else:
+                        self.epsilon = float(ts.get("epsilon", self.p.epsilon_start))
+                        logger.info(
+                            f"Continual phase changed {saved_phase!r} -> {self.phase!r}; "
+                            f"continuing global epsilon schedule at {self.epsilon:.4f}."
+                        )
+                else:
+                    self.phase_env_step = int(
+                        ts.get("phase_env_step", ts.get("global_env_step", 0))
+                    )
                 self.train_call_count = int(ts.get("train_call_count", self.global_train_step))
-                self.epsilon = float(ts.get("epsilon", self.p.epsilon_start))
+                if self.phase is None or saved_phase == self.phase:
+                    self.epsilon = float(ts.get("epsilon", self.p.epsilon_start))
                 self.epoch = int(ts.get("epoch", 0))
+                self._target_update_count = int(ts.get("target_update_count", 0))
+                self._last_target_update_step = int(ts.get("last_target_update_step", 0))
                 if self.run_id is None:
                     self.run_id = ts.get("run_id")
                 if self.phase is None:
@@ -347,16 +525,19 @@ class AgentHelper:
                 self._atomic_write_bytes(self._rb_path(i), data)
             except Exception as e:
                 logger.warning(f"Failed to save replay buffer for port {i}: {e}")
-        # Shared replay buffer
-        try:
-            data = pickle.dumps(list(self.shared_rb), protocol=pickle.HIGHEST_PROTOCOL)
-            self._atomic_write_bytes(self._shared_rb_path(), data)
-        except Exception as e:
-            logger.warning(f"Failed to save shared replay buffer: {e}")
+        # Shared replay buffer. Local-only ablations deliberately never read or
+        # write this file, preventing stale global experience from leaking in.
+        if self.p.shared_replay_enabled:
+            try:
+                data = pickle.dumps(list(self.shared_rb), protocol=pickle.HIGHEST_PROTOCOL)
+                self._atomic_write_bytes(self._shared_rb_path(), data)
+            except Exception as e:
+                logger.warning(f"Failed to save shared replay buffer: {e}")
         # Train state
         ts = {
             "global_train_step": int(self.global_train_step),
             "global_env_step": int(self.global_env_step),
+            "phase_env_step": int(self.phase_env_step),
             "train_call_count": int(self.train_call_count),
             "epsilon": float(self.epsilon),
             "epoch": int(self.epoch),
@@ -366,6 +547,11 @@ class AgentHelper:
             "node_number": self.node_number,
             "replay_size_per_port": [len(rb) for rb in self.rb_pool],
             "shared_replay_size": len(self.shared_rb),
+            "shared_replay_enabled": bool(self.p.shared_replay_enabled),
+            "epsilon_schedule": self.p.epsilon_schedule,
+            "target_update_interval": int(self.p.target_update_interval),
+            "target_update_count": int(self._target_update_count),
+            "last_target_update_step": int(self._last_target_update_step),
         }
         ts.update({
             key: value for key, value in {
@@ -395,10 +581,44 @@ class AgentHelper:
             "epoch": int(self.epoch),
             "global_train_step": int(self.global_train_step),
             "global_env_step": int(self.global_env_step),
+            "phase_env_step": int(self.phase_env_step),
             "train_call_count": int(self.train_call_count),
             "epsilon": float(self.epsilon),
+            "epsilon_schedule": self.p.epsilon_schedule,
             "mean_reward": mean_reward,
             "mean_loss": mean_loss,
+            "target_update_interval": int(self.p.target_update_interval),
+            "target_update_count": int(self._target_update_count),
+            "last_target_update_step": int(self._last_target_update_step),
+            "q_inflation_factor": float(self.p.q_inflation_factor),
+            "wall_time_seconds": float(time.time() - self._started_at),
+            "process_max_rss_mb": float(
+                resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024.0
+            ),
+            "replay": {
+                "local_capacity": int(self.p.rb_size),
+                "local_size_total": sum(len(rb) for rb in self.rb_pool),
+                "global_capacity": (
+                    int(self.p.rb_size_global)
+                    if self.p.shared_replay_enabled else 0
+                ),
+                "global_size": len(self.shared_rb),
+            },
+            "train_port_metrics": {
+                str(port): {
+                    "updates": len(losses),
+                    "loss_mean": float(np.mean(losses)),
+                    "loss_median": float(np.median(losses)),
+                    "loss_max": float(np.max(losses)),
+                    "batch_reward_mean": (
+                        float(np.mean(self._epoch_port_rewards.get(port, [])))
+                        if self._epoch_port_rewards.get(port) else None
+                    ),
+                    **self._summarize_port_q_diagnostics(port),
+                }
+                for port, losses in sorted(self._epoch_port_losses.items())
+                if losses
+            },
             "time": time.time(),
         }
         record.update({
@@ -439,6 +659,30 @@ class AgentHelper:
                 logger.warning(f"tensorboard epoch log failed: {e}")
         return record
 
+    def _summarize_port_q_diagnostics(self, port):
+        samples = self._epoch_port_q_diagnostics.get(port, [])
+        if not samples:
+            return {}
+
+        def values(group, metric):
+            return [sample[group][metric] for sample in samples]
+
+        return {
+            "q_prediction_mean": float(np.mean(values("q_prediction", "mean"))),
+            "q_prediction_abs_p95_max": float(np.max(values("q_prediction", "abs_p95"))),
+            "q_prediction_abs_max": float(np.max(values("q_prediction", "abs_max"))),
+            "q_target_mean": float(np.mean(values("q_target", "mean"))),
+            "q_target_abs_p95_max": float(np.max(values("q_target", "abs_p95"))),
+            "q_target_abs_max": float(np.max(values("q_target", "abs_max"))),
+            "td_error_abs_mean": float(np.mean(values("td_error", "abs_mean"))),
+            "td_error_abs_p95_max": float(np.max(values("td_error", "abs_p95"))),
+            "td_error_abs_max": float(np.max(values("td_error", "abs_max"))),
+            "expected_q_bound": float(samples[-1]["expected_q_bound"]),
+            "q_inflation_limit": float(samples[-1]["inflation_limit"]),
+            "q_inflation_events": sum(bool(sample["inflated"]) for sample in samples),
+            "q_inflated": any(bool(sample["inflated"]) for sample in samples),
+        }
+
 
      # 修改：记录经验时传入fmap和action以计算融合奖励
     def record(self, port_idx, state, action, next_state):
@@ -461,6 +705,11 @@ class AgentHelper:
        
     # 共享经验池和本地经验池的上传和下载
     def sync(self):
+        if not self.p.shared_replay_enabled:
+            # Keep the normal record -> train cadence, but train each port only
+            # from its own FIFO replay. This isolates the effect of cross-port
+            # global experience sharing without clearing local task-A memory.
+            return
         # Sync up: Sample local replay buffer to shared replay buffer
         sync_up_size = min(len(self.rb_pool[0]), self.p.sync_up_size)
         for i, agent in enumerate(self.agent_pool):

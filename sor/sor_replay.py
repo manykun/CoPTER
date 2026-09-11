@@ -11,11 +11,13 @@ import numpy as np
 @dataclass
 class Transition:
     state: np.ndarray
-    action: Tuple[int, int, int]
+    action: Tuple[int, ...]
     reward: float
     next_state: np.ndarray
     embedding: np.ndarray
     cluster_id: int
+    stream_id: int = 0
+    task_label: str = "unknown"
     boundary: bool = False
     td_error: float = 1.0
     sample_count: int = 0
@@ -114,11 +116,22 @@ class DriftTracker:
         self.current: Dict[int, dict] = defaultdict(lambda: {"embeddings": deque(maxlen=config.stats_window), "td": deque(maxlen=config.stats_window), "reward": deque(maxlen=config.stats_window)})
         self.drift_scores: Dict[int, float] = defaultdict(float)
 
-    def update(self, cluster_id: int, embedding: np.ndarray, reward: float, td_error: float) -> float:
+    def update(
+        self,
+        cluster_id: int,
+        embedding: np.ndarray,
+        reward: float,
+        td_error: float,
+        record_observation: bool = True,
+    ) -> float:
         cur = self.current[cluster_id]
-        cur["embeddings"].append(np.asarray(embedding, dtype=np.float32))
+        # A replayed transition may receive many TD updates.  Re-appending its
+        # embedding/reward on every sample silently weights frequently sampled
+        # items multiple times in the drift distribution.
+        if record_observation:
+            cur["embeddings"].append(np.asarray(embedding, dtype=np.float32))
+            cur["reward"].append(float(reward))
         cur["td"].append(float(abs(td_error)))
-        cur["reward"].append(float(reward))
 
         if cluster_id not in self.reference and len(cur["embeddings"]) >= max(8, self.config.stats_window // 8):
             self.reference[cluster_id] = self._summarize(cur)
@@ -185,8 +198,10 @@ class StructuredSORReplayBuffer:
         self.cluster_memory: Dict[int, List[Transition]] = defaultdict(list)
         self.boundary_memory: List[Transition] = []
         self.recent_memory: Deque[Transition] = deque(maxlen=config.recent_size)
-        self._last_state: Optional[np.ndarray] = None
-        self._last_reward: Optional[float] = None
+        # A global replay receives interleaved samples from many switch ports.
+        # Boundary detection must compare consecutive samples from the same
+        # port; comparing port N with port N+1 creates artificial boundaries.
+        self._last_by_stream: Dict[int, Tuple[np.ndarray, float]] = {}
         self._recent_cluster_hits: Deque[int] = deque(maxlen=config.stats_window)
         self._cluster_hit_counts: Dict[int, int] = defaultdict(int)
         self._td_max: float = 1.0
@@ -197,13 +212,24 @@ class StructuredSORReplayBuffer:
     def _clip_td(self, td_error: float) -> float:
         return float(min(abs(float(td_error)), self.config.td_clip))
 
-    def push(self, state, action, reward, next_state, embedding, td_error: Optional[float] = None) -> Transition:
+    def push(
+        self,
+        state,
+        action,
+        reward,
+        next_state,
+        embedding,
+        td_error: Optional[float] = None,
+        stream_id: int = 0,
+        task_label: str = "unknown",
+    ) -> Transition:
         state_arr = np.asarray(state, dtype=np.float32)
         next_state_arr = np.asarray(next_state, dtype=np.float32)
         embedding_arr = np.asarray(embedding, dtype=np.float32)
         cluster_id = self.prototype_manager.assign(embedding_arr)
         self.prototype_manager.update(cluster_id, embedding_arr)
-        boundary = self._is_boundary(state_arr, float(reward))
+        stream_id = int(stream_id)
+        boundary = self._is_boundary(state_arr, float(reward), stream_id)
         # New samples enter with current max td so they are never the first
         # eviction candidates before being trained on at least once.
         td_value = self._td_max if td_error is None else self._clip_td(td_error)
@@ -216,6 +242,8 @@ class StructuredSORReplayBuffer:
             next_state=next_state_arr,
             embedding=embedding_arr,
             cluster_id=cluster_id,
+            stream_id=stream_id,
+            task_label=str(task_label),
             boundary=boundary,
             td_error=td_value,
         )
@@ -227,24 +255,48 @@ class StructuredSORReplayBuffer:
             while len(self.boundary_memory) > self.config.boundary_size:
                 self._evict_lowest(self.boundary_memory)
         self.drift_tracker.update(cluster_id, embedding_arr, float(reward), td_value)
-        self._last_state = state_arr
-        self._last_reward = float(reward)
+        self._last_by_stream[stream_id] = (state_arr.copy(), float(reward))
         self._candidates_cache = None
         return transition
 
     def push_existing(self, transition: Transition) -> Transition:
-        """Append an already-clustered transition without redoing prototype
-        assignment, drift updates, or boundary detection. Used by sync()
-        broadcast paths where the source buffer has already done that work.
-        Only enforces per-cluster / global capacity.
+        """Copy a transition into this buffer and assign it locally.
+
+        Global and per-port prototype managers evolve independently.  Reusing
+        a global cluster id in a local replay can therefore associate an
+        embedding with the wrong prototype.  Reassignment keeps local cluster
+        semantics coherent.  A deep value copy also prevents TD/sample-count
+        updates in one port from mutating every other port's replay entry.
         """
-        cluster_id = int(transition.cluster_id)
-        self.cluster_memory[cluster_id].append(transition)
+        embedding = np.asarray(transition.embedding, dtype=np.float32).copy()
+        cluster_id = self.prototype_manager.assign(embedding)
+        self.prototype_manager.update(cluster_id, embedding)
+        copied = Transition(
+            state=np.asarray(transition.state, dtype=np.float32).copy(),
+            action=tuple(int(v) for v in transition.action),
+            reward=float(transition.reward),
+            next_state=np.asarray(transition.next_state, dtype=np.float32).copy(),
+            embedding=embedding,
+            cluster_id=cluster_id,
+            stream_id=int(getattr(transition, "stream_id", 0)),
+            task_label=str(getattr(transition, "task_label", "unknown")),
+            boundary=bool(transition.boundary),
+            td_error=self._clip_td(transition.td_error),
+            sample_count=int(transition.sample_count),
+        )
+        self.cluster_memory[cluster_id].append(copied)
         self._enforce_capacity(cluster_id)
-        self.recent_memory.append(transition)
-        self._td_max = max(self._td_max, float(transition.td_error))
+        self.recent_memory.append(copied)
+        if copied.boundary:
+            self.boundary_memory.append(copied)
+            while len(self.boundary_memory) > self.config.boundary_size:
+                self._evict_lowest(self.boundary_memory)
+        self.drift_tracker.update(
+            cluster_id, copied.embedding, copied.reward, copied.td_error
+        )
+        self._td_max = max(self._td_max, copied.td_error)
         self._candidates_cache = None
-        return transition
+        return copied
 
     def sample(self, batch_size: int) -> List[Transition]:
         candidates = self._unique_candidates()
@@ -276,7 +328,13 @@ class StructuredSORReplayBuffer:
         for transition, td_error in zip(transitions, td_errors):
             transition.td_error = self._clip_td(td_error)
             self._td_max = max(self._td_max, transition.td_error)
-            self.drift_tracker.update(transition.cluster_id, transition.embedding, transition.reward, transition.td_error)
+            self.drift_tracker.update(
+                transition.cluster_id,
+                transition.embedding,
+                transition.reward,
+                transition.td_error,
+                record_observation=False,
+            )
         # Scores depend on td_error; invalidate cached candidate ordering used
         # by the next sample()'s probability weights (the list itself is fine
         # but the score weights need fresh computation).
@@ -301,8 +359,10 @@ class StructuredSORReplayBuffer:
             "cluster_memory": {int(k): list(v) for k, v in self.cluster_memory.items()},
             "boundary_memory": list(self.boundary_memory),
             "recent_memory": list(self.recent_memory),
-            "last_state": self._last_state,
-            "last_reward": self._last_reward,
+            "last_by_stream": {
+                int(stream_id): (state, reward)
+                for stream_id, (state, reward) in self._last_by_stream.items()
+            },
             "recent_cluster_hits": list(self._recent_cluster_hits),
         }
 
@@ -316,8 +376,17 @@ class StructuredSORReplayBuffer:
         while len(self.boundary_memory) > self.config.boundary_size:
             self._evict_lowest(self.boundary_memory)
         self.recent_memory = deque(state.get("recent_memory", []), maxlen=self.config.recent_size)
-        self._last_state = state.get("last_state")
-        self._last_reward = state.get("last_reward")
+        self._last_by_stream = {
+            int(stream_id): (np.asarray(value[0], dtype=np.float32), float(value[1]))
+            for stream_id, value in state.get("last_by_stream", {}).items()
+        }
+        # Backward compatibility with replay files written before stream-aware
+        # boundary detection was introduced.
+        if not self._last_by_stream and state.get("last_state") is not None:
+            self._last_by_stream[0] = (
+                np.asarray(state["last_state"], dtype=np.float32),
+                float(state.get("last_reward", 0.0)),
+            )
         self._recent_cluster_hits = deque(state.get("recent_cluster_hits", []), maxlen=self.config.stats_window)
         self._cluster_hit_counts = defaultdict(int)
         for cid in self._recent_cluster_hits:
@@ -342,10 +411,50 @@ class StructuredSORReplayBuffer:
     def __len__(self) -> int:
         return sum(len(buffer) for buffer in self.cluster_memory.values())
 
-    def _is_boundary(self, state: np.ndarray, reward: float) -> bool:
-        if self._last_state is None or self._last_reward is None:
+    def diagnostics(self) -> dict:
+        """Return compact, JSON-safe evidence about retained experience."""
+        cluster_sizes = {
+            int(cluster_id): len(entries)
+            for cluster_id, entries in self.cluster_memory.items()
+            if entries
+        }
+        transitions = [
+            item for entries in self.cluster_memory.values() for item in entries
+        ]
+        task_sizes = defaultdict(int)
+        task_samples = defaultdict(int)
+        for item in transitions:
+            label = str(getattr(item, "task_label", "unknown"))
+            task_sizes[label] += 1
+            task_samples[label] += int(item.sample_count)
+        return {
+            "size": len(transitions),
+            "capacity": (
+                int(self.config.global_total_cap)
+                if self.config.global_total_cap is not None
+                else int(self.config.rb_size * self.config.max_clusters)
+            ),
+            "clusters": len(cluster_sizes),
+            "cluster_sizes": cluster_sizes,
+            "boundary_entries": sum(bool(item.boundary) for item in transitions),
+            "recent_references": len(self.recent_memory),
+            "sample_count_total": sum(int(item.sample_count) for item in transitions),
+            "task_sizes": dict(sorted(task_sizes.items())),
+            "task_sample_counts": dict(sorted(task_samples.items())),
+            "evictions": int(self._evict_counter),
+            "drift_score_max": max(
+                [0.0] + [float(v) for v in self.drift_tracker.drift_scores.values()]
+            ),
+        }
+
+    def _is_boundary(self, state: np.ndarray, reward: float, stream_id: int) -> bool:
+        previous = self._last_by_stream.get(int(stream_id))
+        if previous is None:
             return False
-        discontinuity = float(np.linalg.norm(state - self._last_state) + abs(reward - self._last_reward))
+        last_state, last_reward = previous
+        discontinuity = float(
+            np.linalg.norm(state - last_state) + abs(reward - last_reward)
+        )
         return discontinuity > self.config.boundary_threshold
 
     def _unique_candidates(self) -> List[Transition]:
@@ -373,11 +482,21 @@ class StructuredSORReplayBuffer:
             + self.config.rho_boundary * float(transition.boundary)
         )
 
-    def _evict_lowest(self, container: List[Transition]) -> None:
+    def _evict_lowest(
+        self, container: List[Transition], cascade_auxiliary: bool = False
+    ) -> None:
         if not container:
             return
         idx_min = min(range(len(container)), key=lambda i: self._score(container[i]))
         evicted = container.pop(idx_min)
+        if cascade_auxiliary:
+            self.boundary_memory = [
+                item for item in self.boundary_memory if item is not evicted
+            ]
+            self.recent_memory = deque(
+                (item for item in self.recent_memory if item is not evicted),
+                maxlen=self.config.recent_size,
+            )
         self._candidates_cache = None
         self._evict_counter += 1
         if self._evict_counter % 1000 == 0:
@@ -407,12 +526,14 @@ class StructuredSORReplayBuffer:
                 # largest cluster also keeps cluster sizes balanced, which is
                 # what protects old regimes from being flushed out.
                 target_cid = max(self.cluster_memory, key=lambda cid: len(self.cluster_memory[cid]))
-                self._evict_lowest(self.cluster_memory[target_cid])
+                self._evict_lowest(
+                    self.cluster_memory[target_cid], cascade_auxiliary=True
+                )
                 total -= 1
         else:
             buf = self.cluster_memory[cluster_id]
             while len(buf) > self.config.rb_size:
-                self._evict_lowest(buf)
+                self._evict_lowest(buf, cascade_auxiliary=True)
 
     @staticmethod
     def _softmax(values: np.ndarray) -> np.ndarray:

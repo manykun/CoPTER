@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import os
 import numpy as np
 import torch
@@ -5,8 +7,14 @@ import random
 from loguru import logger
 from scipy.interpolate import RegularGridInterpolator
 
-from backbone import DualHeadNN, TripleHeadACC, TripleHeadCoPTER
-from structures import DCQCNParameters, AgentParameters
+from backbone import DualHeadNN, DualHeadProfileACC, TripleHeadACC, TripleHeadCoPTER
+from structures import (
+    AgentParameters,
+    DCQCNParameters,
+    acc_action_dimensions,
+    acc_action_from_indices,
+    describe_acc_action,
+)
 
 
 class Agent:
@@ -43,28 +51,72 @@ class ACC(Agent):
     5. Call update_target_network() to update the target network priodically.
     6. Call save_model() to save the model to the specified path.
     """
-    def __init__(self, name: str, agent_params: AgentParameters):
+    def __init__(self, name: str, agent_params: AgentParameters, action_space="legacy"):
         # Agent Parameters Initialization
         self.p = agent_params
         self.name = name
+        self.action_space = action_space
         
         # Model Initialization
         self.device = torch.device("cpu")
         # 初始化策略网络（评估网络），每个训练步更新
-        self.policy_net = TripleHeadACC(self.p.state_dim, self.p.kmin_dim, self.p.kmax_dim, self.p.pmax_dim).to(self.device)
+        action_dims = acc_action_dimensions(action_space)
+        if action_space == "legacy":
+            network_factory = lambda: TripleHeadACC(
+                self.p.state_dim, *action_dims, self.p.hidden_dims
+            )
+        else:
+            network_factory = lambda: DualHeadProfileACC(
+                self.p.state_dim, *action_dims, self.p.hidden_dims
+            )
+        self.action_dims = action_dims
+        self.policy_net = network_factory().to(self.device)
         # 初始化目标网络，定期更新
-        self.target_net = TripleHeadACC(self.p.state_dim, self.p.kmin_dim, self.p.kmax_dim, self.p.pmax_dim).to(self.device) 
+        self.target_net = network_factory().to(self.device)
+        # A DQN target must start from the same parameters as the online
+        # network.  The active load_model() implementation returns when no
+        # checkpoint exists, so relying on load-time synchronization leaves a
+        # fresh target independently randomized.
+        self.target_net.load_state_dict(self.policy_net.state_dict())
         # 创建优化器，adam优化算法
         self.optimizer = torch.optim.Adam(self.policy_net.parameters(), lr=self.p.learning_rate)
         # 计算损失函数
         self.loss_fn = torch.nn.SmoothL1Loss()
+        self.last_train_diagnostics = None
 
 
     def save_model(self, save_path):
         if not os.path.exists(save_path):
             os.makedirs(save_path)
-        torch.save(self.policy_net.state_dict(), os.path.join(save_path, f"{self.name}_policy.pt"))
-        torch.save(self.target_net.state_dict(), os.path.join(save_path, f"{self.name}_target.pt"))
+        checkpoint_path = os.path.join(save_path, self.name)
+        checkpoint = {
+            "format_version": 2,
+            "action_space": self.action_space,
+            "policy": self.policy_net.state_dict(),
+            "target": self.target_net.state_dict(),
+            "optimizer": self.optimizer.state_dict(),
+            "rng": {
+                "python": random.getstate(),
+                "numpy": np.random.get_state(),
+                "torch": torch.get_rng_state(),
+                "torch_cuda": (
+                    torch.cuda.get_rng_state_all()
+                    if torch.cuda.is_available() else None
+                ),
+            },
+        }
+        temporary = f"{checkpoint_path}.tmp.{os.getpid()}"
+        try:
+            torch.save(checkpoint, temporary)
+            os.replace(temporary, checkpoint_path)
+        finally:
+            if os.path.exists(temporary):
+                os.remove(temporary)
+        # Preserve historical files unless a registered experiment explicitly
+        # opts into the space-efficient complete-checkpoint-only format.
+        if os.environ.get("COPTER_COMPLETE_CHECKPOINT_ONLY") != "1":
+            torch.save(self.policy_net.state_dict(), os.path.join(save_path, f"{self.name}_policy.pt"))
+            torch.save(self.target_net.state_dict(), os.path.join(save_path, f"{self.name}_target.pt"))
         logger.info(f"ACC Agent {self.name} - Model saved to {save_path}")
 
     
@@ -77,6 +129,33 @@ class ACC(Agent):
 
         policy_path = os.path.join(save_path, f"{name}_policy.pt")
         target_path = os.path.join(save_path, f"{name}_target.pt")
+        checkpoint_path = os.path.join(save_path, name)
+
+        if os.path.isfile(checkpoint_path):
+            checkpoint = torch.load(checkpoint_path, map_location=self.device)
+            saved_space = checkpoint.get("action_space", "legacy")
+            if saved_space != self.action_space:
+                raise ValueError(
+                    f"ACC action-space mismatch: checkpoint={saved_space}, "
+                    f"requested={self.action_space}"
+                )
+            self.policy_net.load_state_dict(checkpoint["policy"])
+            self.target_net.load_state_dict(
+                checkpoint.get("target", checkpoint["policy"])
+            )
+            if checkpoint.get("optimizer") is not None:
+                self.optimizer.load_state_dict(checkpoint["optimizer"])
+            rng = checkpoint.get("rng", {})
+            if rng.get("python") is not None:
+                random.setstate(rng["python"])
+            if rng.get("numpy") is not None:
+                np.random.set_state(rng["numpy"])
+            if rng.get("torch") is not None:
+                torch.set_rng_state(rng["torch"].cpu())
+            if torch.cuda.is_available() and rng.get("torch_cuda") is not None:
+                torch.cuda.set_rng_state_all(rng["torch_cuda"])
+            logger.info(f"ACC Agent {self.name} - complete checkpoint loaded from {checkpoint_path}")
+            return
 
         if os.path.isfile(policy_path) and os.path.isfile(target_path):
             self.policy_net.load_state_dict(torch.load(policy_path))
@@ -87,7 +166,7 @@ class ACC(Agent):
             self.target_net.load_state_dict(self.policy_net.state_dict())
 
     # 基于贪心策略和基于state的策略网络来选择动作
-    def select_action(self, state, epsilon=0.1) -> tuple[DCQCNParameters, tuple[int, int, int]]:
+    def select_action(self, state, epsilon=0.1):
         """
         Select an action based on the current state and epsilon-greedy policy.
         Args:
@@ -96,27 +175,24 @@ class ACC(Agent):
         Returns:
             tuple: A tuple containing the selected action as a `DCQCNParameters` object and the action indices.
         """
-        kmin_values = [0.0, 0.0949, 0.2259, 0.4066, 0.6560, 1.0]  # 6
-        kmax_values = [0.0, 0.25, 0.5, 1.0]  # 4
-        pmax_values = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0]  # 10
-        
         if random.random() < epsilon:
-            action = (random.randint(0, self.p.kmin_dim - 1), 
-                      random.randint(0, self.p.kmax_dim - 1), 
-                      random.randint(0, self.p.pmax_dim - 1))
+            action = tuple(random.randint(0, size - 1) for size in self.action_dims)
         else:
             state = torch.FloatTensor(state).unsqueeze(0).to(self.device)
             with torch.no_grad():
-                kmin, kmax, pmax = self.policy_net(state)
-                logger.info(f"ACC Agent {self.name} - Q Values: Kmin: {kmin}, Kmax: {kmax}, Pmax: {pmax}")
-            kmin_index = kmin.argmax().item()
-            kmax_index = kmax.argmax().item()
-            pmax_index = pmax.argmax().item()
-            action = (int(kmin_index), int(kmax_index), int(pmax_index))
+                q_heads = self.policy_net(state)
+                logger.info(
+                    f"ACC Agent {self.name} - Q Values ({self.action_space}): "
+                    f"{q_heads}"
+                )
+            action = tuple(int(head.argmax().item()) for head in q_heads)
         
-        logger.info(f"ACC Agent {self.name} - Action: Kmin: {kmin_values[action[0]]}, Kmax: {kmax_values[action[1]]}, Pmax: {pmax_values[action[2]]}")
+        logger.info(
+            f"ACC Agent {self.name} - Action ({self.action_space}): "
+            f"{describe_acc_action(action, self.action_space)}"
+        )
         # 返回kmin、kmax、pmax参数值以及索引值
-        return (DCQCNParameters(kmin_values[action[0]], kmax_values[action[1]], pmax_values[action[2]]), action)
+        return (acc_action_from_indices(action, self.action_space), action)
     
     
     def train_model(self, state, action, reward, next_state):
@@ -129,18 +205,15 @@ class ACC(Agent):
         next_state = torch.FloatTensor(next_state).to(self.device)
         
         # Q prediction value based on current state and action，需要进行梯度计算
-        q_kmin_tensor, q_kmax_tensor, q_pmax_tensor = self.policy_net(state)  # torch.no_grad() couldn't be used here.
-        
-        # 拆分动作索引
-        action_kmin_idx = action[:, 0]
-        action_kmax_idx = action[:, 1]
-        action_pmax_idx = action[:, 2]
-
-        # 预测Q值汇总计算：Q = q_kmin + q_kmax + q_pmax
-        q_prediction = (
-            q_kmin_tensor.gather(1, action_kmin_idx.unsqueeze(1)) + 
-            q_kmax_tensor.gather(1, action_kmax_idx.unsqueeze(1)) + 
-            q_pmax_tensor.gather(1, action_pmax_idx.unsqueeze(1))
+        q_heads = self.policy_net(state)  # gradients are required here
+        if action.ndim != 2 or action.shape[1] != len(q_heads):
+            raise ValueError(
+                f"{self.action_space} replay action width is {action.shape}; "
+                f"expected (*, {len(q_heads)})"
+            )
+        q_prediction = sum(
+            head.gather(1, action[:, index].unsqueeze(1))
+            for index, head in enumerate(q_heads)
         )
 
         # Q value estimation based on reward and next state
@@ -150,23 +223,52 @@ class ACC(Agent):
         with torch.no_grad():
             # Double DQN
             # 用next_state 利用策略网络选择动作
-            q_kmin_tensor, q_kmax_tensor, q_pmax_tensor = self.policy_net(next_state)
-            action_kmin_idx = q_kmin_tensor.argmax(dim=1)
-            action_kmax_idx = q_kmax_tensor.argmax(dim=1)
-            action_pmax_idx = q_pmax_tensor.argmax(dim=1)
+            policy_heads = self.policy_net(next_state)
+            next_actions = [head.argmax(dim=1) for head in policy_heads]
             # 用next_state 利用目标网络评估动作
-            q_kmin_tensor, q_kmax_tensor, q_pmax_tensor = self.target_net(next_state)
-            q_target = (
-                q_kmin_tensor.gather(1, action_kmin_idx.unsqueeze(1)) +
-                q_kmax_tensor.gather(1, action_kmax_idx.unsqueeze(1)) +
-                q_pmax_tensor.gather(1, action_pmax_idx.unsqueeze(1))
+            target_heads = self.target_net(next_state)
+            q_target = sum(
+                head.gather(1, index.unsqueeze(1))
+                for head, index in zip(target_heads, next_actions)
             )
             # 目标网络Q值估计，原文中的yj=r+Q_target
             q_estimation = reward.unsqueeze(1).to(self.device) + self.p.gamma * q_target
 
-        # Calculate the loss, perform backpropagation, and return the loss value for logging purposes.
-        # 计算loss，利用均方误差
+        # Calculate Huber (Smooth L1) TD loss.  It is quadratic near zero and
+        # linear for large errors, making Q-scale diagnostics essential.
         loss = self.loss_fn(q_prediction, q_estimation)
+
+        # Keep compact, structured Q diagnostics for AgentHelper.  Logging the
+        # complete head tensors for hundreds of ports would make the training
+        # logs unusable; the helper emits one aggregate line periodically and
+        # persists per-port summaries at the end of every epoch.
+        td_error = q_prediction - q_estimation
+
+        def tensor_stats(value):
+            flat = value.detach().float().reshape(-1).cpu()
+            absolute = flat.abs()
+            return {
+                "mean": float(flat.mean().item()),
+                "abs_mean": float(absolute.mean().item()),
+                "abs_p95": float(torch.quantile(absolute, 0.95).item()),
+                "abs_max": float(absolute.max().item()),
+            }
+
+        # Both reward profiles are bounded to [-1, 1].  For gamma < 1 the
+        # corresponding infinite-horizon return scale is 1 / (1 - gamma).
+        expected_q_bound = (
+            1.0 / (1.0 - self.p.gamma)
+            if 0.0 <= self.p.gamma < 1.0
+            else float("inf")
+        )
+        self.last_train_diagnostics = {
+            "q_prediction": tensor_stats(q_prediction),
+            "q_target": tensor_stats(q_estimation),
+            "td_error": tensor_stats(td_error),
+            "reward_mean": float(reward.mean().item()),
+            "reward_abs_max": float(reward.abs().max().item()),
+            "expected_q_bound": float(expected_q_bound),
+        }
         # 清空历史梯度
         self.optimizer.zero_grad()
         # 反向传播计算梯度

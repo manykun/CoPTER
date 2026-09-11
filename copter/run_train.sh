@@ -28,6 +28,7 @@ MAX_STEPS="${CFG_max_steps:-0}"
 EPS_START="${CFG_epsilon_start:-1.0}"
 EPS_END="${CFG_epsilon_end:-0.05}"
 EPS_DECAY="${CFG_epsilon_decay_steps:-50000}"
+TARGET_UPDATE_INTERVAL="${CFG_target_update_interval:-100}"
 SAVE_INTERVAL="${CFG_state_save_interval:-1}"
 SEED="${CFG_seed:-1}"
 MODEL_DIR="${CFG_model_dir:-models}"
@@ -114,6 +115,7 @@ for ((i = 1; i <= TOTAL_EPOCHS; i++)); do
         --epsilon_start "$EPS_START" \
         --epsilon_end "$EPS_END" \
         --epsilon_decay_steps "$EPS_DECAY" \
+        --target_update_interval "$TARGET_UPDATE_INTERVAL" \
         --state_save_interval "$SAVE_INTERVAL" \
         --seed "$SEED" \
         --tb_enable "$WANDB_ENABLE" \

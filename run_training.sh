@@ -39,20 +39,63 @@ NS3_LIB_DIR="$(realpath "${NS3_BLD_DIR}")/lib"
 # Defaults (override via command-line flags)
 MAX_EPISODES=200
 BASE_PORT=5556
-NS3_CONF="${COPTER_ROOT}/simulation/mix/CacheFollower_burst_incast/copter_CacheFollower_burst_incast.conf"
-EXP_NAME="20260418_1"
+NS3_CONF="${COPTER_ROOT}/simulation/mix/m3_256hosts.conf"
+EXP_NAME="acc_experiment"
 MODE="ACC"
 FMAP_DIR=""
-ONLINE_FLAG="--online"
+ONLINE=1
 MODEL_DIR="${COPTER_ROOT}/copter/models"
-SWITCH_BUFFER=10000
+SWITCH_BUFFER=400
 TRAIN_INTERVALS=8
 STATIC_STEPS=4
 EPSILON_START=1.0
-EPSILON_END=0.01
-EPSILON_DECAY=100
+EPSILON_END=0.05
+EPSILON_DECAY=50000
+EPSILON_SCHEDULE="phase"
+TARGET_UPDATE_INTERVAL=100
 WAIT_NS3_SEC=3
 WAIT_BETWEEN_SEC=5
+FORCE_ACTION=""
+FORCE_PORT_ACTION=""
+EVAL_GREEDY=0
+EVAL_TAG=""
+SEED=1
+WATCH_PORTS=""
+WATCH_TRACE_FILE=""
+FCT_STEP_TRACE="false"
+MAX_STEPS=0
+TARGET_TRAIN_STEPS=0
+TB_ENABLE="true"
+ONE_SHOT=0
+RUN_ID=""
+PHASE=""
+ACC_HIDDEN_DIMS="32,64,64,32"
+ACTION_SPACE="legacy"
+REWARD_WEIGHTS="0.50,0.30,0.20"
+REWARD_PROFILE="weighted"
+REWARD_QUEUE_LAMBDA=5.0
+REWARD_ECN_LAMBDA=5.0
+SHARED_REPLAY="true"
+SOR_RECENT_SIZE=2000
+SOR_BOUNDARY_SIZE=20000
+SOR_MAX_CLUSTERS=32
+SOR_PROTOTYPE_DISTANCE=1.0
+SOR_PROTOTYPE_ETA=0.05
+SOR_BOUNDARY_THRESHOLD=0.5
+SOR_ALPHA_TD=1.0
+SOR_BETA_UNDER_SAMPLE=0.2
+SOR_GAMMA_DRIFT=0.5
+SOR_RHO_BOUNDARY=0.5
+SOR_TEMPERATURE=1.0
+SOR_UNIFORM_MIX=0.01
+SOR_LAMBDA_CONS=0.01
+SOR_LAMBDA_REG=0.001
+SOR_DRIFT_REG_THRESHOLD=0.5
+SOR_REF_UPDATE_INTERVAL=256
+SOR_SYNC_INTERVAL=8
+# Each episode is a separate Python process.  Formal continual-learning runs
+# must persist replay every episode or the old-task memory silently disappears.
+SOR_SAVE_BUFFER_EVERY=1
 
 # Multi-experiment: array of "config:exp" pairs
 EXP_LIST=()
@@ -72,10 +115,72 @@ while [[ $# -gt 0 ]]; do
         --eps-start)    EPSILON_START="$2";   shift 2 ;;
         --eps-end)      EPSILON_END="$2";     shift 2 ;;
         --eps-decay)    EPSILON_DECAY="$2";   shift 2 ;;
-        --offline)      ONLINE_FLAG="";      shift ;;
+        --epsilon-schedule) EPSILON_SCHEDULE="$2"; shift 2 ;;
+        --target-update-interval) TARGET_UPDATE_INTERVAL="$2"; shift 2 ;;
+        --force-action) FORCE_ACTION="$2";    shift 2 ;;
+        --force-port-action) FORCE_PORT_ACTION="$2"; shift 2 ;;
+        --eval-greedy)  EVAL_GREEDY=1; ONE_SHOT=1; shift ;;
+        --eval-tag)     EVAL_TAG="$2";        shift 2 ;;
+        --seed)         SEED="$2";            shift 2 ;;
+        --watch-ports)  WATCH_PORTS="$2";     shift 2 ;;
+        --watch-trace-file) WATCH_TRACE_FILE="$2"; shift 2 ;;
+        --fct-step-trace) FCT_STEP_TRACE="$2"; shift 2 ;;
+        --max-steps)    MAX_STEPS="$2";       shift 2 ;;
+        --target-train-steps) TARGET_TRAIN_STEPS="$2"; shift 2 ;;
+        --tb-enable)    TB_ENABLE="$2";       shift 2 ;;
+        --one-shot)     ONE_SHOT=1;            shift ;;
+        --run-id)       RUN_ID="$2";          shift 2 ;;
+        --phase)        PHASE="$2";           shift 2 ;;
+        --acc-hidden-dims) ACC_HIDDEN_DIMS="$2"; shift 2 ;;
+        --action-space) ACTION_SPACE="$2"; shift 2 ;;
+        --reward-weights) REWARD_WEIGHTS="$2"; shift 2 ;;
+        --reward-profile) REWARD_PROFILE="$2"; shift 2 ;;
+        --reward-queue-lambda) REWARD_QUEUE_LAMBDA="$2"; shift 2 ;;
+        --reward-ecn-lambda) REWARD_ECN_LAMBDA="$2"; shift 2 ;;
+        --shared-replay) SHARED_REPLAY="$2"; shift 2 ;;
+        --sor-recent-size) SOR_RECENT_SIZE="$2"; shift 2 ;;
+        --sor-boundary-size) SOR_BOUNDARY_SIZE="$2"; shift 2 ;;
+        --sor-max-clusters) SOR_MAX_CLUSTERS="$2"; shift 2 ;;
+        --sor-prototype-distance) SOR_PROTOTYPE_DISTANCE="$2"; shift 2 ;;
+        --sor-prototype-eta) SOR_PROTOTYPE_ETA="$2"; shift 2 ;;
+        --sor-boundary-threshold) SOR_BOUNDARY_THRESHOLD="$2"; shift 2 ;;
+        --sor-alpha-td) SOR_ALPHA_TD="$2"; shift 2 ;;
+        --sor-beta-under-sample) SOR_BETA_UNDER_SAMPLE="$2"; shift 2 ;;
+        --sor-gamma-drift) SOR_GAMMA_DRIFT="$2"; shift 2 ;;
+        --sor-rho-boundary) SOR_RHO_BOUNDARY="$2"; shift 2 ;;
+        --sor-temperature) SOR_TEMPERATURE="$2"; shift 2 ;;
+        --sor-uniform-mix) SOR_UNIFORM_MIX="$2"; shift 2 ;;
+        --sor-lambda-cons) SOR_LAMBDA_CONS="$2"; shift 2 ;;
+        --sor-lambda-reg) SOR_LAMBDA_REG="$2"; shift 2 ;;
+        --sor-drift-reg-threshold) SOR_DRIFT_REG_THRESHOLD="$2"; shift 2 ;;
+        --sor-ref-update-interval) SOR_REF_UPDATE_INTERVAL="$2"; shift 2 ;;
+        --sor-sync-interval) SOR_SYNC_INTERVAL="$2"; shift 2 ;;
+        --sor-save-buffer-every) SOR_SAVE_BUFFER_EVERY="$2"; shift 2 ;;
+        --offline)      ONLINE=0;              shift ;;
         *)              echo "Unknown arg: $1"; exit 1 ;;
     esac
 done
+
+case "${SHARED_REPLAY}" in
+    true|false) ;;
+    *) echo "--shared-replay must be true or false" >&2; exit 2 ;;
+esac
+case "${ACTION_SPACE}" in
+    legacy|multiscale) ;;
+    *) echo "--action-space must be legacy or multiscale" >&2; exit 2 ;;
+esac
+case "${EPSILON_SCHEDULE}" in
+    phase|global) ;;
+    *) echo "--epsilon-schedule must be phase or global" >&2; exit 2 ;;
+esac
+case "${FCT_STEP_TRACE}" in
+    true|false) ;;
+    *) echo "--fct-step-trace must be true or false" >&2; exit 2 ;;
+esac
+[[ "${TARGET_UPDATE_INTERVAL}" =~ ^[1-9][0-9]*$ ]] || {
+    echo "--target-update-interval must be a positive integer" >&2
+    exit 2
+}
 
 # ==================== Resolve Experiment List ====================
 # If --experiments was used, EXP_LIST has entries. Otherwise single (config, exp).
@@ -106,17 +211,14 @@ if [ ! -f "${NS3_BIN}" ]; then
 fi
 
 export LD_LIBRARY_PATH="${NS3_LIB_DIR}:${LD_LIBRARY_PATH:-}"
-export NS_LOG="CongestionControlSimulator=level_all:OpenGymInterface=level_all"
+# Do not force verbose ns-3 component logging. NS_LOG_UNCOND diagnostics are
+# still captured, while normal runs avoid a large level_all performance cost.
+export NS_LOG="${NS_LOG:-}"
 
 SIM_DIR="${COPTER_ROOT}/simulation"
 MAX_CONSECUTIVE_FAILURES=5
 
 # ==================== FMAP Flag ====================
-FMAP_FLAG=""
-if [ -n "${FMAP_DIR}" ]; then
-    FMAP_FLAG="-f ${FMAP_DIR}"
-fi
-
 # ==================== Run Single Experiment (used by main loop and parallel launcher) ====================
 run_single_experiment() {
     local NS3_CONF_LOCAL="$1"
@@ -126,11 +228,19 @@ run_single_experiment() {
     local TRAIN_LOG_LOCAL="$5"
 
     mkdir -p "${LOG_DIR_LOCAL}"
-    local STATE_FILE="${MODEL_DIR}/${EXP_NAME_LOCAL}_training_state.json"
+    local STATE_FILE="${MODEL_DIR}/${EXP_NAME_LOCAL}_train_state.json"
 
     get_current_episode() {
         if [ -f "${STATE_FILE}" ]; then
-            python3 -c "import json; print(json.load(open('${STATE_FILE}')).get('episode', 0))" 2>/dev/null || echo "0"
+            python3 -c "import json; print(json.load(open('${STATE_FILE}')).get('epoch', 0))" 2>/dev/null || echo "0"
+        else
+            echo "0"
+        fi
+    }
+
+    get_current_train_step() {
+        if [ -f "${STATE_FILE}" ]; then
+            python3 -c "import json; print(json.load(open('${STATE_FILE}')).get('global_train_step', 0))" 2>/dev/null || echo "0"
         else
             echo "0"
         fi
@@ -153,11 +263,17 @@ run_single_experiment() {
         echo "${msg}" >> "${TRAIN_LOG_LOCAL}"
     }
 
-    local EPISODE CONSECUTIVE_FAILURES=0
+    local EPISODE CONSECUTIVE_FAILURES=0 RUN_COUNT=0
     EPISODE=$(get_current_episode)
     log_local "Resuming from episode ${EPISODE}"
+    if [ "${TARGET_TRAIN_STEPS}" -gt 0 ] &&
+       [ "$(get_current_train_step)" -ge "${TARGET_TRAIN_STEPS}" ]; then
+        log_local "Target optimizer updates already reached: ${TARGET_TRAIN_STEPS}"
+        return 0
+    fi
 
-    while [ ${EPISODE} -lt ${MAX_EPISODES} ]; do
+    while { [ "${ONE_SHOT}" -eq 1 ] && [ "${RUN_COUNT}" -lt 1 ]; } || \
+          { [ "${ONE_SHOT}" -eq 0 ] && [ "${EPISODE}" -lt "${MAX_EPISODES}" ]; }; do
         log_local ""
         log_local "========== Episode ${EPISODE}/${MAX_EPISODES} =========="
         local EPISODE_START=$(date +%s)
@@ -181,28 +297,122 @@ run_single_experiment() {
                 log_local "FATAL: ${MAX_CONSECUTIVE_FAILURES} consecutive failures. Aborting."
                 return 1
             fi
+            if [ "${ONE_SHOT}" -eq 1 ]; then
+                log_local "One-shot run will not retry a failed NS3 startup."
+                return 1
+            fi
             sleep 2
             continue
         fi
 
-        log_local "Starting RL agent..."
-        cd "${COPTER_ROOT}/copter"
+        log_local "Starting RL agent (output: ${LOG_DIR_LOCAL}/agent_ep${EPISODE}.log)..."
+        local AGENT_WORKDIR="${COPTER_ROOT}/copter"
+        if [ "${MODE}" = "SOR" ]; then
+            AGENT_WORKDIR="${COPTER_ROOT}/sor"
+        fi
+        cd "${AGENT_WORKDIR}"
 
         local AGENT_EXIT=0
-        python copter.py \
-            -p ${NS3_PORT_LOCAL} \
-            -e "${EXP_NAME_LOCAL}" \
-            -m "${MODE}" \
-            ${FMAP_FLAG} \
-            ${ONLINE_FLAG} \
-            -d "${MODEL_DIR}" \
-            -s ${STATIC_STEPS} \
-            -i ${TRAIN_INTERVALS} \
-            -b ${SWITCH_BUFFER} \
-            --epsilon_start ${EPSILON_START} \
-            --epsilon_end ${EPSILON_END} \
-            --epsilon_decay ${EPSILON_DECAY} \
-            >> "${LOG_DIR_LOCAL}/agent_ep${EPISODE}.log" 2>&1 || AGENT_EXIT=$?
+        local AGENT_ARGS
+        if [ "${MODE}" = "SOR" ]; then
+            AGENT_ARGS=(
+                python sor_copter.py
+                -p "${NS3_PORT_LOCAL}"
+                -e "${EXP_NAME_LOCAL}"
+                -d "${MODEL_DIR}"
+                -s "${STATIC_STEPS}"
+                -i "${TRAIN_INTERVALS}"
+                -b "${SWITCH_BUFFER}"
+                --epsilon_start "${EPSILON_START}"
+                --epsilon_end "${EPSILON_END}"
+                --epsilon_decay_steps "${EPSILON_DECAY}"
+                --epsilon_schedule "${EPSILON_SCHEDULE}"
+                --target_update_interval "${TARGET_UPDATE_INTERVAL}"
+                --seed "${SEED}"
+                --tb_enable "${TB_ENABLE}"
+                --acc_hidden_dims "${ACC_HIDDEN_DIMS}"
+                --action_space "${ACTION_SPACE}"
+                --reward_weights "${REWARD_WEIGHTS}"
+                --reward_profile "${REWARD_PROFILE}"
+                --reward_queue_lambda "${REWARD_QUEUE_LAMBDA}"
+                --reward_ecn_lambda "${REWARD_ECN_LAMBDA}"
+                --sor_recent_size "${SOR_RECENT_SIZE}"
+                --sor_boundary_size "${SOR_BOUNDARY_SIZE}"
+                --sor_max_clusters "${SOR_MAX_CLUSTERS}"
+                --sor_prototype_distance "${SOR_PROTOTYPE_DISTANCE}"
+                --sor_prototype_eta "${SOR_PROTOTYPE_ETA}"
+                --sor_boundary_threshold "${SOR_BOUNDARY_THRESHOLD}"
+                --sor_alpha_td "${SOR_ALPHA_TD}"
+                --sor_beta_under_sample "${SOR_BETA_UNDER_SAMPLE}"
+                --sor_gamma_drift "${SOR_GAMMA_DRIFT}"
+                --sor_rho_boundary "${SOR_RHO_BOUNDARY}"
+                --sor_temperature "${SOR_TEMPERATURE}"
+                --sor_uniform_mix "${SOR_UNIFORM_MIX}"
+                --sor_lambda_cons "${SOR_LAMBDA_CONS}"
+                --sor_lambda_reg "${SOR_LAMBDA_REG}"
+                --sor_drift_reg_threshold "${SOR_DRIFT_REG_THRESHOLD}"
+                --sor_ref_update_interval "${SOR_REF_UPDATE_INTERVAL}"
+                --sor_sync_interval "${SOR_SYNC_INTERVAL}"
+                --sor_save_buffer_every "${SOR_SAVE_BUFFER_EVERY}"
+            )
+        else
+            AGENT_ARGS=(
+                python copter.py
+                -p "${NS3_PORT_LOCAL}"
+                -e "${EXP_NAME_LOCAL}"
+                -m "${MODE}"
+                -d "${MODEL_DIR}"
+                -s "${STATIC_STEPS}"
+                -i "${TRAIN_INTERVALS}"
+                -b "${SWITCH_BUFFER}"
+                --epsilon_start "${EPSILON_START}"
+                --epsilon_end "${EPSILON_END}"
+                --epsilon_decay_steps "${EPSILON_DECAY}"
+                --epsilon_schedule "${EPSILON_SCHEDULE}"
+                --target_update_interval "${TARGET_UPDATE_INTERVAL}"
+                --seed "${SEED}"
+                --tb_enable "${TB_ENABLE}"
+                --acc_hidden_dims "${ACC_HIDDEN_DIMS}"
+                --action_space "${ACTION_SPACE}"
+                --reward_weights "${REWARD_WEIGHTS}"
+                --reward_profile "${REWARD_PROFILE}"
+                --reward_queue_lambda "${REWARD_QUEUE_LAMBDA}"
+                --reward_ecn_lambda "${REWARD_ECN_LAMBDA}"
+                --shared_replay "${SHARED_REPLAY}"
+            )
+        fi
+        [ "${ONLINE}" -eq 1 ] && AGENT_ARGS+=(--online)
+        [ -n "${FMAP_DIR}" ] && AGENT_ARGS+=(-f "${FMAP_DIR}")
+        [ -n "${FORCE_ACTION}" ] && AGENT_ARGS+=(--force_action "${FORCE_ACTION}")
+        [ -n "${FORCE_PORT_ACTION}" ] && AGENT_ARGS+=(--force_port_action "${FORCE_PORT_ACTION}")
+        [ "${EVAL_GREEDY}" -eq 1 ] && AGENT_ARGS+=(--eval_greedy)
+        [ -n "${EVAL_TAG}" ] && AGENT_ARGS+=(--eval_tag "${EVAL_TAG}")
+        [ -n "${WATCH_PORTS}" ] && AGENT_ARGS+=(--watch_ports "${WATCH_PORTS}")
+        [ -n "${WATCH_TRACE_FILE}" ] && AGENT_ARGS+=(--watch_trace_file "${WATCH_TRACE_FILE}")
+        if [ "${FCT_STEP_TRACE}" = "true" ]; then
+            local FCT_SOURCE_LOCAL
+            FCT_SOURCE_LOCAL=$(awk '$1 == "FCT_OUTPUT_FILE" {print $2; exit}' "${NS3_CONF_LOCAL}")
+            if [ -z "${FCT_SOURCE_LOCAL}" ]; then
+                log_local "ERROR: --fct-step-trace requested but FCT_OUTPUT_FILE is absent"
+                kill_ns3_processes_local ${NS3_PID}
+                return 1
+            fi
+            if [[ "${FCT_SOURCE_LOCAL}" != /* ]]; then
+                FCT_SOURCE_LOCAL="${SIM_DIR}/${FCT_SOURCE_LOCAL}"
+            fi
+            local FCT_STEP_TRACE_LOCAL
+            FCT_STEP_TRACE_LOCAL="$(dirname "${FCT_SOURCE_LOCAL}")/fct_steps_ep${EPISODE}.csv"
+            AGENT_ARGS+=(
+                --fct_source_file "${FCT_SOURCE_LOCAL}"
+                --fct_step_trace_file "${FCT_STEP_TRACE_LOCAL}"
+                --launcher_episode "${EPISODE}"
+            )
+        fi
+        [ "${MAX_STEPS}" -gt 0 ] && AGENT_ARGS+=(--max_steps "${MAX_STEPS}")
+        [ "${TARGET_TRAIN_STEPS}" -gt 0 ] && AGENT_ARGS+=(--max_global_train_steps "${TARGET_TRAIN_STEPS}")
+        [ -n "${RUN_ID}" ] && AGENT_ARGS+=(--run_id "${RUN_ID}")
+        [ -n "${PHASE}" ] && AGENT_ARGS+=(--phase "${PHASE}")
+        "${AGENT_ARGS[@]}" >> "${LOG_DIR_LOCAL}/agent_ep${EPISODE}.log" 2>&1 || AGENT_EXIT=$?
 
         cd "${COPTER_ROOT}"
 
@@ -226,13 +436,29 @@ run_single_experiment() {
         else
             CONSECUTIVE_FAILURES=$((CONSECUTIVE_FAILURES + 1))
             log_local "WARNING: Agent exited with code ${AGENT_EXIT} (failure ${CONSECUTIVE_FAILURES}/${MAX_CONSECUTIVE_FAILURES})"
+            log_local "Last 40 lines of agent log:"
+            tail -n 40 "${LOG_DIR_LOCAL}/agent_ep${EPISODE}.log" >&2 || true
             if [ ${CONSECUTIVE_FAILURES} -ge ${MAX_CONSECUTIVE_FAILURES} ]; then
                 log_local "FATAL: ${MAX_CONSECUTIVE_FAILURES} consecutive failures. Aborting."
                 return 1
             fi
         fi
 
-        if [ -f "${STATE_FILE}" ]; then
+        RUN_COUNT=$((RUN_COUNT + 1))
+        if [ "${ONE_SHOT}" -eq 1 ]; then
+            [ "${AGENT_EXIT}" -eq 0 ] || return "${AGENT_EXIT}"
+            break
+        fi
+
+        if [ "${TARGET_TRAIN_STEPS}" -gt 0 ] &&
+           [ "$(get_current_train_step)" -ge "${TARGET_TRAIN_STEPS}" ]; then
+            log_local "Reached target optimizer updates: ${TARGET_TRAIN_STEPS}"
+            break
+        fi
+
+        # A registered optimizer-update budget takes precedence over the
+        # heuristic convergence detector so both tasks receive equal compute.
+        if [ "${TARGET_TRAIN_STEPS}" -eq 0 ] && [ -f "${STATE_FILE}" ]; then
             local CONVERGED
             CONVERGED=$(python3 -c "
 import json, sys, numpy as np
@@ -273,15 +499,22 @@ else:
         fi
     done
 
+    if [ "${TARGET_TRAIN_STEPS}" -gt 0 ] &&
+       [ "$(get_current_train_step)" -lt "${TARGET_TRAIN_STEPS}" ]; then
+        log_local "ERROR: Episode safety cap reached before optimizer-update target."
+        log_local "Current updates=$(get_current_train_step), target=${TARGET_TRAIN_STEPS}"
+        return 1
+    fi
+
     log_local ""
     log_local "=============================================="
     log_local "Training Complete - Total Episodes: ${EPISODE}"
-    log_local "TensorBoard: tensorboard --logdir ${COPTER_ROOT}/copter/runs/"
+    log_local "TensorBoard: tensorboard --logdir ${COPTER_ROOT}/copter/tb_logs/"
     log_local "=============================================="
 }
 
 # ==================== Main Entry ====================
-LOG_BASE="${COPTER_ROOT}/copter/training_logs"
+LOG_BASE="${COPTER_LOG_BASE:-${COPTER_ROOT}/copter/training_logs}"
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 
 if [ ${#RESOLVED_LIST[@]} -eq 1 ]; then
@@ -341,7 +574,7 @@ else
     echo ""
     echo "=============================================="
     echo "All experiments complete. Failed: ${FAILED}/${#PIDS[@]}"
-    echo "TensorBoard: tensorboard --logdir ${COPTER_ROOT}/copter/runs/"
+    echo "TensorBoard: tensorboard --logdir ${COPTER_ROOT}/copter/tb_logs/"
     echo "=============================================="
     [ ${FAILED} -eq 0 ] || exit 1
 fi

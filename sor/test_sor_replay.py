@@ -120,9 +120,8 @@ def test_eviction_order_strictly_by_score():
     assert remaining_tds == [5.0, 6.0, 7.0, 8.0], f"got {remaining_tds}"
 
 
-def test_push_existing_skips_prototype_recompute():
-    """push_existing must NOT trigger prototype assign/update or boundary
-    detection; cluster_id must be preserved exactly."""
+def test_push_existing_copies_and_reassigns_locally():
+    """Imported transitions must have independent local cluster semantics."""
     config = SORReplayConfig(rb_size=8, recent_size=4, boundary_size=4, max_clusters=4,
                              prototype_distance=0.1, stats_window=4)
     src = StructuredSORReplayBuffer(config)
@@ -134,12 +133,52 @@ def test_push_existing_skips_prototype_recompute():
     assert t1.cluster_id != t2.cluster_id
 
     dst = StructuredSORReplayBuffer(config)
-    dst.push_existing(t1)
-    dst.push_existing(t2)
-    assert len(dst.prototype_manager.prototypes) == 0, "push_existing must not touch prototypes"
-    # transitions must land in their original clusters
-    assert t1 in dst.cluster_memory[t1.cluster_id]
-    assert t2 in dst.cluster_memory[t2.cluster_id]
+    copied1 = dst.push_existing(t1)
+    copied2 = dst.push_existing(t2)
+    assert len(dst.prototype_manager.prototypes) == 2
+    assert copied1 is not t1
+    assert copied2 is not t2
+    assert copied1.state is not t1.state
+    copied1.td_error = 9.0
+    copied1.sample_count += 1
+    assert t1.td_error == 1.0
+    assert t1.sample_count == 0
+    assert dst.prototype_manager.get(copied1.cluster_id) is not None
+    assert dst.prototype_manager.get(copied2.cluster_id) is not None
+
+
+def test_boundary_detection_is_stream_local():
+    """Interleaved ports must not create artificial cross-port boundaries."""
+    config = SORReplayConfig(
+        rb_size=16,
+        recent_size=8,
+        boundary_size=8,
+        max_clusters=2,
+        prototype_distance=1e9,
+        boundary_threshold=1.0,
+        stats_window=8,
+    )
+    replay = StructuredSORReplayBuffer(config)
+    zero = np.zeros(18, dtype=np.float32)
+    far = np.full(18, 100.0, dtype=np.float32)
+    embedding = np.zeros(32, dtype=np.float32)
+    first_port0 = replay.push(
+        zero, (0, 0, 0), 0.0, zero, embedding, stream_id=0
+    )
+    first_port1 = replay.push(
+        far, (0, 0, 0), 0.0, far, embedding, stream_id=1
+    )
+    second_port0 = replay.push(
+        zero + 0.01, (0, 0, 0), 0.0, zero, embedding, stream_id=0
+    )
+    assert not first_port0.boundary
+    assert not first_port1.boundary
+    assert not second_port0.boundary
+
+    changed_port0 = replay.push(
+        far, (0, 0, 0), 1.0, far, embedding, stream_id=0
+    )
+    assert changed_port0.boundary
 
 
 def test_candidate_cache_invalidates_on_push():
@@ -175,13 +214,34 @@ def test_sampling_probability_valid():
     assert abs(probs.sum() - 1.0) < 1e-9
 
 
+def test_td_updates_do_not_duplicate_observations():
+    config = SORReplayConfig(rb_size=8, recent_size=4, boundary_size=4,
+                             max_clusters=1, prototype_distance=1e9,
+                             stats_window=32)
+    replay = StructuredSORReplayBuffer(config)
+    state = np.zeros(18, dtype=np.float32)
+    embedding = np.zeros(32, dtype=np.float32)
+    transition = replay.push(
+        state, (0, 0, 0), 0.5, state, embedding, td_error=1.0
+    )
+    current = replay.drift_tracker.current[transition.cluster_id]
+    before = (len(current["embeddings"]), len(current["reward"]))
+    for td_error in (2.0, 3.0, 4.0):
+        replay.update_td_errors([transition], [td_error])
+    after = (len(current["embeddings"]), len(current["reward"]))
+    assert after == before == (1, 1)
+    assert len(current["td"]) == 4
+
+
 if __name__ == "__main__":
     test_sor_replay_push_sample_and_persist()
     test_extreme_td_error_sampling_no_crash()
     test_new_samples_not_evicted_first()
     test_eviction_is_score_based()
     test_eviction_order_strictly_by_score()
-    test_push_existing_skips_prototype_recompute()
+    test_push_existing_copies_and_reassigns_locally()
+    test_boundary_detection_is_stream_local()
     test_candidate_cache_invalidates_on_push()
     test_sampling_probability_valid()
-    print("SOR replay tests passed (8/8)")
+    test_td_updates_do_not_duplicate_observations()
+    print("SOR replay tests passed (10/10)")
