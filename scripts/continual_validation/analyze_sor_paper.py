@@ -8,6 +8,7 @@ import math
 from pathlib import Path
 
 from analyze_forgetting import load_eval, percentile, summarize
+from analyze_fct_steps import build_artifacts as build_fct_step_artifacts
 from analyze_port_continual import frozen_port_summary
 from run_return_a import read, write
 
@@ -129,6 +130,7 @@ def write_acquisition_report(root, protocol):
     lines += ["", "Negative FCT/slowdown change is improvement; positive reward/throughput/completion change is improvement."]
     path = root / "ACQUISITION_REPORT.md"
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    build_fct_step_artifacts(root)
     print(f"Acquisition analysis written to {path}")
 
 
@@ -318,6 +320,9 @@ def main():
     write_csv(root / "port_metrics.csv", ports)
     write_csv(root / "resource_diagnostics.csv", resources)
     outputs = write_plots(root, protocol, network, ports)
+    _, fct_plot = build_fct_step_artifacts(root)
+    if fct_plot is not None:
+        outputs.append(fct_plot)
     a_end, b_end = protocol["a_points"][-1], protocol["b_points"][-1]
     lines = [
         "# SOR paper matched-AA report", "",
@@ -346,6 +351,8 @@ def main():
     lines += ["", "## Artifacts", "",
               "- `network_metrics.csv`: raw after-A/AA/AB values and corrected changes.",
               "- `port_metrics.csv`: all measured active ports, including the six representative ports."]
+    lines += ["- `fct_step_summary.csv`: per-episode step-trace coverage and mean FCT.",
+              "- `fct_training_curves.png`: FCT observed at each global optimizer update."]
     lines += ["", "## Resource and stability diagnostics", "",
               "| Method | Time (s) | Peak RSS (MB) | Q pred max | Q target max | TD max | Q inflation events | Local replay | Global replay |",
               "|---|---:|---:|---:|---:|---:|---:|---:|---:|"]

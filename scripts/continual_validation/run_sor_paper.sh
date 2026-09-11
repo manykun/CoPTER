@@ -34,7 +34,8 @@ Required/important options:
 
 This entry point deliberately has no reward-profile or action-space option:
 it locks tail_safe, multiscale (9x7), buffer=400 KB, global epsilon decay=2500,
-and target synchronization every 100 global optimizer updates.
+target synchronization every 100 global optimizer updates, and per-environment-step
+FCT traces for every training and frozen-evaluation episode.
 EOF
 }
 

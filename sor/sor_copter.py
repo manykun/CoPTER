@@ -31,6 +31,7 @@ if SOR_DIR not in sys.path:
     sys.path.insert(0, SOR_DIR)
 
 from network_helper import NetworkHelper
+from fct_metrics import FCTStepTracker
 from port_metrics import (
     PortMetricTracker,
     parse_forced_port_action,
@@ -103,6 +104,9 @@ def build_parser():
     parser.add_argument("--eval_tag", type=str, default="", help="Optional tag recorded into metrics (e.g. phase/task name).")
     parser.add_argument("--watch_ports", type=str, default="", help="Comma-separated port indices to measure explicitly.")
     parser.add_argument("--watch_trace_file", type=str, default="", help="Optional JSONL path for per-step metrics of --watch_ports.")
+    parser.add_argument("--fct_source_file", type=str, default="", help="ns-3 FCT stream to read incrementally.")
+    parser.add_argument("--fct_step_trace_file", type=str, default="", help="CSV output with one FCT record per environment step.")
+    parser.add_argument("--launcher_episode", type=int, default=None, help="Launcher episode identifier stored in the FCT trace.")
     parser.add_argument("--force_port_action", type=str, default="", help="Frozen local sweep: PORT,KMIN_NORM,KMAX_NORM,PMAX.")
     parser.add_argument("--tb_enable", type=str, default="true")
     parser.add_argument("--tb_log_dir", type=str, default="tb_logs")
@@ -184,6 +188,16 @@ def main():
     network_helper = NetworkHelper(ns3_socket=args.ns3_socket, nhp=network_helper_params)
     port_metric_tracker = PortMetricTracker(watch_ports, args.watch_trace_file)
     try:
+        fct_step_tracker = FCTStepTracker(
+            args.fct_source_file,
+            args.fct_step_trace_file,
+            episode=args.launcher_episode,
+            phase=args.phase or "",
+            eval_tag=args.eval_tag,
+        )
+    except ValueError as exc:
+        raise SystemExit(f"invalid FCT step trace configuration: {exc}")
+    try:
         port_metric_tracker.validate(network_helper.get_n_port())
     except ValueError as exc:
         raise SystemExit(str(exc))
@@ -242,6 +256,7 @@ def main():
         ).hexdigest(),
     )
     agent_helper.load(args.override_name)
+    startup_env_step = agent_helper.global_env_step
 
     startup_hashes = {}
     startup_parameter_hashes = {}
@@ -293,11 +308,23 @@ def main():
         while True:
             if current_step == 0:
                 done = network_helper.monitor(current_step)
+                fct_step_tracker.observe(
+                    current_step,
+                    global_env_step=startup_env_step + current_step,
+                    global_train_step=agent_helper.global_train_step,
+                    terminal=done,
+                )
             elif current_step < max(4, args.static_steps):
                 for port_idx in range(network_helper.get_n_port()):
                     paras = network_helper.get_port_current_parameters(port_idx)
                     network_helper.configurator(current_step, port_idx, paras)
                 done = network_helper.monitor(current_step)
+                fct_step_tracker.observe(
+                    current_step,
+                    global_env_step=startup_env_step + current_step,
+                    global_train_step=agent_helper.global_train_step,
+                    terminal=done,
+                )
             else:
                 port_states = [network_helper.get_port_current_state_list(port_idx) for port_idx in range(network_helper.get_n_port())]
                 current_epsilon = 0.0 if args.eval_greedy else agent_helper.get_current_epsilon()
@@ -312,6 +339,12 @@ def main():
                 for port_idx, parameter in enumerate(paras):
                     network_helper.configurator(current_step, port_idx, parameter)
                 done = network_helper.monitor(current_step)
+                fct_step_tracker.observe(
+                    current_step,
+                    global_env_step=startup_env_step + current_step,
+                    global_train_step=agent_helper.global_train_step,
+                    terminal=done,
+                )
                 if done:
                     logger.info(
                         "NS3 terminal notification received after action; "
@@ -453,6 +486,7 @@ def main():
                     for port, value in port_metric_tracker.legacy_rewards().items()
                 } if watch_ports else {},
                 "watch_ports_metrics": port_metric_tracker.summary(),
+                "fct_step_trace": fct_step_tracker.summary(),
                 **{
                     f"reward_{key}_mean": (
                         reward_component_sums[key] / reward_component_count
@@ -467,6 +501,10 @@ def main():
             port_metric_tracker.write_trace()
         except Exception as exc:
             logger.exception(f"Failed to write watch-port trace: {exc}")
+        try:
+            fct_step_tracker.close()
+        except Exception as exc:
+            logger.exception(f"Failed to close FCT step trace: {exc}")
         try:
             network_helper.close_env()
         except Exception:

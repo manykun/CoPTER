@@ -62,6 +62,7 @@ EVAL_TAG=""
 SEED=1
 WATCH_PORTS=""
 WATCH_TRACE_FILE=""
+FCT_STEP_TRACE="false"
 MAX_STEPS=0
 TARGET_TRAIN_STEPS=0
 TB_ENABLE="true"
@@ -123,6 +124,7 @@ while [[ $# -gt 0 ]]; do
         --seed)         SEED="$2";            shift 2 ;;
         --watch-ports)  WATCH_PORTS="$2";     shift 2 ;;
         --watch-trace-file) WATCH_TRACE_FILE="$2"; shift 2 ;;
+        --fct-step-trace) FCT_STEP_TRACE="$2"; shift 2 ;;
         --max-steps)    MAX_STEPS="$2";       shift 2 ;;
         --target-train-steps) TARGET_TRAIN_STEPS="$2"; shift 2 ;;
         --tb-enable)    TB_ENABLE="$2";       shift 2 ;;
@@ -170,6 +172,10 @@ esac
 case "${EPSILON_SCHEDULE}" in
     phase|global) ;;
     *) echo "--epsilon-schedule must be phase or global" >&2; exit 2 ;;
+esac
+case "${FCT_STEP_TRACE}" in
+    true|false) ;;
+    *) echo "--fct-step-trace must be true or false" >&2; exit 2 ;;
 esac
 [[ "${TARGET_UPDATE_INTERVAL}" =~ ^[1-9][0-9]*$ ]] || {
     echo "--target-update-interval must be a positive integer" >&2
@@ -383,6 +389,25 @@ run_single_experiment() {
         [ -n "${EVAL_TAG}" ] && AGENT_ARGS+=(--eval_tag "${EVAL_TAG}")
         [ -n "${WATCH_PORTS}" ] && AGENT_ARGS+=(--watch_ports "${WATCH_PORTS}")
         [ -n "${WATCH_TRACE_FILE}" ] && AGENT_ARGS+=(--watch_trace_file "${WATCH_TRACE_FILE}")
+        if [ "${FCT_STEP_TRACE}" = "true" ]; then
+            local FCT_SOURCE_LOCAL
+            FCT_SOURCE_LOCAL=$(awk '$1 == "FCT_OUTPUT_FILE" {print $2; exit}' "${NS3_CONF_LOCAL}")
+            if [ -z "${FCT_SOURCE_LOCAL}" ]; then
+                log_local "ERROR: --fct-step-trace requested but FCT_OUTPUT_FILE is absent"
+                kill_ns3_processes_local ${NS3_PID}
+                return 1
+            fi
+            if [[ "${FCT_SOURCE_LOCAL}" != /* ]]; then
+                FCT_SOURCE_LOCAL="${SIM_DIR}/${FCT_SOURCE_LOCAL}"
+            fi
+            local FCT_STEP_TRACE_LOCAL
+            FCT_STEP_TRACE_LOCAL="$(dirname "${FCT_SOURCE_LOCAL}")/fct_steps_ep${EPISODE}.csv"
+            AGENT_ARGS+=(
+                --fct_source_file "${FCT_SOURCE_LOCAL}"
+                --fct_step_trace_file "${FCT_STEP_TRACE_LOCAL}"
+                --launcher_episode "${EPISODE}"
+            )
+        fi
         [ "${MAX_STEPS}" -gt 0 ] && AGENT_ARGS+=(--max_steps "${MAX_STEPS}")
         [ "${TARGET_TRAIN_STEPS}" -gt 0 ] && AGENT_ARGS+=(--max_global_train_steps "${TARGET_TRAIN_STEPS}")
         [ -n "${RUN_ID}" ] && AGENT_ARGS+=(--run_id "${RUN_ID}")

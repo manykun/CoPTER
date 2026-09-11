@@ -55,6 +55,7 @@ def command(manifest, method, model, exp, port, watch_ports):
         "--reward-weights", "0.50,0.30,0.20", "--tb-enable", "false",
         "--watch-ports", ",".join(map(str, watch_ports)),
         "--run-id", manifest["paper_run_id"], "--sor-save-buffer-every", "1",
+        "--fct-step-trace", "true",
     ]
     if method == "acc_local":
         cmd += ["--shared-replay", "false"]

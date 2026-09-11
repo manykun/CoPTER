@@ -9,6 +9,7 @@ import numpy as np
 from loguru import logger
 from network_helper import NetworkHelper
 from agent_helper import AgentHelper
+from fct_metrics import FCTStepTracker
 from port_metrics import (
     PortMetricTracker,
     parse_forced_port_action,
@@ -102,6 +103,9 @@ if __name__ == "__main__":
     parser.add_argument("--force_port_action", type=str, default="", help="Frozen local sweep: override one port with PORT,KMIN_NORM,KMAX_NORM,PMAX while all other ports remain greedy.")
     parser.add_argument("--watch_ports", type=str, default="", help="Comma-separated port indices to track explicitly. Their per-epoch rollout reward (EMA) is written to metrics jsonl and TensorBoard (rollout/reward_port{p}) so a fixed port's reward trajectory can be plotted across epochs.")
     parser.add_argument("--watch_trace_file", type=str, default="", help="Optional JSONL path for per-step metrics of --watch_ports.")
+    parser.add_argument("--fct_source_file", type=str, default="", help="ns-3 FCT stream to read incrementally.")
+    parser.add_argument("--fct_step_trace_file", type=str, default="", help="CSV output with one FCT record per environment step.")
+    parser.add_argument("--launcher_episode", type=int, default=None, help="Launcher episode identifier stored in the FCT trace.")
     # ---- tensorboard ----
     parser.add_argument("--tb_enable", type=str, default="true", help="Enable tensorboard logging: true/false")
     parser.add_argument("--tb_log_dir", type=str, default="tb_logs", help="TensorBoard root log dir; actual dir = <tb_log_dir>/<exp_name>")
@@ -184,6 +188,16 @@ if __name__ == "__main__":
     network_helper = NetworkHelper(ns3_socket=args.ns3_socket, nhp=network_helper_params)
     port_metric_tracker = PortMetricTracker(watch_ports, args.watch_trace_file)
     try:
+        fct_step_tracker = FCTStepTracker(
+            args.fct_source_file,
+            args.fct_step_trace_file,
+            episode=args.launcher_episode,
+            phase=args.phase or "",
+            eval_tag=args.eval_tag,
+        )
+    except ValueError as exc:
+        raise SystemExit(f"invalid FCT step trace configuration: {exc}")
+    try:
         port_metric_tracker.validate(network_helper.get_n_port())
     except ValueError as exc:
         raise SystemExit(str(exc))
@@ -234,6 +248,7 @@ if __name__ == "__main__":
             startup_hashes[name] = hasher.hexdigest()
             startup_parameter_hashes[name] = parameter_hasher.hexdigest()
     startup_train_step = agent_helper.global_train_step
+    startup_env_step = agent_helper.global_env_step
     startup_replay_entries = sum(len(rb) for rb in agent_helper.rb_pool)
 
     # ---- Initialize TensorBoard SummaryWriter (跨 epoch 续写到同一目录，曲线连续) ----
@@ -290,6 +305,12 @@ if __name__ == "__main__":
             if current_step == 0:
                 # Get the initial observation for all ports
                 done = network_helper.monitor(current_step)
+                fct_step_tracker.observe(
+                    current_step,
+                    global_env_step=startup_env_step + current_step,
+                    global_train_step=agent_helper.global_train_step,
+                    terminal=done,
+                )
 
             elif current_step < max(4, args.static_steps):
                 # For the first few steps, we keep their actions as what the environment provides.
@@ -297,6 +318,12 @@ if __name__ == "__main__":
                     paras = network_helper.get_port_current_parameters(port_idx)
                     network_helper.configurator(current_step, port_idx, paras)
                 done = network_helper.monitor(current_step)
+                fct_step_tracker.observe(
+                    current_step,
+                    global_env_step=startup_env_step + current_step,
+                    global_train_step=agent_helper.global_train_step,
+                    terminal=done,
+                )
 
             else:
                 # Get the current states for all ports. NOTE: `Observation` is different from `State` in CoPTER.
@@ -338,6 +365,12 @@ if __name__ == "__main__":
 
                 # Enforce the updated parameters
                 done = network_helper.monitor(current_step)
+                fct_step_tracker.observe(
+                    current_step,
+                    global_env_step=startup_env_step + current_step,
+                    global_train_step=agent_helper.global_train_step,
+                    terminal=done,
+                )
                 if done:
                     logger.info("NS3 terminal notification received after action; exiting before reward/record update.")
                     break
@@ -542,6 +575,7 @@ if __name__ == "__main__":
                     for port, value in port_metric_tracker.legacy_rewards().items()
                 } if watch_ports else {},
                 "watch_ports_metrics": port_metric_tracker.summary(),
+                "fct_step_trace": fct_step_tracker.summary(),
             })
             if args.eval_greedy:
                 logger.info(
@@ -567,6 +601,10 @@ if __name__ == "__main__":
             port_metric_tracker.write_trace()
         except Exception as e:
             logger.exception(f"Failed to write watch-port trace: {e}")
+        try:
+            fct_step_tracker.close()
+        except Exception as e:
+            logger.exception(f"Failed to close FCT step trace: {e}")
         try:
             network_helper.close_env()
         except Exception:
