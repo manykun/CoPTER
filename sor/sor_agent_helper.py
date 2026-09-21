@@ -380,7 +380,7 @@ class SORAgentHelper:
                 self.global_memory.load(global_path)
                 logger.info(f"Loaded SOR global replay from {global_path}")
             except Exception as exc:
-                logger.warning(f"Failed to load SOR global replay {global_path}: {exc}")
+                raise RuntimeError(f"Failed to load SOR global replay {global_path}") from exc
         self._load_train_state()
         if self.global_train_step > 0:
             if missing_local:
@@ -490,7 +490,7 @@ class SORAgentHelper:
         try:
             self._atomic_write_text(self._train_state_path(), json.dumps(state))
         except Exception as exc:
-            logger.warning(f"Failed to save SOR train_state: {exc}")
+            raise RuntimeError("Failed to save SOR train_state") from exc
 
     def _save_train_state_and_buffers(self, write_buffer: bool = True):
         os.makedirs(self.model_dir, exist_ok=True)

@@ -66,4 +66,23 @@ scripts/reward_sensitivity_acc_Hadoop_Shuffle.txt
 sor/run_sor_train (1).sh
 .DS_Store
 
+# Canonical, immutable inputs for the registered ABA protocol.
+!simulation/mix/
+simulation/mix/*
+!simulation/mix/aba/
+simulation/mix/aba/*
+!simulation/mix/aba/webserver_cachefollower/
+simulation/mix/aba/webserver_cachefollower/*
+!simulation/mix/aba/webserver_cachefollower/task_a_webserver.conf
+!simulation/mix/aba/webserver_cachefollower/task_a_webserver.flow
+!simulation/mix/aba/webserver_cachefollower/task_b_cachefollower.conf
+!simulation/mix/aba/webserver_cachefollower/task_b_cachefollower.flow
+!simulation/mix/aba/webserver_cachefollower/manifest.json
+
+# Small deterministic fixtures are source, not experiment output.
+!tools/analysis/tests/
+!tools/analysis/tests/*.py
+!tools/analysis/tests/fixtures/
+!tools/analysis/tests/fixtures/*
+
 !.gitignore

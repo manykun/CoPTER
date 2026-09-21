@@ -13,6 +13,7 @@
 输出目录：/root/paddlejob/workspace/yangziwen/CoPTER/tools/analysis/sor_acc
 """
 
+import argparse
 import os
 import sys
 import numpy as np
@@ -28,17 +29,24 @@ from dataclasses import dataclass
 from typing import List, Tuple, Union, Dict
 from datetime import datetime
 
+from metrics_core import (
+    percentile,
+    read_queue_records,
+    read_rate_records,
+    read_throughput_records,
+)
+
 # ====================================================================
 # 全局配置
 # ====================================================================
-SIM_OUTPUT_DIR  = "/root/paddlejob/workspace/yangziwen/CoPTER/simulation/output/Hadoop_Shuffle"
-ANALYSIS_DIR    = "/root/paddlejob/workspace/yangziwen/CoPTER/tools/analysis"
+SCRIPT_DIR      = os.path.dirname(os.path.abspath(__file__))
+SIM_OUTPUT_DIR  = os.path.abspath(os.path.join(SCRIPT_DIR, "../../simulation/output/Hadoop_Shuffle"))
+ANALYSIS_DIR    = SCRIPT_DIR
 OUTPUT_DIR      = os.path.join(ANALYSIS_DIR, "sor_acc_new")
 EXPERIMENT      = "Hadoop_Shuffle"
 METHODS         = ["acc", "sor"]
 BASELINE        = "acc"
 
-os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 # ---- 样式 ----
 NAME_MAPPING = {
@@ -120,9 +128,7 @@ def method_style(m):
 # ====================================================================
 
 def get_pctl(a, p):
-    i = int(len(a) * p)
-    i = min(i, len(a) - 1)
-    return a[i]
+    return percentile(a, p)
 
 
 def process_fct_file(file_path):
@@ -468,7 +474,7 @@ def run_fct_time():
         for bi, vals in sorted(buckets.items()):
             t_s = bi * bucket_ns / 1e9
             avg_pts.append((t_s, np.mean(vals)))
-            p99_pts.append((t_s, np.percentile(vals, 99)))
+            p99_pts.append((t_s, percentile(vals, 0.99)))
 
         all_avgs[method] = np.array(avg_pts)
         all_p99s[method] = np.array(p99_pts)
@@ -527,23 +533,16 @@ class PortQueueData:
 
 
 def parse_queue_file(file_path):
-    records = []
-    with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
-        for ln, line in enumerate(f, 1):
-            parts = line.strip().split()
-            if len(parts) < 5:
-                continue
-            try:
-                records.append(PortQueueData(
-                    switch_id=int(parts[0]),
-                    switch_buffer=int(parts[1]),
-                    port_id=int(parts[2]),
-                    queue_size=int(parts[3]),
-                    monitor_time_s=float(parts[4]),
-                ))
-            except ValueError:
-                pass
-    return records
+    return [
+        PortQueueData(
+            switch_id=record["switch_id"],
+            switch_buffer=record["switch_buffer_bytes"],
+            port_id=record["port_id"],
+            queue_size=record["queue_bytes"],
+            monitor_time_s=record["time_s"],
+        )
+        for record in read_queue_records(Path(file_path))
+    ]
 
 
 def process_queue_file(file_path):
@@ -563,7 +562,7 @@ def process_queue_file(file_path):
     for t, bucket in time_buckets.items():
         sizes = [b.queue_size for b in bucket]
         avg_q.append((t, np.mean(sizes)))
-        p99_q.append((t, np.percentile(sizes, 99)))
+        p99_q.append((t, percentile(sizes, 0.99)))
 
     avg_q.sort()
     p99_q.sort()
@@ -659,23 +658,17 @@ class PortMonitor:
 
 
 def parse_rate_file(file_path, skip_initial=2):
-    records = []
-    with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
-        for line in f:
-            parts = line.strip().split()
-            if len(parts) < 6:
-                continue
-            try:
-                records.append(PortMonitor(
-                    switch_id=int(parts[0]),
-                    port_id=int(parts[1]),
-                    maxrate=int(parts[2]),
-                    txrate=float(parts[3]),
-                    ecnrate=float(parts[4]),
-                    monitor_time_s=float(parts[5]),
-                ))
-            except ValueError:
-                pass
+    records = [
+        PortMonitor(
+            switch_id=record["switch_id"],
+            port_id=record["port_id"],
+            maxrate=record["max_rate_bps"],
+            txrate=record["tx_rate"],
+            ecnrate=record["ecn_rate"],
+            monitor_time_s=record["time_s"],
+        )
+        for record in read_rate_records(Path(file_path))
+    ]
 
     if len(records) <= skip_initial:
         return None
@@ -689,9 +682,9 @@ def parse_rate_file(file_path, skip_initial=2):
         txs  = [b.txrate  for b in bucket]
         ecns = [b.ecnrate for b in bucket]
         avg_tx.append((t,  np.mean(txs)))
-        p99_tx.append((t,  np.percentile(txs, 99)))
+        p99_tx.append((t, percentile(txs, 0.99)))
         avg_ecn.append((t, np.mean(ecns)))
-        p99_ecn.append((t, np.percentile(ecns, 99)))
+        p99_ecn.append((t, percentile(ecns, 0.99)))
 
     for lst in (avg_tx, p99_tx, avg_ecn, p99_ecn):
         lst.sort()
@@ -785,10 +778,14 @@ def run_rate_analysis():
 
 def load_throughput(file_path):
     try:
-        df = pd.read_csv(
-            file_path, sep=r'\s+', header=None,
-            names=['switch_id', 'node_id', 'throughput_bps', 'timestamp', 'max_port_rate']
-        )
+        records = read_throughput_records(Path(file_path))
+        df = pd.DataFrame({
+            'switch_id': record['switch_id'],
+            'node_id': record['port_id'],
+            'throughput_bps': record['throughput_bps'],
+            'timestamp': record['time_s'],
+            'max_port_rate': record['max_rate_bps'],
+        } for record in records)
         df['throughput_mbps']    = df['throughput_bps']  / 1e6
         df['max_port_rate_mbps'] = df['max_port_rate']   / 1e6
         return df
@@ -817,8 +814,8 @@ def run_throughput_analysis():
                 'label':           NAME_MAPPING.get(method, method),
                 'avg_mbps':        df['throughput_mbps'].mean(),
                 'max_mbps':        df['throughput_mbps'].max(),
-                'p95_mbps':        df['throughput_mbps'].quantile(0.95),
-                'p99_mbps':        df['throughput_mbps'].quantile(0.99),
+                'p95_mbps':        percentile(df['throughput_mbps'].tolist(), 0.95),
+                'p99_mbps':        percentile(df['throughput_mbps'].tolist(), 0.99),
                 'unique_switches': df['switch_id'].nunique(),
             })
             print(f"  [OK] {method}: avg={df['throughput_mbps'].mean():.2f} Mbps")
@@ -918,6 +915,19 @@ def run_throughput_analysis():
 # ====================================================================
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--input-dir", default=SIM_OUTPUT_DIR)
+    parser.add_argument("--output-dir", default=OUTPUT_DIR)
+    parser.add_argument("--experiment", default=EXPERIMENT)
+    parser.add_argument("--methods", default=",".join(METHODS))
+    parser.add_argument("--baseline", default=BASELINE)
+    args = parser.parse_args()
+    SIM_OUTPUT_DIR = os.path.abspath(args.input_dir)
+    OUTPUT_DIR = os.path.abspath(args.output_dir)
+    EXPERIMENT = args.experiment
+    METHODS = [item.strip() for item in args.methods.split(",") if item.strip()]
+    BASELINE = args.baseline
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
     print(f"\n{'='*60}")
     print(f"CoPTER 分析：ACC vs SOR — {EXPERIMENT}")
     print(f"输出目录：{OUTPUT_DIR}")

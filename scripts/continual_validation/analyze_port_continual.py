@@ -6,6 +6,7 @@ import csv
 import json
 import statistics
 from pathlib import Path
+import sys
 
 from analyze_forgetting import load_eval, summarize
 from analyze_port_path_sweep import (
@@ -17,6 +18,11 @@ from analyze_port_path_sweep import (
     pfc_summary,
     read_trace,
 )
+
+ROOT = Path(__file__).resolve().parents[2]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+from tools.analysis.metrics_core import summarize_watch_port_trace
 
 
 def parse_ports(value):
@@ -62,16 +68,7 @@ def frozen_port_summary(directory, port, buffer_kb):
     )
     detail = metric_detail(metrics, port)
     trace = read_trace(directory / "watch_trace.jsonl", port)
-    congested = [item for item in trace if item.get("congested")]
-    population = congested or [item for item in trace if item.get("active")]
-    queue = [
-        item["peak_queue"] * buffer_kb
-        for item in population if item.get("peak_queue") is not None
-    ]
-    ecn = [
-        item["avg_ecn"] for item in population
-        if item.get("avg_ecn") is not None
-    ]
+    trace_summary = summarize_watch_port_trace(trace, buffer_kb)
     stop = config_value(directory / "input.conf", "SIMULATOR_STOP_TIME", 0.0)
     pfc = pfc_summary(
         find_single(directory, ".pfc"), detail.get("identifier"), stop
@@ -85,15 +82,13 @@ def frozen_port_summary(directory, port, buffer_kb):
         "tail_safe_raw_congested": nested(
             detail, "congested", "tail_safe_raw"
         ),
-        "queue_mean_kb": sum(queue) / len(queue) if queue else None,
-        "queue_p95_kb": percentile(queue, 0.95),
-        "queue_max_kb": max(queue, default=None),
-        "ecn_mean": sum(ecn) / len(ecn) if ecn else None,
-        "ecn_p95": percentile(ecn, 0.95),
-        "ecn_max": max(ecn, default=None),
-        "ecn_positive_ratio": (
-            sum(value > 0 for value in ecn) / len(ecn) if ecn else None
-        ),
+        "queue_mean_kb": trace_summary["queue_mean_kb"],
+        "queue_p95_kb": trace_summary["queue_p95_kb"],
+        "queue_max_kb": trace_summary["queue_max_kb"],
+        "ecn_mean": trace_summary["ecn_mean"],
+        "ecn_p95": trace_summary["ecn_p95"],
+        "ecn_max": trace_summary["ecn_max"],
+        "ecn_positive_ratio": trace_summary["ecn_positive_ratio"],
         **pfc,
     }
 
@@ -152,6 +147,71 @@ def write_training_plots(run_dir, records, ports):
         plt.close(figure)
         outputs.append(str(output))
     return outputs
+
+
+def write_training_overview(run_dir, records, ports):
+    """Plot the real per-epoch reward/loss series for all watched ports."""
+    try:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+    except ImportError:
+        return None
+    figure, axes = plt.subplots(2, 1, figsize=(12, 8), sharex=True)
+    boundary = None
+    plotted = False
+    for port in ports:
+        samples = []
+        for record in records:
+            detail = record.get("train_port_metrics", {}).get(str(port))
+            if record.get("phase") in ("train_a", "train_b") and detail:
+                samples.append((record, detail))
+        if not samples:
+            continue
+        plotted = True
+        port_boundary = sum(
+            record.get("phase") == "train_a" for record, _ in samples
+        )
+        if boundary is None:
+            boundary = port_boundary
+        x = list(range(1, len(samples) + 1))
+        axes[0].plot(
+            x,
+            [detail.get("batch_reward_mean") for _, detail in samples],
+            linewidth=1.6,
+            label=f"port {port}",
+        )
+        axes[1].plot(
+            x,
+            [detail.get("loss_mean") for _, detail in samples],
+            linewidth=1.4,
+            label=f"port {port}",
+        )
+    if not plotted:
+        plt.close(figure)
+        return None
+    axes[0].set_ylabel("Batch reward")
+    axes[1].set_ylabel("Mean TD loss")
+    axes[1].set_xlabel("Port training epoch")
+    axes[1].set_yscale("symlog", linthresh=1e-3)
+    for axis in axes:
+        axis.grid(alpha=0.25)
+        if boundary:
+            axis.axvline(boundary + 0.5, color="black", linestyle="--")
+    axes[0].text(
+        boundary + 0.8 if boundary else 1,
+        axes[0].get_ylim()[1],
+        "A → B",
+        va="top",
+        ha="left",
+    )
+    axes[0].legend(ncol=3, fontsize=8)
+    figure.suptitle("ACC watched ports: training reward and DDQN loss")
+    figure.tight_layout()
+    output = run_dir / "port_training_overview.png"
+    figure.savefig(output, dpi=180)
+    plt.close(figure)
+    return str(output)
 
 
 def main():
@@ -273,6 +333,10 @@ def main():
                 "before": before,
                 "after": after,
             })
+    plots = write_training_plots(args.run_dir, records, ports)
+    overview = write_training_overview(args.run_dir, records, ports)
+    if overview:
+        plots.append(overview)
     result = {
         "run_id": manifest["run_id"],
         "task_a": task_a,
@@ -281,7 +345,7 @@ def main():
         "training": training_rows,
         "evaluation": evaluation_rows,
         "comparisons": comparisons,
-        "plots": write_training_plots(args.run_dir, records, ports),
+        "plots": plots,
     }
     (args.run_dir / "port_continual_analysis.json").write_text(
         json.dumps(result, indent=2, sort_keys=True) + "\n", encoding="utf-8"

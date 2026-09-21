@@ -4,43 +4,18 @@
 import argparse
 import csv
 import json
-import math
-from collections import defaultdict
 from pathlib import Path
-from statistics import mean
+import sys
 
+ROOT = Path(__file__).resolve().parents[2]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+from tools.analysis.metrics_core import (
+    expected_flow_count,
+    parse_fct,
+    summarize_fct,
+)
 
-def percentile(values, fraction):
-    if not values:
-        return None
-    ordered = sorted(values)
-    position = (len(ordered) - 1) * fraction
-    low = int(math.floor(position))
-    high = int(math.ceil(position))
-    if low == high:
-        return ordered[low]
-    return ordered[low] + (ordered[high] - ordered[low]) * (position - low)
-
-
-def parse_fct(path):
-    flows = {}
-    occurrences = defaultdict(int)
-    with path.open(encoding="utf-8") as handle:
-        for line_number, line in enumerate(handle, 1):
-            fields = line.split()
-            if not fields:
-                continue
-            if len(fields) < 8:
-                raise ValueError(f"{path}:{line_number}: expected at least 8 columns")
-            base_key = tuple(fields[:6])
-            occurrence = occurrences[base_key]
-            occurrences[base_key] += 1
-            key = base_key + (occurrence,)
-            fct_ns = float(fields[6])
-            ideal_ns = float(fields[7])
-            if fct_ns > 0 and ideal_ns > 0:
-                flows[key] = (fct_ns, ideal_ns)
-    return flows
 
 
 def load_eval(directory):
@@ -51,7 +26,7 @@ def load_eval(directory):
     metrics_file = directory / "metrics.json"
     if not input_flow.exists() or not metrics_file.exists():
         raise ValueError(f"incomplete evaluation directory: {directory}")
-    expected = int(input_flow.read_text(encoding="utf-8").splitlines()[0])
+    expected = expected_flow_count(input_flow)
     metrics = json.loads(metrics_file.read_text(encoding="utf-8"))
     # The registered reward follows all congested ports, which is closer to
     # the replay population optimized by ACC/SOR.  The former top-30% metric
@@ -62,6 +37,8 @@ def load_eval(directory):
         primary_reward = metrics.get("rollout_mean_reward")
     return {
         "directory": directory,
+        "fct_path": fct_files[0],
+        "flow_path": input_flow,
         "flows": parse_fct(fct_files[0]),
         "expected": expected,
         "reward": number_or_none(primary_reward),
@@ -75,23 +52,17 @@ def number_or_none(value):
 
 
 def summarize(run, common_keys=None):
-    selected = (
-        run["flows"]
-        if common_keys is None
-        else {key: run["flows"][key] for key in common_keys}
+    authoritative = summarize_fct(
+        run["fct_path"], run["flow_path"], common_keys=common_keys
     )
-    fct_us = [value[0] / 1000.0 for value in selected.values()]
-    slowdowns = [max(1.0, value[0] / value[1]) for value in selected.values()]
     return {
-        "expected_flows": run["expected"],
-        "completed_flows": len(run["flows"]),
-        "matched_flows": len(selected),
-        "completion_ratio": (
-            len(run["flows"]) / run["expected"] if run["expected"] else None
-        ),
-        "avg_fct_us": mean(fct_us) if fct_us else None,
-        "p95_fct_us": percentile(fct_us, 0.95),
-        "p99_slowdown": percentile(slowdowns, 0.99),
+        "expected_flows": authoritative["expected_flows"],
+        "completed_flows": authoritative["completed_flows"],
+        "matched_flows": authoritative["matched_flows"],
+        "completion_ratio": authoritative["completion_ratio"],
+        "avg_fct_us": authoritative["mean_fct_us"],
+        "p95_fct_us": authoritative["p95_fct_us"],
+        "p99_slowdown": authoritative["p99_slowdown"],
         "reward": run["reward"],
     }
 

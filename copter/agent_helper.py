@@ -10,6 +10,7 @@ import pickle
 import random
 import resource
 import time
+import torch
 from dataclasses import replace
 from collections import deque
 from loguru import logger
@@ -192,6 +193,9 @@ class AgentHelper:
 
     def _shared_rb_path(self):
         return os.path.join(self.model_dir, f"{self.exp_name}_shared_rb.pkl")
+
+    def _rng_state_path(self):
+        return os.path.join(self.model_dir, f"{self.exp_name}_rng.pkl")
 
     def _metrics_path(self):
         return os.path.join(self.model_dir, f"{self.exp_name}_metrics.jsonl")
@@ -435,6 +439,7 @@ class AgentHelper:
             agent.load_model(self.model_dir, override_name)
 
         # ---- Load replay buffers (per port) ----
+        missing_local = []
         for i, rb in enumerate(self.rb_pool):
             rb_path = self._rb_path(i)
             if os.path.exists(rb_path):
@@ -446,6 +451,7 @@ class AgentHelper:
                 except Exception as e:
                     logger.warning(f"Failed to load replay buffer at {rb_path}: {e}")
             else:
+                missing_local.append(rb_path)
                 logger.warning(f"No replay buffer found for port {i} at {rb_path} (cold start).")
 
         # ---- Load shared replay buffer ----
@@ -470,6 +476,20 @@ class AgentHelper:
             try:
                 with open(ts_path, "r") as f:
                     ts = json.load(f)
+                saved_space = ts.get("action_space", self.acc_action_space)
+                if saved_space != self.acc_action_space:
+                    raise ValueError(
+                        f"ACC action-space mismatch: checkpoint={saved_space}, "
+                        f"requested={self.acc_action_space}"
+                    )
+                saved_interval = int(
+                    ts.get("target_update_interval", self.p.target_update_interval)
+                )
+                if saved_interval != self.p.target_update_interval:
+                    raise ValueError(
+                        f"ACC target interval mismatch: checkpoint={saved_interval}, "
+                        f"requested={self.p.target_update_interval}"
+                    )
                 self.global_train_step = int(ts.get("global_train_step", 0))
                 self.global_env_step = int(ts.get("global_env_step", 0))
                 saved_phase = ts.get("phase")
@@ -508,9 +528,31 @@ class AgentHelper:
                     f"epsilon={self.epsilon:.4f}, epoch={self.epoch}"
                 )
             except Exception as e:
-                logger.warning(f"Failed to load train_state at {ts_path}: {e}; using defaults.")
+                raise RuntimeError(f"Failed to load train_state at {ts_path}") from e
         else:
             logger.info(f"No train_state found at {ts_path}; starting fresh from epsilon={self.p.epsilon_start}.")
+
+        if self.global_train_step > 0 and missing_local:
+            raise RuntimeError(
+                "Missing local ACC replay snapshots; refusing an inexact "
+                f"restart ({len(missing_local)} files missing)"
+            )
+        if self.global_train_step > 0 and self.p.shared_replay_enabled and not os.path.exists(shared_rb_path):
+            raise RuntimeError("Missing shared ACC replay snapshot; refusing an inexact restart")
+        rng_path = self._rng_state_path()
+        if os.path.exists(rng_path):
+            try:
+                with open(rng_path, "rb") as handle:
+                    rng = pickle.load(handle)
+                random.setstate(rng["python"])
+                np.random.set_state(rng["numpy"])
+                torch.set_rng_state(rng["torch"].cpu())
+                if torch.cuda.is_available() and rng.get("torch_cuda") is not None:
+                    torch.cuda.set_rng_state_all(rng["torch_cuda"])
+            except Exception as exc:
+                raise RuntimeError(f"Failed to restore ACC RNG state {rng_path}") from exc
+        elif self.global_train_step > 0:
+            raise RuntimeError("Missing ACC RNG snapshot; refusing an inexact restart")
 
         # advance epoch counter for THIS run
         self.epoch += 1
@@ -524,7 +566,7 @@ class AgentHelper:
                 data = pickle.dumps(list(rb.buffer), protocol=pickle.HIGHEST_PROTOCOL)
                 self._atomic_write_bytes(self._rb_path(i), data)
             except Exception as e:
-                logger.warning(f"Failed to save replay buffer for port {i}: {e}")
+                raise RuntimeError(f"Failed to save replay buffer for port {i}") from e
         # Shared replay buffer. Local-only ablations deliberately never read or
         # write this file, preventing stale global experience from leaking in.
         if self.p.shared_replay_enabled:
@@ -532,7 +574,23 @@ class AgentHelper:
                 data = pickle.dumps(list(self.shared_rb), protocol=pickle.HIGHEST_PROTOCOL)
                 self._atomic_write_bytes(self._shared_rb_path(), data)
             except Exception as e:
-                logger.warning(f"Failed to save shared replay buffer: {e}")
+                raise RuntimeError("Failed to save shared replay buffer") from e
+        try:
+            rng = {
+                "python": random.getstate(),
+                "numpy": np.random.get_state(),
+                "torch": torch.get_rng_state(),
+                "torch_cuda": (
+                    torch.cuda.get_rng_state_all()
+                    if torch.cuda.is_available() else None
+                ),
+            }
+            self._atomic_write_bytes(
+                self._rng_state_path(),
+                pickle.dumps(rng, protocol=pickle.HIGHEST_PROTOCOL),
+            )
+        except Exception as exc:
+            raise RuntimeError("Failed to save ACC RNG state") from exc
         # Train state
         ts = {
             "global_train_step": int(self.global_train_step),
@@ -552,6 +610,7 @@ class AgentHelper:
             "target_update_interval": int(self.p.target_update_interval),
             "target_update_count": int(self._target_update_count),
             "last_target_update_step": int(self._last_target_update_step),
+            "action_space": self.acc_action_space,
         }
         ts.update({
             key: value for key, value in {
@@ -564,7 +623,7 @@ class AgentHelper:
         try:
             self._atomic_write_text(self._train_state_path(), json.dumps(ts))
         except Exception as e:
-            logger.warning(f"Failed to save train_state: {e}")
+            raise RuntimeError("Failed to save ACC train_state") from e
 
     def save(self):
         # Save all agents' models

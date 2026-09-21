@@ -6,14 +6,22 @@ import csv
 import json
 import math
 from pathlib import Path
+import sys
 
-from analyze_forgetting import load_eval, percentile, summarize
+from analyze_forgetting import load_eval, summarize
 from analyze_fct_steps import build_artifacts as build_fct_step_artifacts
 from analyze_port_continual import frozen_port_summary
 from run_return_a import read, write
 
+ROOT = Path(__file__).resolve().parents[2]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+from tools.analysis.metrics_core import percentile
 
-LOWER_BETTER = {"avg_fct_us", "p95_fct_us", "p99_slowdown"}
+
+LOWER_BETTER = {
+    "avg_fct_us", "p95_fct_us", "p99_slowdown", "queue", "ecn",
+}
 NETWORK_METRICS = (
     "reward", "throughput", "avg_fct_us", "p95_fct_us", "p99_slowdown",
     "completion_ratio", "queue", "ecn",
@@ -85,6 +93,41 @@ def network_analysis(root, protocol):
                 "common_flows": b_common, "after_a": before, "aa": None,
                 "ab": after, "aa_corrected_degradation": change,
             })
+    return rows
+
+
+def retention_trajectory_analysis(root, protocol):
+    """Build the matched-AA old-task trajectory at every B checkpoint."""
+    task = protocol["manifest"]["task_a"]
+    a_end = protocol["a_points"][-1]
+    rows = []
+    for point in protocol["b_points"]:
+        for method in protocol["methods"]:
+            locations = {
+                "after_a": root / "eval" / method / f"a_{a_end}" / task,
+                "aa": root / "eval" / method / f"aa_{point}" / task,
+                "ab": root / "eval" / method / f"ab_{point}" / task,
+            }
+            runs = {name: load_eval(path) for name, path in locations.items()}
+            summaries, common = common_summary(list(runs.values()))
+            values = {
+                name: enrich(summary, runs[name])
+                for name, summary in zip(runs, summaries)
+            }
+            for metric in NETWORK_METRICS:
+                rows.append({
+                    "method": method,
+                    "b_updates": point,
+                    "task": task,
+                    "metric": metric,
+                    "common_flows": common,
+                    "after_a": values["after_a"].get(metric),
+                    "aa": values["aa"].get(metric),
+                    "ab": values["ab"].get(metric),
+                    "aa_corrected_degradation": adjusted(
+                        values["after_a"], values["aa"], values["ab"], metric
+                    ),
+                })
     return rows
 
 
@@ -224,7 +267,7 @@ def resource_diagnostics(root, protocol):
     return rows
 
 
-def write_plots(root, protocol, network, ports):
+def write_plots(root, protocol, network, trajectory, ports, resources):
     try:
         import matplotlib
         matplotlib.use("Agg")
@@ -247,6 +290,36 @@ def write_plots(root, protocol, network, ports):
     output = root / "network_forgetting.png"; figure.savefig(output, dpi=180); plt.close(figure)
     outputs.append(output)
 
+    # Show whether forgetting is immediate or delayed.  Every point is a
+    # frozen-A evaluation corrected by its matched AA continuation.
+    trajectory_metrics = [
+        "reward", "throughput", "avg_fct_us", "p95_fct_us",
+        "p99_slowdown", "completion_ratio",
+    ]
+    figure, axes = plt.subplots(2, 3, figsize=(14, 7.5))
+    for axis, metric in zip(axes.flat, trajectory_metrics):
+        for method in protocol["methods"]:
+            selected = sorted(
+                (row for row in trajectory
+                 if row["method"] == method and row["metric"] == metric),
+                key=lambda row: row["b_updates"],
+            )
+            axis.plot(
+                [row["b_updates"] for row in selected],
+                [100 * row["aa_corrected_degradation"] for row in selected],
+                marker="o", label=method,
+            )
+        axis.axhline(0, color="black", linewidth=.8)
+        axis.set_title(metric)
+        axis.set_xlabel("Task-B optimizer updates")
+        axis.set_ylabel("AA-corrected degradation (%)")
+        axis.grid(alpha=.3)
+    axes[0, 0].legend()
+    figure.suptitle("Frozen Task-A retention trajectory")
+    figure.tight_layout()
+    output = root / "retention_trajectory.png"
+    figure.savefig(output, dpi=180); plt.close(figure); outputs.append(output)
+
     port_metrics = ["reward_congested_adjusted", "queue_p95_kb_adjusted",
                     "ecn_mean_adjusted", "pfc_pause_duty_adjusted"]
     figure, axes = plt.subplots(2, 2, figsize=(11, 7))
@@ -266,6 +339,70 @@ def write_plots(root, protocol, network, ports):
     figure.tight_layout()
     output = root / "port_forgetting_distribution.png"; figure.savefig(output, dpi=180); plt.close(figure)
     outputs.append(output)
+
+    # Aggregate the per-port training diagnostics so the report contains one
+    # readable reward/loss/Q overview in addition to detailed port figures.
+    records_by_method = {
+        method: training_records(root, protocol, method)
+        for method in protocol["methods"]
+    }
+    if any(records_by_method.values()):
+        figure, axes = plt.subplots(3, len(protocol["methods"]), figsize=(13, 9),
+                                   squeeze=False, sharex="col")
+        for column, method in enumerate(protocol["methods"]):
+            records = records_by_method[method]
+            boundary = sum(record.get("phase") == "train_a" for record in records)
+            x = list(range(1, len(records) + 1))
+            reward, loss, q_pred, q_target = [], [], [], []
+            for record in records:
+                details = list(record.get("train_port_metrics", {}).values())
+                rewards = [float(item["batch_reward_mean"]) for item in details
+                           if item.get("batch_reward_mean") is not None]
+                losses = sorted(float(item["loss_mean"]) for item in details
+                                if item.get("loss_mean") is not None)
+                reward.append(sum(rewards) / len(rewards) if rewards else math.nan)
+                loss.append(percentile(losses, .5) if losses else math.nan)
+                q_pred.append(max([float(item.get("q_prediction_abs_max", 0))
+                                   for item in details] or [math.nan]))
+                q_target.append(max([float(item.get("q_target_abs_max", 0))
+                                     for item in details] or [math.nan]))
+            axes[0, column].plot(x, reward, color="tab:blue")
+            axes[0, column].set_ylabel("Mean batch reward")
+            axes[1, column].plot(x, loss, color="tab:red")
+            axes[1, column].set_yscale("symlog", linthresh=1e-4)
+            axes[1, column].set_ylabel("Median port loss")
+            axes[2, column].plot(x, q_pred, label="Q prediction")
+            axes[2, column].plot(x, q_target, label="Q target")
+            axes[2, column].set_ylabel("Absolute max Q")
+            axes[2, column].set_xlabel("Training epoch")
+            axes[2, column].legend()
+            axes[0, column].set_title(method)
+            for axis in axes[:, column]:
+                axis.grid(alpha=.25)
+                if 0 < boundary < len(records):
+                    axis.axvline(boundary + .5, color="black", linestyle="--")
+        figure.suptitle("Training reward, loss and Q-value diagnostics")
+        figure.tight_layout()
+        output = root / "training_overview.png"
+        figure.savefig(output, dpi=180); plt.close(figure); outputs.append(output)
+
+    # Resource cost is part of the paper claim because SOR adds a global
+    # memory and extra regularization work.
+    figure, axes = plt.subplots(1, 2, figsize=(10, 4))
+    labels = [row["method"] for row in resources]
+    axes[0].bar(labels, [float(row["wall_time_seconds"] or 0) / 3600
+                         for row in resources])
+    axes[0].set_ylabel("Training time (hours)")
+    axes[0].set_title("Runtime")
+    axes[1].bar(labels, [float(row["max_rss_mb"] or 0) for row in resources])
+    axes[1].set_ylabel("Peak RSS (MB)")
+    axes[1].set_title("Memory")
+    for axis in axes:
+        axis.grid(axis="y", alpha=.3)
+    figure.suptitle("Training resource overhead")
+    figure.tight_layout()
+    output = root / "resource_overhead.png"
+    figure.savefig(output, dpi=180); plt.close(figure); outputs.append(output)
 
     for method in protocol["methods"]:
         records = training_records(root, protocol, method)
@@ -314,12 +451,14 @@ def main():
     if not (root / "continue_complete.json").exists():
         raise ValueError("continue stage is incomplete")
     network = network_analysis(root, protocol)
+    trajectory = retention_trajectory_analysis(root, protocol)
     ports = port_analysis(root, protocol)
     resources = resource_diagnostics(root, protocol)
     write_csv(root / "network_metrics.csv", network)
+    write_csv(root / "retention_trajectory.csv", trajectory)
     write_csv(root / "port_metrics.csv", ports)
     write_csv(root / "resource_diagnostics.csv", resources)
-    outputs = write_plots(root, protocol, network, ports)
+    outputs = write_plots(root, protocol, network, trajectory, ports, resources)
     _, fct_plot = build_fct_step_artifacts(root)
     if fct_plot is not None:
         outputs.append(fct_plot)
@@ -339,6 +478,31 @@ def main():
                     if row["method"] == method and row["task"] == protocol["manifest"]["task_a"]}
         lines.append("| " + method + " | " + " | ".join(pct(selected.get(metric)) for metric in
                      ("reward", "throughput", "avg_fct_us", "p95_fct_us", "p99_slowdown", "completion_ratio")) + " |")
+    lines += ["", "## Old-task retention trajectory", "",
+              "| B updates | Method | Reward | Throughput | Avg FCT | p95 FCT | p99 slowdown | Completion |",
+              "|---:|---|---:|---:|---:|---:|---:|---:|"]
+    for point in protocol["b_points"]:
+        for method in protocol["methods"]:
+            selected = {
+                row["metric"]: row["aa_corrected_degradation"]
+                for row in trajectory
+                if row["method"] == method and row["b_updates"] == point
+            }
+            lines.append(
+                f"| {point} | {method} | " + " | ".join(
+                    pct(selected.get(metric)) for metric in
+                    ("reward", "throughput", "avg_fct_us", "p95_fct_us",
+                     "p99_slowdown", "completion_ratio")
+                ) + " |"
+            )
+    lines += ["", "## Final old-task queue and ECN", "",
+              "Negative change is improvement; positive change is degradation.", "",
+              "| Method | Queue | ECN |",
+              "|---|---:|---:|"]
+    for method in protocol["methods"]:
+        selected = {row["metric"]: row["aa_corrected_degradation"] for row in network
+                    if row["method"] == method and row["task"] == protocol["manifest"]["task_a"]}
+        lines.append(f"| {method} | {pct(selected.get('queue'))} | {pct(selected.get('ecn'))} |")
     lines += ["", "## Task-B final performance", "",
               "| Method | Reward | Throughput | Avg FCT | p95 FCT | p99 slowdown | Completion |",
               "|---|---:|---:|---:|---:|---:|---:|"]
@@ -350,8 +514,10 @@ def main():
                      f"{fmt(selected.get('p99_slowdown'))} | {pct(selected.get('completion_ratio'))} |")
     lines += ["", "## Artifacts", "",
               "- `network_metrics.csv`: raw after-A/AA/AB values and corrected changes.",
+              "- `retention_trajectory.csv`: B100/B300/B600 matched-AA retention trajectory.",
               "- `port_metrics.csv`: all measured active ports, including the six representative ports."]
     lines += ["- `fct_step_summary.csv`: per-episode step-trace coverage and mean FCT.",
+              "- `fct_epoch_summary.csv`: exact mean FCT and completed-flow count for each training epoch; p95 is the rolling value at epoch end.",
               "- `fct_training_curves.png`: FCT observed at each global optimizer update."]
     lines += ["", "## Resource and stability diagnostics", "",
               "| Method | Time (s) | Peak RSS (MB) | Q pred max | Q target max | TD max | Q inflation events | Local replay | Global replay |",
@@ -362,11 +528,37 @@ def main():
                      f"{fmt(row['td_error_abs_max'])} | {row['q_inflation_events']} | "
                      f"{row['local_replay_size'] or 0} | {row['global_replay_size'] or 0} |")
     lines += ["", "SOR A/B retained and sampled composition is recorded in `resource_diagnostics.csv`."]
-    for output in outputs:
-        lines.append(f"- `{output.name}`")
+    lines += [
+        "", "## Figures", "",
+        "### Frozen Task-A retention trajectory", "",
+        "![Frozen Task-A retention trajectory](retention_trajectory.png)", "",
+        "### Final matched-AA old-task degradation", "",
+        "![Final matched-AA degradation](network_forgetting.png)", "",
+        "### Per-port old-task changes", "",
+        "![Per-port changes](port_forgetting_distribution.png)", "",
+        "### Training reward, loss and Q values", "",
+        "The dashed line marks the A→B transition. Batch reward after the line belongs to Task B and is not an old-task retention measurement.", "",
+        "![Training overview](training_overview.png)", "",
+        "### Per-step training FCT", "",
+        "AA is Task-A continuation and AB is Task-B training. They are separated by panel and must not be compared as the same workload.", "",
+        "![Per-step FCT](fct_training_curves.png)", "",
+        "### Per-epoch FCT", "",
+        "Mean FCT and completed-flow count are exact epoch aggregates. The p95 line is the rolling p95 observed at the end of each epoch; it is not reconstructed from step-level percentiles.", "",
+        "![Per-epoch FCT](fct_epoch_curves.png)", "",
+        "### Resource overhead", "",
+        "![Resource overhead](resource_overhead.png)", "",
+        "### Representative-port training curves", "",
+        "| Port | ACC-local | SOR |", "|---:|---|---|",
+    ]
+    for port in protocol["representative_ports"]:
+        lines.append(
+            f"| {port} | ![ACC-local port {port}](training_acc_local_p{port}.png) "
+            f"| ![SOR port {port}](training_sor_p{port}.png) |"
+        )
     (root / "REPORT.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
-    write(root / "analysis.json", {"network": network, "ports": ports,
-                                    "resources": resources})
+    write(root / "analysis.json", {"network": network,
+                                    "retention_trajectory": trajectory,
+                                    "ports": ports, "resources": resources})
     print(f"Analysis written to {root / 'REPORT.md'}")
 
 

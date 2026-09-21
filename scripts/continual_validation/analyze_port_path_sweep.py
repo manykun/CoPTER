@@ -5,19 +5,19 @@ import argparse
 import csv
 import json
 from pathlib import Path
+import sys
 
 from analyze_forgetting import load_eval, summarize
 
+ROOT = Path(__file__).resolve().parents[2]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+from tools.analysis.metrics_core import (
+    parse_pfc,
+    percentile,
+    summarize_watch_port_trace,
+)
 
-def percentile(values, fraction):
-    values = sorted(value for value in values if value is not None)
-    if not values:
-        return None
-    position = (len(values) - 1) * fraction
-    lower = int(position)
-    upper = min(lower + 1, len(values) - 1)
-    weight = position - lower
-    return values[lower] * (1 - weight) + values[upper] * weight
 
 
 def metric_detail(metrics, port):
@@ -62,51 +62,21 @@ def pfc_summary(path, identifier, stop_time):
     if not path.exists() or not identifier or "-" not in identifier:
         return result
     try:
-        switch, peer = (int(value) for value in identifier.split("-", 1))
-    except ValueError:
+        key = tuple(int(value) for value in identifier.split("-", 1))
+        _, ports = parse_pfc(path, float(stop_time))
+    except (ValueError, OSError):
         return result
-    events = []
-    has_peer_column = False
-    for line in path.read_text(encoding="utf-8").splitlines():
-        fields = line.split()
-        if len(fields) < 5:
-            continue
-        if len(fields) >= 6:
-            has_peer_column = True
-            if int(fields[1]) != switch or int(fields[5]) != peer:
-                continue
-        else:
-            continue
-        events.append((int(fields[0]) / 1e9, int(fields[4])))
-    if not has_peer_column:
+    detail = ports.get(key)
+    if not detail:
         return result
-    events.sort()
-    paused_at = None
-    durations = []
-    pause_events = 0
-    resume_events = 0
-    for timestamp, event_type in events:
-        if event_type == 1:
-            pause_events += 1
-            if paused_at is None:
-                paused_at = timestamp
-        elif event_type == 0:
-            resume_events += 1
-            if paused_at is not None:
-                durations.append(max(0.0, timestamp - paused_at))
-                paused_at = None
-    final_paused = paused_at is not None
-    if final_paused:
-        durations.append(max(0.0, stop_time - paused_at))
-    total = sum(durations)
     result.update({
         "pfc_mapping_available": True,
-        "pfc_pause_events": pause_events,
-        "pfc_resume_events": resume_events,
-        "pfc_pause_total_s": total,
-        "pfc_pause_duty": total / stop_time if stop_time > 0 else None,
-        "pfc_max_pause_s": max(durations, default=0.0),
-        "pfc_final_paused": final_paused,
+        "pfc_pause_events": detail["pfc_pause_count"],
+        "pfc_resume_events": detail["pfc_resume_count"],
+        "pfc_pause_total_s": detail["pfc_pause_total_s"],
+        "pfc_pause_duty": detail["pfc_duty"],
+        "pfc_max_pause_s": detail["pfc_max_pause_s"],
+        "pfc_final_paused": detail["pfc_final_paused"],
     })
     return result
 
@@ -122,14 +92,13 @@ def summarize_port(directory, port, buffer_kb, point):
     )
     detail = metric_detail(metrics, port)
     trace = read_trace(directory / "watch_trace.jsonl", port)
-    congested = [item for item in trace if item.get("congested")]
-    population = congested or [item for item in trace if item.get("active")]
-    queue_values = [item.get("peak_queue") for item in population]
-    ecn_values = [
-        item["avg_ecn"] for item in population
-        if item.get("avg_ecn") is not None
+    trace_summary = summarize_watch_port_trace(trace, buffer_kb)
+    population = [item for item in trace if item.get(trace_summary["population"])]
+    queue_kb = [
+        item["peak_queue"] * buffer_kb for item in population
+        if item.get("peak_queue") is not None
     ]
-    queue_kb = [value * buffer_kb for value in queue_values if value is not None]
+    ecn_values = [item["avg_ecn"] for item in population if item.get("avg_ecn") is not None]
     kmin = point["physical"]["kmin_kb"]
     kmax = point["physical"]["kmax_kb"]
     config = directory / "input.conf"
@@ -145,11 +114,9 @@ def summarize_port(directory, port, buffer_kb, point):
         "tail_safe_raw_congested": nested(
             detail, "congested", "tail_safe_raw"
         ),
-        "queue_mean_kb": (
-            sum(queue_kb) / len(queue_kb) if queue_kb else None
-        ),
-        "queue_p95_kb": percentile(queue_kb, 0.95),
-        "queue_max_kb": max(queue_kb, default=None),
+        "queue_mean_kb": trace_summary["queue_mean_kb"],
+        "queue_p95_kb": trace_summary["queue_p95_kb"],
+        "queue_max_kb": trace_summary["queue_max_kb"],
         "queue_ge_kmin_ratio": (
             sum(value >= kmin for value in queue_kb) / len(queue_kb)
             if queue_kb else None
@@ -158,15 +125,10 @@ def summarize_port(directory, port, buffer_kb, point):
             sum(value >= kmax for value in queue_kb) / len(queue_kb)
             if queue_kb else None
         ),
-        "ecn_mean": (
-            sum(ecn_values) / len(ecn_values) if ecn_values else None
-        ),
-        "ecn_p95": percentile(ecn_values, 0.95),
-        "ecn_max": max(ecn_values, default=None),
-        "ecn_positive_ratio": (
-            sum(value > 0 for value in ecn_values) / len(ecn_values)
-            if ecn_values else None
-        ),
+        "ecn_mean": trace_summary["ecn_mean"],
+        "ecn_p95": trace_summary["ecn_p95"],
+        "ecn_max": trace_summary["ecn_max"],
+        "ecn_positive_ratio": trace_summary["ecn_positive_ratio"],
         "ecn_deviation_from_003": (
             abs(sum(ecn_values) / len(ecn_values) - 0.03)
             if ecn_values else None
