@@ -18,6 +18,32 @@ SPEC.loader.exec_module(RUN_ABA)
 
 
 class ABASchedulerTest(unittest.TestCase):
+    def test_registered_routes_are_isolated_and_hashed(self):
+        configs = [
+            RUN_ABA.load_config(ROOT / "configs" / "aba" / "webserver_cachefollower.yaml"),
+            RUN_ABA.load_config(ROOT / "configs" / "aba" / "hadoop_alistorage.yaml"),
+        ]
+        for config in configs:
+            RUN_ABA.validate_config(config)
+        ports = [
+            int(config[f"{method}_port"])
+            for config in configs
+            for method in ("acc", "sor")
+        ]
+        self.assertEqual(len(ports), len(set(ports)))
+        self.assertNotEqual(RUN_ABA.runtime_root(configs[0]), RUN_ABA.runtime_root(configs[1]))
+
+        manifest_path = ROOT / "simulation" / "mix" / "aba" / "hadoop_alistorage" / "manifest.json"
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        for task in manifest["tasks"].values():
+            for kind in ("conf", "flow"):
+                path = manifest_path.parent / task[kind]
+                self.assertEqual(RUN_ABA.sha256_file(path), task[f"{kind}_sha256"])
+            generator = ROOT / task["generator_config"]
+            self.assertEqual(
+                RUN_ABA.sha256_file(generator), task["generator_config_sha256"]
+            )
+
     def test_phase_plan_is_contiguous(self):
         protocol = {"epochs": {"a1": 2, "b": 2, "a2": 2}}
         rows = list(RUN_ABA.phase_plan(protocol))
@@ -37,6 +63,22 @@ class ABASchedulerTest(unittest.TestCase):
             self.assertIn(f"FLOW_FILE {flow}", text)
             for directive, suffix in RUN_ABA.OUTPUT_DIRECTIVES.items():
                 self.assertIn(f"{directive} {output / ('result' + suffix)}", text)
+
+    def test_runtime_root_is_route_local(self):
+        aba = {
+            "task_a_conf": "simulation/mix/aba/webserver_cachefollower/task_a_webserver.conf",
+            "task_b_conf": "simulation/mix/aba/webserver_cachefollower/task_b_cachefollower.conf",
+        }
+        cdc = {
+            "task_a_conf": "simulation/mix/aba/hadoop_alistorage/task_c_hadoop.conf",
+            "task_b_conf": "simulation/mix/aba/hadoop_alistorage/task_d_alistorage.conf",
+            "runtime_root": "simulation/mix/aba/hadoop_alistorage/runtime",
+        }
+        self.assertNotEqual(RUN_ABA.runtime_root(aba), RUN_ABA.runtime_root(cdc))
+        self.assertEqual(
+            RUN_ABA.runtime_root(cdc),
+            ROOT / "simulation" / "mix" / "aba" / "hadoop_alistorage" / "runtime",
+        )
 
     def test_resume_refuses_missing_snapshots(self):
         with tempfile.TemporaryDirectory() as directory:

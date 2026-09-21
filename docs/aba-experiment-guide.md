@@ -5,6 +5,13 @@ This pipeline runs the matched curriculum
 ACC and SOR.  It records one row of network metrics per method and epoch and
 keeps port-level measurements separately.
 
+A second independent route is also registered:
+`realistic_hadoop -> realistic_alistorage -> realistic_hadoop`. Running both
+routes produces four isolated arms: ABA-ACC, ABA-SOR, CDC-ACC, and CDC-SOR.
+Both routes keep the same topology, offered load, duration, action space,
+reward, and optimizer settings; the traffic CDF is the intended workload
+change.
+
 ## Canonical inputs
 
 - Experiment configuration: `configs/aba/webserver_cachefollower.yaml`
@@ -13,6 +20,8 @@ keeps port-level measurements separately.
 - Task B configuration: `simulation/mix/aba/webserver_cachefollower/task_b_cachefollower.conf`
 - Task B traffic: `simulation/mix/aba/webserver_cachefollower/task_b_cachefollower.flow`
 - Immutable input hashes: `simulation/mix/aba/webserver_cachefollower/manifest.json`
+- CDC experiment configuration: `configs/aba/hadoop_alistorage.yaml`
+- Task C/D canonical inputs: `simulation/mix/aba/hadoop_alistorage/`
 
 Do not edit canonical inputs after a run has been prepared.  Use a new run ID
 for a scientifically different protocol.
@@ -41,6 +50,23 @@ bash scripts/continual_validation/run_aba.sh \
   --stage all \
   --run-id aba_web_cache_s1
 ```
+
+To smoke-test or run ABA and CDC concurrently (ACC and SOR within each route):
+
+```bash
+bash scripts/continual_validation/run_aba_cdc.sh \
+  --stage smoke \
+  --aba-run-id aba_web_cache_smoke_s1 \
+  --cdc-run-id cdc_hadoop_alistorage_smoke_s1
+
+bash scripts/continual_validation/run_aba_cdc.sh \
+  --stage all \
+  --aba-run-id aba_web_cache_s1 \
+  --cdc-run-id cdc_hadoop_alistorage_s1
+```
+
+The four simulator/Agent pairs use ports 7300, 7301, 7310, and 7311. Run all
+four concurrently only when the host has enough CPU, memory, and disk I/O.
 
 ACC and SOR run concurrently by default on ports 7300 and 7301.  To resume an
 interrupted formal run without cold-starting replay:

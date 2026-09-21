@@ -23,6 +23,12 @@ add constraints but must not weaken these experiment-integrity requirements.
   epsilon state, and global environment/training counters.
 - Never silently cold-start replay, substitute a missing checkpoint, or skip a
   failed epoch.
+- The registered replication route is C1 100 epochs, D 100 epochs, then C2
+  100 epochs. ABA and CDC are independent experiments: models, replay, RNG,
+  ports, runtime configs, raw output, and reports must never be shared between
+  the routes.
+- When ABA and CDC run concurrently, the four arms are ABA-ACC, ABA-SOR,
+  CDC-ACC, and CDC-SOR. Port assignments must be unique across all four arms.
 
 ## Analysis and reporting
 

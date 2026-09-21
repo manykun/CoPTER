@@ -78,6 +78,13 @@ simulation/mix/aba/webserver_cachefollower/*
 !simulation/mix/aba/webserver_cachefollower/task_b_cachefollower.conf
 !simulation/mix/aba/webserver_cachefollower/task_b_cachefollower.flow
 !simulation/mix/aba/webserver_cachefollower/manifest.json
+!simulation/mix/aba/hadoop_alistorage/
+simulation/mix/aba/hadoop_alistorage/*
+!simulation/mix/aba/hadoop_alistorage/task_c_hadoop.conf
+!simulation/mix/aba/hadoop_alistorage/task_c_hadoop.flow
+!simulation/mix/aba/hadoop_alistorage/task_d_alistorage.conf
+!simulation/mix/aba/hadoop_alistorage/task_d_alistorage.flow
+!simulation/mix/aba/hadoop_alistorage/manifest.json
 
 # Small deterministic fixtures are source, not experiment output.
 !tools/analysis/tests/

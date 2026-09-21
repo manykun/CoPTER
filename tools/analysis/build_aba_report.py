@@ -55,7 +55,22 @@ def delta(first, last, key):
     return right - left
 
 
-def make_plots(figures: Path, by_method: dict, port_rows: dict, boundaries: tuple):
+def route_name(protocol):
+    return str(protocol.get("route", "ABA")).upper()
+
+
+def phase_name(protocol, phase):
+    route = route_name(protocol)
+    if len(route) == 3:
+        return {
+            "a1": f"{route[0]}1",
+            "b": route[1],
+            "a2": f"{route[2]}2",
+        }.get(phase, phase.upper())
+    return phase.upper()
+
+
+def make_plots(figures: Path, by_method: dict, port_rows: dict, boundaries: tuple, route: str):
     try:
         import matplotlib
         matplotlib.use("Agg")
@@ -84,7 +99,7 @@ def make_plots(figures: Path, by_method: dict, port_rows: dict, boundaries: tupl
         handles, labels = axes[0].get_legend_handles_labels()
         if handles:
             axes[0].legend(handles, labels)
-        axes[-1].set_xlabel("Global training epoch (A1 -> B -> A2)")
+        axes[-1].set_xlabel(f"Global training epoch ({route[0]}1 -> {route[1]} -> {route[2]}2)")
         fig.tight_layout()
         fig.savefig(figures / filename, dpi=180)
         plt.close(fig)
@@ -242,10 +257,14 @@ def main():
     a1_end = int(protocol["epochs"]["a1"])
     b_end = a1_end + int(protocol["epochs"]["b"])
     total = b_end + int(protocol["epochs"]["a2"])
-    notes = make_plots(run_dir / "figures", by_method, port_rows, (a1_end, b_end, total))
+    route = route_name(protocol)
+    notes = make_plots(
+        run_dir / "figures", by_method, port_rows,
+        (a1_end, b_end, total), route,
+    )
 
     lines = [
-        "# ABA ACC/SOR training report", "",
+        f"# {route} ACC/SOR training report", "",
         f"- Curriculum: **{protocol['tasks']['a']} -> {protocol['tasks']['b']} -> {protocol['tasks']['a']}**",
         f"- Epoch budget: **{protocol['epochs']['a1']} / {protocol['epochs']['b']} / {protocol['epochs']['a2']}**",
         "- Evaluation scope: per-epoch training trajectory; no frozen-policy evaluation.",
@@ -267,7 +286,7 @@ def main():
                 continue
             row = selected[-1]
             lines.append(
-                f"| {method.upper()} | {phase.upper()} | {row['global_epoch']} | {fmt(row.get('reward'),4)} | "
+                f"| {method.upper()} | {phase_name(protocol, phase)} | {row['global_epoch']} | {fmt(row.get('reward'),4)} | "
                 f"{fmt(row.get('loss'),4)} | {fmt(row.get('mean_fct_us'))} | {fmt(row.get('p95_fct_us'))} | "
                 f"{fmt(row.get('p99_fct_us'))} | {fmt(row.get('completion_ratio'),4)} | "
                 f"{fmt(row.get('mean_throughput_mbps'))} | {fmt(row.get('mean_queue_kb'))} | "
@@ -285,7 +304,7 @@ def main():
             first, last = selected[0], selected[-1]
             completion = delta(first, last, "completion_ratio")
             lines.append(
-                f"| {method.upper()} | {phase.upper()} | {fmt(delta(first,last,'reward'),4)} | "
+                f"| {method.upper()} | {phase_name(protocol, phase)} | {fmt(delta(first,last,'reward'),4)} | "
                 f"{fmt(delta(first,last,'loss'),4)} | {fmt(delta(first,last,'p95_fct_us'))} | "
                 f"{fmt(None if completion is None else completion*100,4)} | "
                 f"{fmt(delta(first,last,'mean_queue_kb'))} | {fmt(delta(first,last,'mean_ecn_rate'),6)} |"
@@ -332,7 +351,7 @@ def main():
             retained = row.get("global_replay_task_sizes") or "n/a"
             sampled = row.get("global_replay_task_sample_counts") or "n/a"
             lines.append(
-                f"| {method.upper()} | {phase.upper()} | {fmt(row.get('global_replay_size'),0)} | "
+                f"| {method.upper()} | {phase_name(protocol, phase)} | {fmt(row.get('global_replay_size'),0)} | "
                 f"{fmt(row.get('global_replay_clusters'),0)} | "
                 f"{fmt(row.get('global_replay_boundary_entries'),0)} | "
                 f"{fmt(row.get('global_replay_evictions'),0)} | "

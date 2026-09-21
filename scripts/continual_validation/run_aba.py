@@ -59,6 +59,22 @@ def absolute(path) -> Path:
     return result.resolve() if result.is_absolute() else (ROOT / result).resolve()
 
 
+def runtime_root(config: dict) -> Path:
+    """Return a route-local runtime directory without coupling routes."""
+    configured = config.get("runtime_root")
+    if configured:
+        return absolute(configured)
+    parents = {
+        absolute(config["task_a_conf"]).parent,
+        absolute(config["task_b_conf"]).parent,
+    }
+    if len(parents) != 1:
+        raise ValueError(
+            "task configs live in different directories; configure runtime_root"
+        )
+    return parents.pop() / "runtime"
+
+
 def atomic_json(path: Path, value) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=str(path.parent))
@@ -96,9 +112,14 @@ def validate_config(config: dict) -> None:
         raise ValueError("methods contains duplicates")
     if "acc" in methods and "sor" in methods and int(config["acc_port"]) == int(config["sor_port"]):
         raise ValueError("ACC and SOR ports must differ")
+    if config.get("route"):
+        route = str(config["route"]).upper()
+        if len(route) != 3 or not route.isalpha() or route[0] != route[2]:
+            raise ValueError("route must be a three-letter return route such as ABA or CDC")
     for key in ("task_a_conf", "task_a_flow", "task_b_conf", "task_b_flow"):
         if not absolute(config[key]).is_file():
             raise ValueError(f"configured input does not exist: {config[key]}")
+    runtime_root(config)
 
 
 def protocol(config: dict, config_path: Path, smoke: bool) -> dict:
@@ -117,7 +138,7 @@ def protocol(config: dict, config_path: Path, smoke: bool) -> dict:
             "flow": str(flow.relative_to(ROOT)),
             "flow_sha256": sha256_file(flow),
         }
-    return {
+    result = {
         "schema_version": 1,
         "run_id": str(config["run_id"]),
         "config": str(config_path.resolve()),
@@ -145,6 +166,9 @@ def protocol(config: dict, config_path: Path, smoke: bool) -> dict:
         "sor_global_replay_capacity": 100000,
         "smoke": bool(smoke),
     }
+    if config.get("route"):
+        result["route"] = str(config["route"]).upper()
+    return result
 
 
 def prepare(config: dict, config_path: Path, smoke: bool, allow_existing=True) -> tuple[Path, dict]:
@@ -433,7 +457,7 @@ def _method_worker_locked(config: dict, protocol_data: dict, run_dir: Path, meth
     output_root = ROOT / "simulation" / "output" / "aba" / str(config["run_id"]) / method
     summary_metrics = output_root / "epoch_metrics.csv"
     summary_ports = output_root / "epoch_ports.csv"
-    runtime_root = ROOT / "simulation" / "mix" / "aba" / "webserver_cachefollower" / "runtime" / str(config["run_id"]) / method
+    runtime_dir = runtime_root(config) / str(config["run_id"]) / method
     total_epochs = sum(int(protocol_data["epochs"][phase]) for phase in ("a1", "b", "a2"))
 
     for phase, task_key, phase_epoch, global_epoch in phase_plan(protocol_data):
@@ -446,7 +470,7 @@ def _method_worker_locked(config: dict, protocol_data: dict, run_dir: Path, meth
         raw_dir.mkdir(parents=True, exist_ok=True)
         source_conf = absolute(config[f"task_{task_key}_conf"])
         flow = absolute(config[f"task_{task_key}_flow"])
-        runtime_conf = runtime_root / phase / f"epoch_{global_epoch:04d}.conf"
+        runtime_conf = runtime_dir / phase / f"epoch_{global_epoch:04d}.conf"
         render_runtime_conf(source_conf, flow, raw_dir, runtime_conf, int(config.get("switch_buffer_kb", 400)))
         ensure_exact_resume(method, model_dir, exp_name, global_epoch)
         if (raw_dir / "epoch_metrics.json").exists():
