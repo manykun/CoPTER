@@ -71,14 +71,83 @@ def load_cdf(file_path):
         return [list(map(float, line.strip().split())) for line in f if line.strip()]
 
 
+def expand_hosts(host_spec):
+    """Accept either an explicit host list or an inclusive {start, end} range."""
+    if isinstance(host_spec, list):
+        hosts = [int(host) for host in host_spec]
+    elif isinstance(host_spec, dict) and "start" in host_spec and "end" in host_spec:
+        start = int(host_spec["start"])
+        end = int(host_spec["end"])
+        if end < start:
+            raise ValueError(f"invalid host range: {start}..{end}")
+        hosts = list(range(start, end + 1))
+    else:
+        raise ValueError("hosts must be a list or an inclusive {start, end} object")
+    if not hosts:
+        raise ValueError("host set cannot be empty")
+    return hosts
+
+
+def downsample_flows(flow_list, max_flows):
+    """Evenly downsample a time-sorted flow list for a fast smoke test."""
+    if max_flows < 0:
+        raise ValueError("max_flows cannot be negative")
+    if max_flows == 0 or len(flow_list) <= max_flows:
+        return flow_list
+    original_count = len(flow_list)
+    return [
+        flow_list[(index * original_count) // max_flows]
+        for index in range(max_flows)
+    ]
+
+
+def stratified_cdf_value(distribution, sample_index, sample_count):
+    """Deterministically cover CDF quantiles without ordering them in time."""
+    if sample_count <= 0 or not 0 <= sample_index < sample_count:
+        raise ValueError("invalid stratified CDF sample index/count")
+    stride = sample_count // 2 + 1
+    while math.gcd(stride, sample_count) != 1:
+        stride += 1
+    rank = (sample_index * stride) % sample_count
+    percentile = (rank + 0.5) * 100.0 / sample_count
+    return distribution.getValueFromPercentile(percentile)
+
+
+def periodic_destination_index(
+    src_offset,
+    cycle,
+    destination_count,
+    destination_schedule,
+):
+    """Select a deterministic receiver while preserving endpoint support."""
+    if destination_count <= 0 or not destination_schedule:
+        raise ValueError("periodic destination schedule cannot be empty")
+    if cycle < destination_count:
+        return (src_offset + cycle) % destination_count
+    schedule_index = (
+        src_offset + cycle - destination_count
+    ) % len(destination_schedule)
+    return destination_schedule[schedule_index]
+
+
 def main():
-    random.seed(42)
     parser = OptionParser()
     parser.add_option("-b", "--bandwidth", dest="bandwidth", default="10G",
                       help="bandwidth of host link (G/M/K), default 10G")
     parser.add_option("-c", "--config", dest="group_config", default=None,
                       help="JSON file specifying flow generation groups")
+    parser.add_option("--seed", dest="seed", type="int", default=42,
+                      help="random seed, default 42")
+    parser.add_option("--output-dir", dest="output_dir", default="result",
+                      help="directory for generated flow files")
+    parser.add_option("--name", dest="output_name", default=None,
+                      help="output basename; defaults to the config filename")
+    parser.add_option("--no-json", dest="no_json", action="store_true", default=False,
+                      help="skip the optional per-flow JSON output")
+    parser.add_option("--max-flows", dest="max_flows", type="int", default=0,
+                      help="if positive, deterministically downsample to at most this many flows")
     options, _ = parser.parse_args()
+    random.seed(options.seed)
 
     if not options.group_config:
         print("Usage: --flow-groups <group_file.json> required")
@@ -86,40 +155,53 @@ def main():
 
     bandwidth = translate_bandwidth(options.bandwidth)
     config_dir = os.path.dirname(options.group_config)
-    config_name = os.path.splitext(os.path.basename(options.group_config))[0]
+    config_name = options.output_name or os.path.splitext(os.path.basename(options.group_config))[0]
     if config_name.endswith("_config"):
         config_name = config_name[: -len("_config")]
 
     # 输出路径
-    output_txt = os.path.join("result", config_name+".flow")
-    output_json = os.path.join("result", config_name+"_flows.json")
+    output_txt = os.path.join(options.output_dir, config_name+".flow")
+    output_json = os.path.join(options.output_dir, config_name+"_flows.json")
 
     if bandwidth is None:
         print("Bandwidth format incorrect")
         sys.exit(1)
 
-    # 创建result目录（如果不存在）
-    os.makedirs("result", exist_ok=True)
+    os.makedirs(options.output_dir, exist_ok=True)
 
     with open(options.group_config, 'r') as f:
         group_config = json.load(f)
+    if not isinstance(group_config, list) or not group_config:
+        raise ValueError("traffic configuration must be a non-empty JSON list")
 
     flow_list = []  # 存储所有流，用于全局排序
     flow_count = 0
 
     for group in group_config:
-        print(f"Processing group: src={group['src_hosts'][0]}-{group['src_hosts'][-1]}, cdf={group['cdf']}")
-        src_hosts = group["src_hosts"]
-        dst_hosts = group["dst_hosts"]
+        src_hosts = expand_hosts(group["src_hosts"])
+        dst_hosts = expand_hosts(group["dst_hosts"])
+        print(f"Processing group: src={src_hosts[0]}-{src_hosts[-1]}, cdf={group['cdf']}")
         cdf_path = os.path.join(config_dir, group["cdf"])
         start_time = int(group.get("start_time_s", 2) * 1e9)  # 纳秒
         duration = int(group.get("duration_s", 10) * 1e9)  # 纳秒
         # load = float(group.get("load", 0.3))
         load = float(group["load"]) if "load" in group else random.choice([0.6, 0.7, 0.8])
+        if load <= 0:
+            raise ValueError(f"load must be positive, got {load}")
         pattern = group.get("pattern", "poisson")
         period = float(group.get("period_s", 1)) * 1e9  # 纳秒
         incast_dst_count = int(group.get("incast_dst_count", 1))
+        destination_weights = group.get("destination_weights")
         reduce_group_size = int(group.get("reduce_group_size", 8))
+        burst_jitter_ns = int(group.get("burst_jitter_ns", 1000))
+        spread_fraction = float(group.get("spread_fraction", 0.0))
+        size_sampling = group.get("size_sampling", "random")
+        if size_sampling not in ("random", "stratified"):
+            raise ValueError("size_sampling must be random or stratified")
+        if size_sampling == "stratified" and pattern != "periodic_incast":
+            raise ValueError(
+                "stratified size sampling currently requires periodic_incast"
+            )
 
         # 加载CDF文件
         cdf = load_cdf(cdf_path)
@@ -215,7 +297,130 @@ def main():
                     heapq.heapreplace(host_heap, (t + inter_t, src))
 
         ###########################################################################
-        # 3. 全归约模式（all_reduce）
+        # 3. 周期同步汇聚模式（periodic_incast）
+        ###########################################################################
+        elif pattern == "periodic_incast":
+            if incast_dst_count > len(dst_hosts):
+                raise ValueError(
+                    f"incast_dst_count ({incast_dst_count}) > "
+                    f"len(dst_hosts) ({len(dst_hosts)})"
+                )
+            if period <= 0:
+                raise ValueError("period_s must be positive for periodic_incast")
+            if burst_jitter_ns < 0:
+                raise ValueError("burst_jitter_ns cannot be negative")
+            if not 0.0 <= spread_fraction < 1.0:
+                raise ValueError("spread_fraction must be in [0, 1)")
+            if destination_weights is not None:
+                if len(destination_weights) != incast_dst_count:
+                    raise ValueError(
+                        "destination_weights length must equal incast_dst_count"
+                    )
+                try:
+                    destination_weights = [
+                        int(weight) for weight in destination_weights
+                    ]
+                except (TypeError, ValueError) as exc:
+                    raise ValueError(
+                        "destination_weights must contain positive integers"
+                    ) from exc
+                if any(weight <= 0 for weight in destination_weights):
+                    raise ValueError(
+                        "destination_weights must contain positive integers"
+                    )
+                # Binding weights to the JSON destination order makes a
+                # hotspot task auditable (for example, host 128 remains the
+                # hot receiver).  Existing scenarios without weights retain
+                # their seeded random destination selection.
+                incast_dsts = list(dst_hosts[:incast_dst_count])
+                destination_schedule = [
+                    index
+                    for index, weight in enumerate(destination_weights)
+                    for _ in range(weight)
+                ]
+            else:
+                incast_dsts = random.sample(dst_hosts, k=incast_dst_count)
+                destination_schedule = list(range(incast_dst_count))
+            print(
+                f"Periodic Incast: {len(src_hosts)} sources -> "
+                f"{incast_dst_count} destinations ({incast_dsts}), "
+                f"period={period * 1e-9:g}s, "
+                f"destination_weights={destination_weights or 'uniform'}"
+            )
+            cycle_count = 0
+            while start_time + int(cycle_count * period) < start_time + duration:
+                cycle_count += 1
+            sample_count = cycle_count * len(src_hosts)
+            sample_index = 0
+            cycle = 0
+            while True:
+                cycle_start = start_time + int(cycle * period)
+                if cycle_start >= start_time + duration:
+                    break
+                for src_offset, src in enumerate(src_hosts):
+                    # The first N cycles explicitly cover every source-to-
+                    # destination pair.  Later cycles follow the configured
+                    # weighted schedule.  This preserves identical endpoint
+                    # support between balanced and hotspot tasks while still
+                    # producing a strong spatial workload shift.
+                    if destination_weights is None:
+                        # Preserve the original periodic_incast mapping for
+                        # every pre-existing scenario.
+                        dst_index = src_offset % len(incast_dsts)
+                    else:
+                        dst_index = periodic_destination_index(
+                            src_offset,
+                            cycle,
+                            len(incast_dsts),
+                            destination_schedule,
+                        )
+                    dst = incast_dsts[dst_index]
+                    if dst == src:
+                        alternatives = [candidate for candidate in incast_dsts if candidate != src]
+                        if not alternatives:
+                            raise ValueError(
+                                "periodic_incast source/destination sets create only self-loops"
+                            )
+                        dst = alternatives[src_offset % len(alternatives)]
+                    # Do not consume the traffic-size RNG when placing flows.
+                    # With the same seed, source/destination/size tuples are
+                    # therefore identical for a spread (steady) and clustered
+                    # (burst) scenario; only arrival times differ.
+                    if spread_fraction > 0.0:
+                        denominator = max(1, len(src_hosts) - 1)
+                        jitter = int(
+                            period * spread_fraction * src_offset / denominator
+                        )
+                    elif burst_jitter_ns:
+                        jitter = (
+                            src_offset * 7919 + cycle * 104729
+                        ) % (burst_jitter_ns + 1)
+                    else:
+                        jitter = 0
+                    flow_start = cycle_start + jitter
+                    if size_sampling == "stratified":
+                        sampled_size = stratified_cdf_value(
+                            customRand, sample_index, sample_count
+                        )
+                    else:
+                        sampled_size = customRand.rand()
+                    size = max(1, int(sampled_size))
+                    sample_index += 1
+                    flow_list.append({
+                        "id": flow_count,
+                        "src": int(src),
+                        "dst": int(dst),
+                        "size": int(size),
+                        "start_ns": int(flow_start),
+                        "start_s": flow_start * 1e-9,
+                        "pg": 3,
+                        "dport": 100,
+                    })
+                    flow_count += 1
+                cycle += 1
+
+        ###########################################################################
+        # 4. 全归约模式（all_reduce）
         ###########################################################################
         elif pattern == "all_reduce":
             # 划分All-Reduce组
@@ -262,7 +467,7 @@ def main():
                             flow_count += 1
 
         ###########################################################################
-        # 4. 全对全模式（all_to_all）
+        # 5. 全对全模式（all_to_all）
         ###########################################################################
         elif pattern == "all_to_all":
             # 校验源和目的集合
@@ -322,6 +527,14 @@ def main():
     # 所有流按开始时间（纳秒）排序
     flow_list.sort(key=lambda x: x["start_ns"])
 
+    if options.max_flows > 0 and len(flow_list) > options.max_flows:
+        original_count = len(flow_list)
+        flow_list = downsample_flows(flow_list, options.max_flows)
+        flow_count = len(flow_list)
+        print(f"Downsampled {original_count} generated flows to {flow_count} for smoke testing.")
+    elif options.max_flows < 0:
+        raise ValueError("--max-flows cannot be negative")
+
     # 写入TXT文件（排序后）
     with open(output_txt, "w") as txt_file:
         txt_file.write(f"{flow_count}\n")  # 写入流总数
@@ -342,16 +555,17 @@ def main():
         for flow in flow_list
     ]
 
-    # 写入JSON文件
-    with open(output_json, "w") as json_file:
-        json.dump(
-            json_output, 
-            json_file, 
-            indent=2,
-            default=lambda x: int(x) if isinstance(x, float) and x.is_integer() else x
-        )
+    if not options.no_json:
+        with open(output_json, "w") as json_file:
+            json.dump(
+                json_output,
+                json_file,
+                indent=2,
+                default=lambda x: int(x) if isinstance(x, float) and x.is_integer() else x
+            )
 
-    print(f"Generated {flow_count} flows. Saved to {output_txt} and {output_json}.")
+    destinations = output_txt if options.no_json else f"{output_txt} and {output_json}"
+    print(f"Generated {flow_count} flows with seed {options.seed}. Saved to {destinations}.")
 
 
 if __name__ == "__main__":

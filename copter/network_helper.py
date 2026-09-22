@@ -6,7 +6,12 @@ import numpy as np
 import json
 from collections import deque
 from loguru import logger
-from structures import NetworkHelperParameters, DCQCNParameters, PortObservation
+from structures import (
+    NetworkHelperParameters,
+    DCQCNParameters,
+    PortObservation,
+    calculate_tail_safe_reward,
+)
 
 
 class NetworkHelper:
@@ -68,7 +73,9 @@ class NetworkHelper:
         start_index = port_idx * self.nhp.port_actions
         end_index = start_index + self.nhp.port_actions
         self.action[start_index:end_index] = port_action.k_min_norm, port_action.k_max_norm, port_action.p_max
-        logger.info(f"Step {curr_step} - Port {port_idx} - Action set to {port_action}.")
+        # Per-port INFO logging produces hundreds of thousands of lines on the
+        # 256-host topology. Keep it available only when TRACE is requested.
+        logger.trace(f"Step {curr_step} - Port {port_idx} - Action set to {port_action}.")
         self.action_port_bitmap[port_idx] = 1  # Mark the port as having an action set
 
     # 执行动作并获取新state
@@ -115,25 +122,54 @@ class NetworkHelper:
             else:
                 logger.error("未从NS3获取到port_identifiers，无法正确加载fmap")
                 logger.error(f"解析后的info中无port_identifiers，内容: {parsed_info}")
-            obs = np.array(obs)
         else:
             # 验证所有端口都设置了动作->执行动作->重置动作位图
             assert sum(self.action_port_bitmap) > self.n_port - 1, "Not all ports have actions set. Please check the configurator."
             obs, _, done, info = self.env.step(self.action)
-            # logger.info(obs)
-            print(obs)
-            obs = np.array(obs)
             # print(self.action)    
             self.action_port_bitmap = [0] * self.n_port  # Reset the action bitmap for the next step
+
+        # ns3-gym normally returns observation=None together with done=True for
+        # the terminal notification.  Some ns-3.33/ns3-gym runs close the
+        # simulation socket first and incorrectly leave done=False in that
+        # final reply.  Once at least one environment step has completed there
+        # is no observation to process or action to send, so both variants are
+        # terminal.  Keep step 0 strict: a missing initial observation still
+        # means that the simulator failed to start correctly.
+        if obs is None:
+            if done or curr_step > 0:
+                if done:
+                    logger.info(
+                        f"Step {curr_step} - Terminal notification received "
+                        "without observation."
+                    )
+                else:
+                    logger.warning(
+                        f"Step {curr_step} - ns3-gym returned observation=None "
+                        "with done=False; treating the socket-close reply as "
+                        "terminal."
+                    )
+                return True
+            raise RuntimeError(
+                f"ns3-gym returned observation=None while done={done} at step {curr_step}"
+            )
+
+        obs = np.asarray(obs)
+        expected_size = self.n_port * self.nhp.port_states
+        if obs.ndim != 1 or obs.size != expected_size:
+            raise RuntimeError(
+                f"Invalid ns3 observation at step {curr_step}: "
+                f"shape={obs.shape}, size={obs.size}, expected={expected_size}, done={done}"
+            )
         # state归一化并存储
         for port_idx in range(self.n_port):
             start_index = port_idx * self.nhp.port_states
-            # NOTE: The k_min_norm, k_max_norm, and p_max has been always limited to [20, 50], [50, 100] and [0, 1] range in ns-3 side.
-            #       So there is no need to adjust them even if the buffer size is not set as 400 KB in the ns-3 simulation. However, 
-            #       the queue_length_norm should be adjusted according to the switch buffer size to avoid underestimation of queuing
-            #       level and wrong reward calculation.
+            # ns-3 reports queue occupancy already normalized by the configured
+            # switch buffer.  Scaling it again here would double-normalize the
+            # state and make otherwise identical experiments depend on whether
+            # BUFFER_SIZE happens to be 400 KB.
             port_obs = PortObservation(
-                queue_length_norm=min(1, obs[start_index] * self.nhp.switch_buffer_size / 400),
+                queue_length_norm=float(np.clip(obs[start_index], 0.0, 1.0)),
                 tx_rate_norm=obs[start_index + 1],
                 ecn_rate_norm=obs[start_index + 2],
                 k_min_norm=obs[start_index + 3],
@@ -145,7 +181,7 @@ class NetworkHelper:
             self.qlen_window[port_idx].append(port_obs.queue_length_norm)
             self.ecn_window[port_idx].append(port_obs.ecn_rate_norm)
             self.txrate_window[port_idx].append(port_obs.tx_rate_norm)
-            logger.info(f"Step {curr_step} - Port {port_idx} - Observation {port_obs}.")
+            logger.trace(f"Step {curr_step} - Port {port_idx} - Observation {port_obs}.")
 
         logger.info(f"Step {curr_step} - Done {done}")
         return done
@@ -180,7 +216,7 @@ class NetworkHelper:
             curr_port_state_list += self.obs_history[port_idx][history_idx].to_list()
         return curr_port_state_list
     
-    def get_port_current_reward(self, port_idx):
+    def get_port_current_reward_components(self, port_idx):
         """
         Calculate reward for a single port from windowed statistics.
 
@@ -189,7 +225,7 @@ class NetworkHelper:
         2. Meaningful reward gradient ONLY on congested/active ports.
         3. Values bounded in a stable numeric range.
 
-        Reward components (each in [0, 1]):
+        Legacy reward components (each in [0, 1]):
           - r_throughput: link utilization (tx_rate clamped to [0, 1]).
           - r_queue    : penalises queue build-up via exp(-k * combined_qlen).
                          Combined_qlen mixes 70% peak + 30% average so bursts
@@ -234,16 +270,56 @@ class NetworkHelper:
         else:
             r_ecn = float(np.exp(-7.0 * (avg_ecn - ideal_ecn)))
 
-        # Weighted sum. Throughput gets the highest weight: the force-action
-        # sanity study (2026-07) showed r_queue/r_ecn are nearly flat across
-        # good/bad parameter settings in our scenarios, while r_throughput is
-        # the component whose ordering matches the measured FCT ordering.
-        W_THROUGHPUT = 0.50
-        W_QUEUE      = 0.30
-        W_ECN        = 0.20
-        reward = W_THROUGHPUT * r_throughput + W_QUEUE * r_queue + W_ECN * r_ecn
+        # The original weighted profile remains available for reproducing
+        # earlier ACC experiments.  The continual-learning experiment uses a
+        # common tail-safe objective for both traffic tasks.  Squared queue
+        # and ECN costs are deliberately weak at low load and increasingly
+        # strong during bursts, allowing the same objective to prefer a
+        # permissive action in mixed traffic and a safer balanced action in
+        # incast traffic.
+        tail_safe = calculate_tail_safe_reward(
+            r_throughput,
+            avg_qlen,
+            peak_qlen,
+            avg_ecn,
+            peak_ecn,
+            self.nhp.reward_queue_lambda,
+            self.nhp.reward_ecn_lambda,
+        )
+        if self.nhp.reward_profile == "tail_safe":
+            reward = tail_safe["reward"]
+        elif self.nhp.reward_profile == "weighted":
+            reward = (
+                self.nhp.reward_throughput_weight * r_throughput
+                + self.nhp.reward_queue_weight * r_queue
+                + self.nhp.reward_ecn_weight * r_ecn
+            )
+        else:
+            raise ValueError(
+                f"unsupported reward profile: {self.nhp.reward_profile!r}"
+            )
 
-        return reward
+        return {
+            "reward": float(reward),
+            "throughput": float(r_throughput),
+            "queue": float(r_queue),
+            "ecn": float(r_ecn),
+            "avg_tx_rate": float(avg_txrate),
+            "avg_queue": float(avg_qlen),
+            "peak_queue": float(peak_qlen),
+            "avg_ecn": float(avg_ecn),
+            "peak_ecn": float(peak_ecn),
+            "combined_queue": float(tail_safe["combined_queue"]),
+            "combined_ecn": float(tail_safe["combined_ecn"]),
+            "queue_cost_sq": float(tail_safe["queue_cost_sq"]),
+            "ecn_cost_sq": float(tail_safe["ecn_cost_sq"]),
+            "tail_safe_raw": float(tail_safe["raw"]),
+            "tail_safe_clipped": float(tail_safe["reward"]),
+        }
+
+    def get_port_current_reward(self, port_idx):
+        """Return the scalar reward while preserving the historical API."""
+        return self.get_port_current_reward_components(port_idx)["reward"]
 
     def get_port_congestion_score(self, port_idx):
         """Return a scalar quantifying how "interesting" (congested) a port

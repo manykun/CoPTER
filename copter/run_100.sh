@@ -1,37 +1,99 @@
-#!/bin/bash
+#!/usr/bin/env bash
+# Execute exactly one ACC or SOR agent epoch. The ABA scheduler owns iteration.
+set -euo pipefail
 
-# 循环执行100次
-for i in {1..20}
-do
-    echo "=============================="
-    echo "开始第 $i 次执行 (共100次)"
-    echo "=============================="
-    
-    # 执行命令并记录开始时间
-    start_time=$(date +%s)
-    # python copter.py -p 5555 -e copter_experiment_acc_webserver_t0.05_l0.7 --online
-    python copter.py -p 5558 -e experiment_acc --online
-    # python copter.py -p 5555 -e second_copter_experiment_copter_webserver_t0.05_l0.7 -m CoPTER -f fmaps --online
-    # python copter.py -p 5555 -e third_triplehead_copter_experiment_copter_webserver_t0.05_l0.7 -m CoPTER -f fmaps --online
-    # python copter.py -p 5555 -e forth_new_copter_experiment_copter_webserver_t0.05_l0.7 -m CoPTER -f /home/ame/m3-main/parsimon-eval/expts/fig_8/analysis/fmaps_port_level_448ports/_dcqcn_07load_webserver --online
-    # python copter.py -p 5555 -e fifth_new_reward_copter_experiment_copter_webserver_t0.05_l0.7 -m CoPTER -f /home/ame/m3-main/parsimon-eval/expts/fig_8/analysis/fmaps_port_level_448ports/_dcqcn_07load_webserver --online
-    # python copter.py -p 5555 -e seven_new_reward_5paramStep_copter_experiment_copter_webserver_t0.05_l0.7 -m CoPTER -f /home/ame/m3-main/parsimon-eval/expts/fig_8/analysis/fmaps_port_level_448ports/_dcqcn_06load_hadoop_5paramStep --online
-    # python copter.py -p 5555 -e eight_08_02_5paramStep_copter_experiment_copter_webserver_t0.05_l0.7 -m CoPTER -f /home/ame/m3-main/parsimon-eval/expts/fig_8/analysis/fmaps_port_level_448ports/_dcqcn_06load_hadoop_5paramStep --online
-    # python copter.py -p 5555 -e experiment_copter -m CoPTER -f /home/ame/m3-main/parsimon-eval/expts/fig_8/analysis/fmaps_port_level_448ports/_dcqcn_06load_hadoop_5paramStep --online
-    # python copter.py -p 5555 -e experiment_copter_new -m CoPTER -f /home/ame/m3-main/parsimon-eval/expts/fig_8/analysis/fmaps_port_level_448ports/new/_mix_webserver_websearch_hadoop_clusters --online
-    # python copter.py -p 5555 -e experiment_copter_thesis -m CoPTER -f /home/ame/m3-main/parsimon-eval/expts/fig_8/analysis/fmaps_port_level_448ports/_thesis_mix_webserver_websearch_cachefollower_random_1 --online
-    # 计算命令执行时间
-    end_time=$(date +%s)
-    duration=$((end_time - start_time))
-    
-    echo "------------------------------"
-    echo "命令执行完成，耗时: $duration 秒"
-    
-    # 如果不是最后一次执行，则等待30秒
-    if [ $i -lt 20 ]; then
-        echo "等待30秒后开始下一次执行..."
-        sleep 30
-    else
-        echo "已完成所有100次执行"
-    fi
+usage() {
+  cat >&2 <<'EOF'
+Usage: bash copter/run_100.sh --mode ACC|SOR --phase a1|b|a2 --epoch N
+  --port N --exp-name NAME --model-dir DIR --run-id ID --log FILE [options]
+EOF
+}
+
+MODE="" PHASE="" EPOCH="" PORT="" EXP_NAME="" MODEL_DIR="" RUN_ID="" LOG=""
+SEED=1 BUFFER_KB=400 ACTION_SPACE=multiscale HIDDEN_DIMS="32,64,64,32"
+REWARD_PROFILE=tail_safe REWARD_QUEUE_LAMBDA=5 REWARD_ECN_LAMBDA=5
+REWARD_WEIGHTS="0.50,0.30,0.20" EPSILON_START=1 EPSILON_END=0.05
+EPSILON_DECAY=2500 EPSILON_SCHEDULE=global TARGET_INTERVAL=100 SHARED_REPLAY=false
+WATCH_PORTS="" WATCH_TRACE="" FCT_SOURCE="" FCT_TRACE="" TB_ENABLE=false RESUME=false
+SOR_RECENT=200 SOR_BOUNDARY=1000 SOR_CLUSTERS=32 SOR_LAMBDA_CONS=0.01
+SOR_LAMBDA_REG=0.001 SOR_REF_INTERVAL=256 SOR_SYNC_INTERVAL=8 SOR_SAVE_EVERY=1
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --mode) MODE="$2"; shift 2 ;; --phase) PHASE="$2"; shift 2 ;;
+    --epoch) EPOCH="$2"; shift 2 ;; --port) PORT="$2"; shift 2 ;;
+    --exp-name) EXP_NAME="$2"; shift 2 ;; --model-dir) MODEL_DIR="$2"; shift 2 ;;
+    --run-id) RUN_ID="$2"; shift 2 ;; --log) LOG="$2"; shift 2 ;;
+    --seed) SEED="$2"; shift 2 ;; --buffer-kb) BUFFER_KB="$2"; shift 2 ;;
+    --action-space) ACTION_SPACE="$2"; shift 2 ;; --hidden-dims) HIDDEN_DIMS="$2"; shift 2 ;;
+    --reward-profile) REWARD_PROFILE="$2"; shift 2 ;;
+    --reward-queue-lambda) REWARD_QUEUE_LAMBDA="$2"; shift 2 ;;
+    --reward-ecn-lambda) REWARD_ECN_LAMBDA="$2"; shift 2 ;;
+    --reward-weights) REWARD_WEIGHTS="$2"; shift 2 ;;
+    --epsilon-start) EPSILON_START="$2"; shift 2 ;; --epsilon-end) EPSILON_END="$2"; shift 2 ;;
+    --epsilon-decay-steps) EPSILON_DECAY="$2"; shift 2 ;;
+    --epsilon-schedule) EPSILON_SCHEDULE="$2"; shift 2 ;;
+    --target-update-interval) TARGET_INTERVAL="$2"; shift 2 ;;
+    --shared-replay) SHARED_REPLAY="$2"; shift 2 ;;
+    --watch-ports) WATCH_PORTS="$2"; shift 2 ;; --watch-trace-file) WATCH_TRACE="$2"; shift 2 ;;
+    --fct-source-file) FCT_SOURCE="$2"; shift 2 ;; --fct-step-trace-file) FCT_TRACE="$2"; shift 2 ;;
+    --tb-enable) TB_ENABLE="$2"; shift 2 ;; --resume) RESUME=true; shift ;;
+    --sor-recent-size) SOR_RECENT="$2"; shift 2 ;; --sor-boundary-size) SOR_BOUNDARY="$2"; shift 2 ;;
+    --sor-max-clusters) SOR_CLUSTERS="$2"; shift 2 ;;
+    --sor-lambda-cons) SOR_LAMBDA_CONS="$2"; shift 2 ;; --sor-lambda-reg) SOR_LAMBDA_REG="$2"; shift 2 ;;
+    --sor-ref-update-interval) SOR_REF_INTERVAL="$2"; shift 2 ;;
+    --sor-sync-interval) SOR_SYNC_INTERVAL="$2"; shift 2 ;;
+    --sor-save-buffer-every) SOR_SAVE_EVERY="$2"; shift 2 ;;
+    -h|--help) usage; exit 0 ;; *) echo "Unknown argument: $1" >&2; usage; exit 2 ;;
+  esac
 done
+
+[[ "$MODE" == ACC || "$MODE" == SOR ]] || { echo "--mode must be ACC or SOR" >&2; exit 2; }
+[[ "$PHASE" == a1 || "$PHASE" == b || "$PHASE" == a2 ]] || { echo "invalid phase" >&2; exit 2; }
+for value in EPOCH PORT EXP_NAME MODEL_DIR RUN_ID LOG; do
+  [[ -n "${!value}" ]] || { echo "Missing required argument ($value)" >&2; usage; exit 2; }
+done
+[[ "$REWARD_PROFILE" == tail_safe ]] || { echo "Formal ABA runs require tail_safe reward" >&2; exit 2; }
+[[ "$EPSILON_SCHEDULE" == global ]] || { echo "Formal ABA runs require global epsilon" >&2; exit 2; }
+[[ "$ACTION_SPACE" == multiscale ]] || { echo "Formal ABA runs require multiscale actions" >&2; exit 2; }
+
+ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+MODEL_DIR=$(mkdir -p "$MODEL_DIR" && cd "$MODEL_DIR" && pwd)
+mkdir -p "$(dirname "$LOG")"
+LOG=$(cd "$(dirname "$LOG")" && pwd)/$(basename "$LOG")
+if [[ -z "${PYTHON_BIN:-}" ]]; then
+  if command -v python3 >/dev/null 2>&1; then
+    PYTHON_BIN=python3
+  else
+    PYTHON_BIN=python
+  fi
+fi
+
+COMMON=(
+  -p "$PORT" -e "$EXP_NAME" -d "$MODEL_DIR" --online
+  -b "$BUFFER_KB" --seed "$SEED" --run_id "$RUN_ID" --phase "$PHASE"
+  --action_space "$ACTION_SPACE" --acc_hidden_dims "$HIDDEN_DIMS"
+  --reward_profile "$REWARD_PROFILE" --reward_queue_lambda "$REWARD_QUEUE_LAMBDA"
+  --reward_ecn_lambda "$REWARD_ECN_LAMBDA" --reward_weights "$REWARD_WEIGHTS"
+  --epsilon_start "$EPSILON_START" --epsilon_end "$EPSILON_END"
+  --epsilon_decay_steps "$EPSILON_DECAY" --epsilon_schedule "$EPSILON_SCHEDULE"
+  --target_update_interval "$TARGET_INTERVAL" --state_save_interval 1
+  --watch_ports "$WATCH_PORTS" --watch_trace_file "$WATCH_TRACE"
+  --fct_source_file "$FCT_SOURCE" --fct_step_trace_file "$FCT_TRACE"
+  --launcher_episode "$EPOCH" --tb_enable "$TB_ENABLE"
+)
+
+if [[ "$MODE" == ACC ]]; then
+  EXTRA=(--shared_replay "$SHARED_REPLAY")
+  [[ "$RESUME" == true ]] && EXTRA+=(--resume)
+  cd "$ROOT/copter"
+  exec "$PYTHON_BIN" copter.py "${COMMON[@]}" "${EXTRA[@]}" >"$LOG" 2>&1
+else
+  cd "$ROOT/sor"
+  exec "$PYTHON_BIN" sor_copter.py "${COMMON[@]}" \
+    --sor_recent_size "$SOR_RECENT" --sor_boundary_size "$SOR_BOUNDARY" \
+    --sor_max_clusters "$SOR_CLUSTERS" --sor_lambda_cons "$SOR_LAMBDA_CONS" \
+    --sor_lambda_reg "$SOR_LAMBDA_REG" --sor_ref_update_interval "$SOR_REF_INTERVAL" \
+    --sor_sync_interval "$SOR_SYNC_INTERVAL" --sor_save_buffer_every "$SOR_SAVE_EVERY" \
+    >"$LOG" 2>&1
+fi

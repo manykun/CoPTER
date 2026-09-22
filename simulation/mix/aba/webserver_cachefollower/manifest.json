@@ -1,0 +1,25 @@
+{
+  "schema_version": 1,
+  "seed": 1,
+  "generator": "tools/traffic/TraGen.py",
+  "tasks": {
+    "realistic_webserver": {
+      "conf": "task_a_webserver.conf",
+      "conf_sha256": "bc17a1cb4ae4be9a92c9ec0ab204c34256d709b9ca69ee980e61f1eff4bd5391",
+      "flow": "task_a_webserver.flow",
+      "expected_flows": 31480,
+      "flow_sha256": "45775d61f571d3030fe17764c05a78abb3fbc88e7d981b9aab79faabffc4078a",
+      "generator_config": "tools/traffic/acc_validation/realistic_webserver.json",
+      "generator_config_sha256": "c58b33774b4fae6190baf33fc6109f6be829869126a8d422478fbe1b332401ad"
+    },
+    "realistic_cachefollower": {
+      "conf": "task_b_cachefollower.conf",
+      "conf_sha256": "dd4643a919fec249004e21c09868f3804d228a1889aa520c9cdf5c781ca82d3f",
+      "flow": "task_b_cachefollower.flow",
+      "expected_flows": 4612,
+      "flow_sha256": "c0dc01ed8b43f0ed682f01f68ab6a37a3ae2cd6a85f825abb9fca5f67be23548",
+      "generator_config": "tools/traffic/acc_validation/realistic_cachefollower.json",
+      "generator_config_sha256": "0844b77b5f762ee2b9e715bba8a2322f2b09a494dcadc242d64c29b238464193"
+    }
+  }
+}

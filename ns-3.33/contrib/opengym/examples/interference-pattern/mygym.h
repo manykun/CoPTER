@@ -25,6 +25,9 @@
 #include "ns3/stats-module.h"
 #include "ns3/opengym-module.h"
 #include "ns3/spectrum-module.h"
+#ifdef I
+#undef I
+#endif
 
 namespace ns3 {
 
