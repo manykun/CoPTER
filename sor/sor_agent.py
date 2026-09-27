@@ -18,6 +18,7 @@ from backbone_sor import SORMultiHeadACC, SORTripleHeadACC
 
 try:
     from structures import (
+        ACC_FACTORIZED_VALID_PAIRS,
         acc_action_dimensions,
         acc_action_from_indices,
         describe_acc_action,
@@ -26,6 +27,7 @@ except ImportError:
     import sys
     sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "copter")))
     from structures import (
+        ACC_FACTORIZED_VALID_PAIRS,
         acc_action_dimensions,
         acc_action_from_indices,
         describe_acc_action,
@@ -65,6 +67,25 @@ class SORACC:
         self.reference_net = copy.deepcopy(self.policy_net).to(self.device)
         self.optimizer = torch.optim.Adam(self.policy_net.parameters(), lr=self.p.learning_rate)
         self.loss_fn = torch.nn.SmoothL1Loss()
+
+    def _factorized_greedy_actions(self, q_heads):
+        """Return valid Kmin/Kmax/Pmax indices for every batch row."""
+        q_kmin, q_kmax, q_pmax = q_heads
+        pair_scores = q_kmin.unsqueeze(2) + q_kmax.unsqueeze(1)
+        valid = torch.zeros(
+            self.action_dims[0], self.action_dims[1],
+            dtype=torch.bool, device=pair_scores.device,
+        )
+        rows, columns = zip(*ACC_FACTORIZED_VALID_PAIRS)
+        valid[list(rows), list(columns)] = True
+        pair_scores = pair_scores.masked_fill(~valid.unsqueeze(0), -torch.inf)
+        pair_index = pair_scores.flatten(1).argmax(dim=1)
+        kmax_dim = self.action_dims[1]
+        return torch.stack((
+            torch.div(pair_index, kmax_dim, rounding_mode="floor"),
+            pair_index.remainder(kmax_dim),
+            q_pmax.argmax(dim=1),
+        ), dim=1)
 
     def save_model(self, save_path):
         os.makedirs(save_path, exist_ok=True)
@@ -157,14 +178,26 @@ class SORACC:
 
     def select_action(self, state, epsilon=0.1):
         if random.random() < epsilon:
-            action = tuple(
-                random.randint(0, size - 1) for size in self.action_dims
-            )
+            if self.action_space == "factorized_interp":
+                kmin, kmax = random.choice(ACC_FACTORIZED_VALID_PAIRS)
+                action = (
+                    kmin, kmax, random.randint(0, self.action_dims[2] - 1)
+                )
+            else:
+                action = tuple(
+                    random.randint(0, size - 1) for size in self.action_dims
+                )
         else:
             state_tensor = torch.FloatTensor(state).unsqueeze(0).to(self.device)
             with torch.no_grad():
                 q_heads = self.policy_net(state_tensor)
-            action = tuple(int(head.argmax().item()) for head in q_heads)
+            if self.action_space == "factorized_interp":
+                action = tuple(
+                    int(index.item())
+                    for index in self._factorized_greedy_actions(q_heads)[0]
+                )
+            else:
+                action = tuple(int(head.argmax().item()) for head in q_heads)
         logger.info(
             f"SORACC Agent {self.name} - Action ({self.action_space}): "
             f"{describe_acc_action(action, self.action_space)}"
@@ -187,7 +220,14 @@ class SORACC:
 
         with torch.no_grad():
             next_policy_outputs = self.policy_net(next_states_t)
-            next_actions = torch.stack([head.argmax(dim=1) for head in next_policy_outputs], dim=1)
+            if self.action_space == "factorized_interp":
+                next_actions = self._factorized_greedy_actions(
+                    next_policy_outputs
+                )
+            else:
+                next_actions = torch.stack(
+                    [head.argmax(dim=1) for head in next_policy_outputs], dim=1
+                )
             next_target_outputs = self.target_net(next_states_t)
             q_target = self._gather_q(next_target_outputs, next_actions)
             q_estimation = rewards_t.unsqueeze(1) + self.p.gamma * q_target

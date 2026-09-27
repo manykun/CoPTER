@@ -11,6 +11,9 @@ sys.path.insert(0, str(ROOT / "copter"))
 sys.path.insert(0, str(ROOT / "tools" / "traffic"))
 
 from structures import (
+    ACC_FACTORIZED_KMAX_VALUES,
+    ACC_FACTORIZED_KMIN_VALUES,
+    ACC_FACTORIZED_VALID_PAIRS,
     ACC_MULTISCALE_PMAX_VALUES,
     ACC_MULTISCALE_THRESHOLD_PROFILES,
     DCQCNParameters,
@@ -102,6 +105,26 @@ class ACCValidationTests(unittest.TestCase):
             kmax = kmax_min + kmax_norm * (kmax_max - kmax_min)
             self.assertLess(kmin, kmax)
         self.assertEqual(ACC_MULTISCALE_PMAX_VALUES, (0.05, 0.1, 0.2, 0.4, 0.6, 0.8, 1.0))
+
+    def test_factorized_interpolation_grid_and_validity(self):
+        self.assertEqual(
+            acc_action_dimensions("factorized_interp"), (17, 17, 7)
+        )
+        self.assertEqual(len(ACC_FACTORIZED_VALID_PAIRS), 221)
+        self.assertIn((0, 0), ACC_FACTORIZED_VALID_PAIRS)
+        self.assertNotIn((16, 0), ACC_FACTORIZED_VALID_PAIRS)
+        parameters = acc_action_from_indices(
+            (1, 1, 0), "factorized_interp"
+        )
+        self.assertAlmostEqual(parameters.k_min_norm, 1.0 / 18.0)
+        self.assertAlmostEqual(parameters.k_max_norm, 1.0 / 34.0)
+        self.assertEqual(parameters.p_max, 0.05)
+        with self.assertRaises(ValueError):
+            validate_acc_action_indices((16, 0, 0), "factorized_interp")
+        for kmin_index, kmax_index in ACC_FACTORIZED_VALID_PAIRS:
+            kmin = 5.0 + 45.0 * ACC_FACTORIZED_KMIN_VALUES[kmin_index]
+            kmax = 15.0 + 85.0 * ACC_FACTORIZED_KMAX_VALUES[kmax_index]
+            self.assertLess(kmin, kmax)
 
     def test_compact_host_range(self):
         self.assertEqual(expand_hosts({"start": 4, "end": 7}), [4, 5, 6, 7])

@@ -97,11 +97,15 @@ def validate_config(config: dict) -> None:
     missing = [key for key in required if key not in config]
     if missing:
         raise ValueError(f"missing configuration keys: {', '.join(missing)}")
-    invariants = {
-        "epsilon_schedule": "global",
-        "action_space": "multiscale",
-        "reward_profile": "tail_safe",
-    }
+    experiment_kind = str(config.get("experiment_kind", "formal"))
+    if experiment_kind not in ("formal", "acc_pilot"):
+        raise ValueError("experiment_kind must be formal or acc_pilot")
+    invariants = {"epsilon_schedule": "global"}
+    if experiment_kind == "formal":
+        invariants.update({
+            "action_space": "multiscale",
+            "reward_profile": "tail_safe",
+        })
     for key, required_value in invariants.items():
         if str(config.get(key)) != required_value:
             raise ValueError(f"formal ABA requires {key}: {required_value}")
@@ -110,6 +114,25 @@ def validate_config(config: dict) -> None:
         raise ValueError("methods must be ACC,SOR or a subset")
     if len(set(methods)) != len(methods):
         raise ValueError("methods contains duplicates")
+    if experiment_kind == "acc_pilot":
+        if methods != ["acc"]:
+            raise ValueError("ACC pilot configurations must use methods: ACC")
+        if str(config.get("action_space")) not in (
+            "multiscale", "factorized_interp"
+        ):
+            raise ValueError(
+                "ACC pilot action_space must be multiscale or factorized_interp"
+            )
+        if str(config.get("reward_profile")) not in (
+            "tail_safe", "weighted"
+        ):
+            raise ValueError(
+                "ACC pilot reward_profile must be tail_safe or weighted"
+            )
+        if int(config["a1_epochs"]) <= 0:
+            raise ValueError("ACC pilot requires at least one A1 epoch")
+        if int(config["b_epochs"]) != 0 or int(config["a2_epochs"]) != 0:
+            raise ValueError("ACC pilot is a single-task A1 acquisition study")
     if "acc" in methods and "sor" in methods and int(config["acc_port"]) == int(config["sor_port"]):
         raise ValueError("ACC and SOR ports must differ")
     if config.get("route"):
@@ -166,6 +189,10 @@ def protocol(config: dict, config_path: Path, smoke: bool) -> dict:
         "sor_global_replay_capacity": 100000,
         "smoke": bool(smoke),
     }
+    # Preserve byte-for-byte protocol compatibility with completed formal
+    # ABA/CDC runs created before experimental pilot support existed.
+    if "experiment_kind" in config:
+        result["experiment_kind"] = str(config["experiment_kind"])
     if config.get("route"):
         result["route"] = str(config["route"]).upper()
     return result
@@ -448,7 +475,9 @@ def finalize_epoch(
     )
 
 
-def _method_worker_locked(config: dict, protocol_data: dict, run_dir: Path, method: str, resume: bool):
+def _method_worker_locked(config: dict, protocol_data: dict, run_dir: Path,
+                          method: str, resume: bool,
+                          max_global_epoch: int = 0):
     method_upper = method.upper()
     port = int(config[f"{method}_port"])
     exp_name = f"aba_{config['run_id']}_{method}"
@@ -461,6 +490,12 @@ def _method_worker_locked(config: dict, protocol_data: dict, run_dir: Path, meth
     total_epochs = sum(int(protocol_data["epochs"][phase]) for phase in ("a1", "b", "a2"))
 
     for phase, task_key, phase_epoch, global_epoch in phase_plan(protocol_data):
+        if max_global_epoch > 0 and global_epoch > max_global_epoch:
+            print(
+                f"[{method}] stopping at requested epoch limit "
+                f"{max_global_epoch}/{total_epochs}", flush=True,
+            )
+            break
         raw_dir = output_root / phase / f"epoch_{global_epoch:04d}"
         complete_path = raw_dir / "complete.json"
         if complete_path.exists():
@@ -521,6 +556,7 @@ def _method_worker_locked(config: dict, protocol_data: dict, run_dir: Path, meth
             "--phase", phase, "--epoch", str(global_epoch), "--port", str(port),
             "--exp-name", exp_name, "--model-dir", str(model_dir),
             "--run-id", str(config["run_id"]), "--log", str(agent_log),
+            "--experiment-kind", str(config.get("experiment_kind", "formal")),
             "--seed", str(config.get("seed", 1)), "--buffer-kb", str(config.get("switch_buffer_kb", 400)),
             "--action-space", str(config["action_space"]), "--hidden-dims", str(config.get("acc_hidden_dims", "32,64,64,32")),
             "--reward-profile", str(config["reward_profile"]), "--reward-queue-lambda", str(config.get("reward_queue_lambda", 5)),
@@ -581,7 +617,8 @@ def _method_worker_locked(config: dict, protocol_data: dict, run_dir: Path, meth
     return method
 
 
-def method_worker(config: dict, protocol_data: dict, run_dir: Path, method: str, resume: bool):
+def method_worker(config: dict, protocol_data: dict, run_dir: Path,
+                  method: str, resume: bool, max_global_epoch: int = 0):
     """Run one method while preventing duplicate schedulers for the same run."""
     lock_path = run_dir / method / ".run.lock"
     lock_path.parent.mkdir(parents=True, exist_ok=True)
@@ -595,23 +632,31 @@ def method_worker(config: dict, protocol_data: dict, run_dir: Path, method: str,
             ) from exc
         try:
             return _method_worker_locked(
-                config, protocol_data, run_dir, method, resume
+                config, protocol_data, run_dir, method, resume,
+                max_global_epoch,
             )
         finally:
             fcntl.flock(lock, fcntl.LOCK_UN)
 
 
-def run_methods(config: dict, protocol_data: dict, run_dir: Path, resume: bool):
+def run_methods(config: dict, protocol_data: dict, run_dir: Path, resume: bool,
+                max_global_epoch: int = 0):
     methods = protocol_data["methods"]
     jobs = min(int(config.get("parallel_methods", 2)), len(methods))
     if jobs <= 1:
         for method in methods:
-            method_worker(config, protocol_data, run_dir, method, resume)
+            method_worker(
+                config, protocol_data, run_dir, method, resume,
+                max_global_epoch,
+            )
         return
     errors = []
     with ThreadPoolExecutor(max_workers=jobs) as executor:
         futures = {
-            executor.submit(method_worker, config, protocol_data, run_dir, method, resume): method
+            executor.submit(
+                method_worker, config, protocol_data, run_dir, method, resume,
+                max_global_epoch,
+            ): method
             for method in methods
         }
         for future in as_completed(futures):
@@ -630,6 +675,10 @@ def main():
     parser.add_argument("--stage", choices=("prepare", "run", "analyze", "all", "smoke"), default="all")
     parser.add_argument("--run-id", default=None)
     parser.add_argument("--resume", action="store_true")
+    parser.add_argument(
+        "--max-global-epoch", type=int, default=0,
+        help="Stop after this completed global epoch; 0 runs the full protocol.",
+    )
     args = parser.parse_args()
     config_path = absolute(args.config)
     config = load_config(config_path)
@@ -643,7 +692,10 @@ def main():
         print(f"ABA protocol prepared: {run_dir}")
         return
     if args.stage in ("run", "all", "smoke"):
-        run_methods(config, protocol_data, run_dir, args.resume)
+        run_methods(
+            config, protocol_data, run_dir, args.resume,
+            args.max_global_epoch,
+        )
     if args.stage in ("analyze", "all", "smoke"):
         subprocess.run(
             [sys.executable, str(ROOT / "tools" / "analysis" / "build_aba_report.py"), "--run-dir", str(run_dir)],

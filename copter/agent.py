@@ -9,6 +9,7 @@ from scipy.interpolate import RegularGridInterpolator
 
 from backbone import DualHeadNN, DualHeadProfileACC, TripleHeadACC, TripleHeadCoPTER
 from structures import (
+    ACC_FACTORIZED_VALID_PAIRS,
     AgentParameters,
     DCQCNParameters,
     acc_action_dimensions,
@@ -61,7 +62,7 @@ class ACC(Agent):
         self.device = torch.device("cpu")
         # 初始化策略网络（评估网络），每个训练步更新
         action_dims = acc_action_dimensions(action_space)
-        if action_space == "legacy":
+        if action_space in ("legacy", "factorized_interp"):
             network_factory = lambda: TripleHeadACC(
                 self.p.state_dim, *action_dims, self.p.hidden_dims
             )
@@ -83,6 +84,25 @@ class ACC(Agent):
         # 计算损失函数
         self.loss_fn = torch.nn.SmoothL1Loss()
         self.last_train_diagnostics = None
+
+    def _factorized_greedy_actions(self, q_heads):
+        """Return valid factorized actions for a batch of Q-head outputs."""
+        q_kmin, q_kmax, q_pmax = q_heads
+        pair_scores = q_kmin.unsqueeze(2) + q_kmax.unsqueeze(1)
+        valid = torch.zeros(
+            self.action_dims[0], self.action_dims[1],
+            dtype=torch.bool, device=pair_scores.device,
+        )
+        rows, columns = zip(*ACC_FACTORIZED_VALID_PAIRS)
+        valid[list(rows), list(columns)] = True
+        pair_scores = pair_scores.masked_fill(~valid.unsqueeze(0), -torch.inf)
+        pair_index = pair_scores.flatten(1).argmax(dim=1)
+        kmax_dim = self.action_dims[1]
+        return (
+            torch.div(pair_index, kmax_dim, rounding_mode="floor"),
+            pair_index.remainder(kmax_dim),
+            q_pmax.argmax(dim=1),
+        )
 
 
     def save_model(self, save_path):
@@ -176,7 +196,15 @@ class ACC(Agent):
             tuple: A tuple containing the selected action as a `DCQCNParameters` object and the action indices.
         """
         if random.random() < epsilon:
-            action = tuple(random.randint(0, size - 1) for size in self.action_dims)
+            if self.action_space == "factorized_interp":
+                kmin, kmax = random.choice(ACC_FACTORIZED_VALID_PAIRS)
+                action = (
+                    kmin, kmax, random.randint(0, self.action_dims[2] - 1)
+                )
+            else:
+                action = tuple(
+                    random.randint(0, size - 1) for size in self.action_dims
+                )
         else:
             state = torch.FloatTensor(state).unsqueeze(0).to(self.device)
             with torch.no_grad():
@@ -185,7 +213,13 @@ class ACC(Agent):
                     f"ACC Agent {self.name} - Q Values ({self.action_space}): "
                     f"{q_heads}"
                 )
-            action = tuple(int(head.argmax().item()) for head in q_heads)
+            if self.action_space == "factorized_interp":
+                action = tuple(
+                    int(index.item())
+                    for index in self._factorized_greedy_actions(q_heads)
+                )
+            else:
+                action = tuple(int(head.argmax().item()) for head in q_heads)
         
         logger.info(
             f"ACC Agent {self.name} - Action ({self.action_space}): "
@@ -224,7 +258,10 @@ class ACC(Agent):
             # Double DQN
             # 用next_state 利用策略网络选择动作
             policy_heads = self.policy_net(next_state)
-            next_actions = [head.argmax(dim=1) for head in policy_heads]
+            if self.action_space == "factorized_interp":
+                next_actions = self._factorized_greedy_actions(policy_heads)
+            else:
+                next_actions = [head.argmax(dim=1) for head in policy_heads]
             # 用next_state 利用目标网络评估动作
             target_heads = self.target_net(next_state)
             q_target = sum(

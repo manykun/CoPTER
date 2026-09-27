@@ -140,9 +140,9 @@ if __name__ == "__main__":
             )
         except Exception as exc:
             expected = (
-                "kmin_idx,kmax_idx,pmax_idx"
-                if args.action_space == "legacy"
-                else "profile_idx,pmax_idx"
+                "profile_idx,pmax_idx"
+                if args.action_space == "multiscale"
+                else "kmin_idx,kmax_idx,pmax_idx"
             )
             raise SystemExit(
                 f"--force_action must be '{expected}' for {args.action_space}; "

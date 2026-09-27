@@ -108,7 +108,7 @@ ACC_PMAX_VALUES = (0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0)
 # Pairing the thresholds prevents the independent heads from proposing
 # Kmin >= Kmax and deliberately covers the sub-32-KB queues observed in the
 # forgetting study.
-ACC_ACTION_SPACES = ("legacy", "multiscale")
+ACC_ACTION_SPACES = ("legacy", "multiscale", "factorized_interp")
 ACC_MULTISCALE_THRESHOLD_PROFILES = (
     (0.0, 0.0),
     (1.0 / 9.0, 1.0 / 17.0),
@@ -123,6 +123,50 @@ ACC_MULTISCALE_THRESHOLD_PROFILES = (
 ACC_MULTISCALE_PMAX_VALUES = (0.05, 0.1, 0.2, 0.4, 0.6, 0.8, 1.0)
 
 
+def _values_with_midpoints(values):
+    """Return a sorted grid containing every value and adjacent midpoint."""
+    values = tuple(float(value) for value in values)
+    return tuple(sorted(set(
+        values + tuple(
+            (left + right) / 2.0
+            for left, right in zip(values, values[1:])
+        )
+    )))
+
+
+# Experimental threshold action space used by the ACC reward/action pilot.
+# Unlike ``multiscale``, Kmin and Kmax are represented by separate heads.  The
+# grids contain the original multiscale coordinates and every adjacent
+# midpoint.  A validity mask is applied during exploration, greedy action
+# selection, and Double-DQN target construction, so Kmin is always physically
+# below Kmax.  At 40 Gbps these grids correspond to:
+#   Kmin=[8,12,16,18,20,22,24,28,32,40,48,52.5,57,60,63,71.5,80] KB
+#   Kmax=[24,28,32,36,40,44,48,56,64,80,96,103,110,115,120,140,160] KB
+# yielding 221 valid combinations rather than nine hand-paired profiles.
+ACC_FACTORIZED_KMIN_VALUES = _values_with_midpoints(tuple(
+    profile[0] for profile in ACC_MULTISCALE_THRESHOLD_PROFILES
+))
+ACC_FACTORIZED_KMAX_VALUES = _values_with_midpoints(tuple(
+    profile[1] for profile in ACC_MULTISCALE_THRESHOLD_PROFILES
+))
+ACC_FACTORIZED_PMAX_VALUES = ACC_MULTISCALE_PMAX_VALUES
+
+
+def _physical_thresholds(kmin_norm, kmax_norm):
+    """Map normalized actions to the canonical 25-Gbps threshold ranges."""
+    return 5.0 + 45.0 * float(kmin_norm), 15.0 + 85.0 * float(kmax_norm)
+
+
+ACC_FACTORIZED_VALID_PAIRS = tuple(
+    (kmin_index, kmax_index)
+    for kmin_index, kmin_norm in enumerate(ACC_FACTORIZED_KMIN_VALUES)
+    for kmax_index, kmax_norm in enumerate(ACC_FACTORIZED_KMAX_VALUES)
+    if _physical_thresholds(kmin_norm, kmax_norm)[0]
+    < _physical_thresholds(kmin_norm, kmax_norm)[1]
+)
+ACC_FACTORIZED_VALID_PAIR_SET = frozenset(ACC_FACTORIZED_VALID_PAIRS)
+
+
 def acc_action_dimensions(action_space="legacy"):
     """Return the categorical head sizes for an ACC action space."""
     if action_space == "legacy":
@@ -131,6 +175,12 @@ def acc_action_dimensions(action_space="legacy"):
         return (
             len(ACC_MULTISCALE_THRESHOLD_PROFILES),
             len(ACC_MULTISCALE_PMAX_VALUES),
+        )
+    if action_space == "factorized_interp":
+        return (
+            len(ACC_FACTORIZED_KMIN_VALUES),
+            len(ACC_FACTORIZED_KMAX_VALUES),
+            len(ACC_FACTORIZED_PMAX_VALUES),
         )
     raise ValueError(
         f"unknown ACC action space {action_space!r}; expected one of "
@@ -143,19 +193,34 @@ def validate_acc_action_indices(indices, action_space="legacy"):
     limits = acc_action_dimensions(action_space)
     expected = len(limits)
     if len(indices) != expected:
-        labels = "kmin,kmax,pmax" if action_space == "legacy" else "profile,pmax"
+        labels = (
+            "profile,pmax" if action_space == "multiscale"
+            else "kmin,kmax,pmax"
+        )
         raise ValueError(
             f"{action_space} ACC action must contain {labels} indices"
         )
     action = tuple(int(index) for index in indices)
     names = (
         ("kmin", "kmax", "pmax")
-        if action_space == "legacy"
+        if action_space != "multiscale"
         else ("profile", "pmax")
     )
     for name, index, limit in zip(names, action, limits):
         if not 0 <= index < limit:
             raise ValueError(f"{name} index {index} is outside [0, {limit - 1}]")
+    if (
+        action_space == "factorized_interp"
+        and action[:2] not in ACC_FACTORIZED_VALID_PAIR_SET
+    ):
+        kmin, kmax = _physical_thresholds(
+            ACC_FACTORIZED_KMIN_VALUES[action[0]],
+            ACC_FACTORIZED_KMAX_VALUES[action[1]],
+        )
+        raise ValueError(
+            f"invalid factorized thresholds: Kmin={kmin:.3f} KB must be "
+            f"below Kmax={kmax:.3f} KB at the canonical link rate"
+        )
     return action
 
 
@@ -169,6 +234,13 @@ def acc_action_from_indices(indices, action_space="legacy"):
             kmin_norm,
             kmax_norm,
             ACC_MULTISCALE_PMAX_VALUES[pmax_index],
+        )
+    if action_space == "factorized_interp":
+        kmin_index, kmax_index, pmax_index = action
+        return DCQCNParameters(
+            ACC_FACTORIZED_KMIN_VALUES[kmin_index],
+            ACC_FACTORIZED_KMAX_VALUES[kmax_index],
+            ACC_FACTORIZED_PMAX_VALUES[pmax_index],
         )
     kmin_index, kmax_index, pmax_index = action
     return DCQCNParameters(

@@ -10,6 +10,7 @@ EOF
 }
 
 MODE="" PHASE="" EPOCH="" PORT="" EXP_NAME="" MODEL_DIR="" RUN_ID="" LOG=""
+EXPERIMENT_KIND=formal
 SEED=1 BUFFER_KB=400 ACTION_SPACE=multiscale HIDDEN_DIMS="32,64,64,32"
 REWARD_PROFILE=tail_safe REWARD_QUEUE_LAMBDA=5 REWARD_ECN_LAMBDA=5
 REWARD_WEIGHTS="0.50,0.30,0.20" EPSILON_START=1 EPSILON_END=0.05
@@ -24,6 +25,7 @@ while [[ $# -gt 0 ]]; do
     --epoch) EPOCH="$2"; shift 2 ;; --port) PORT="$2"; shift 2 ;;
     --exp-name) EXP_NAME="$2"; shift 2 ;; --model-dir) MODEL_DIR="$2"; shift 2 ;;
     --run-id) RUN_ID="$2"; shift 2 ;; --log) LOG="$2"; shift 2 ;;
+    --experiment-kind) EXPERIMENT_KIND="$2"; shift 2 ;;
     --seed) SEED="$2"; shift 2 ;; --buffer-kb) BUFFER_KB="$2"; shift 2 ;;
     --action-space) ACTION_SPACE="$2"; shift 2 ;; --hidden-dims) HIDDEN_DIMS="$2"; shift 2 ;;
     --reward-profile) REWARD_PROFILE="$2"; shift 2 ;;
@@ -53,9 +55,18 @@ done
 for value in EPOCH PORT EXP_NAME MODEL_DIR RUN_ID LOG; do
   [[ -n "${!value}" ]] || { echo "Missing required argument ($value)" >&2; usage; exit 2; }
 done
-[[ "$REWARD_PROFILE" == tail_safe ]] || { echo "Formal ABA runs require tail_safe reward" >&2; exit 2; }
 [[ "$EPSILON_SCHEDULE" == global ]] || { echo "Formal ABA runs require global epsilon" >&2; exit 2; }
-[[ "$ACTION_SPACE" == multiscale ]] || { echo "Formal ABA runs require multiscale actions" >&2; exit 2; }
+if [[ "$EXPERIMENT_KIND" == formal ]]; then
+  [[ "$REWARD_PROFILE" == tail_safe ]] || { echo "Formal ABA runs require tail_safe reward" >&2; exit 2; }
+  [[ "$ACTION_SPACE" == multiscale ]] || { echo "Formal ABA runs require multiscale actions" >&2; exit 2; }
+elif [[ "$EXPERIMENT_KIND" == acc_pilot ]]; then
+  [[ "$MODE" == ACC ]] || { echo "ACC pilot only supports ACC" >&2; exit 2; }
+  [[ "$REWARD_PROFILE" == tail_safe || "$REWARD_PROFILE" == weighted ]] || { echo "ACC pilot reward must be tail_safe or weighted" >&2; exit 2; }
+  [[ "$ACTION_SPACE" == multiscale || "$ACTION_SPACE" == factorized_interp ]] || { echo "ACC pilot action space must be multiscale or factorized_interp" >&2; exit 2; }
+else
+  echo "--experiment-kind must be formal or acc_pilot" >&2
+  exit 2
+fi
 
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 MODEL_DIR=$(mkdir -p "$MODEL_DIR" && cd "$MODEL_DIR" && pwd)
