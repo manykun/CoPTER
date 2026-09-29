@@ -84,3 +84,24 @@ experiments/aba/acc_pilot_webserver_s1_comparison/
 
 The pilot report uses training trajectories. It must not be described as a
 frozen-policy comparison or as proof of convergence.
+
+## CDC Task C replication
+
+Use the Hadoop/AlibabaStorage base configuration to repeat the same three-arm
+acquisition pilot on Task C (`realistic_hadoop`).  `--jobs 3` runs baseline,
+weighted, and action variants concurrently on three consecutive ports:
+
+```bash
+nohup bash scripts/continual_validation/run_acc_reward_action_pilot.sh \
+  --base-config configs/aba/hadoop_alistorage.yaml \
+  --stage all \
+  --run-id-prefix acc_pilot_hadoop_s1 \
+  --epochs 100 \
+  --stop-after 50 \
+  --port-base 7620 \
+  --jobs 3 \
+  > experiments/aba/acc_pilot_hadoop_s1_driver.log 2>&1 &
+```
+
+The comparison report is written to
+`experiments/aba/acc_pilot_hadoop_s1_comparison/`.

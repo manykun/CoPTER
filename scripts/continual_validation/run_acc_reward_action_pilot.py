@@ -45,11 +45,16 @@ def atomic_yaml(path: Path, config: dict) -> None:
 def build_config(base: dict, run_id: str, variant: str, epochs: int,
                  port: int, seed: int) -> dict:
     action_space, reward_profile = VARIANTS[variant]
+    source_route = str(base.get("route", "ABA")).upper()
+    task_symbol = source_route[0] if source_route else "A"
     config = dict(base)
     config.update({
         "run_id": run_id,
         "experiment_kind": "acc_pilot",
-        "route": "AAA",
+        # This is a single-task acquisition pilot.  Preserve the source
+        # route's task symbol so WebServer is reported as AAA and Hadoop as
+        # CCC, without implying that B/D training occurred.
+        "route": task_symbol * 3,
         "a1_epochs": int(epochs),
         "b_epochs": 0,
         "a2_epochs": 0,
