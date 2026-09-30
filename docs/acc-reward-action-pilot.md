@@ -12,6 +12,7 @@ epsilon, and the authoritative per-epoch analysis pipeline.
 | weighted | `multiscale` | `weighted` | Reward-only change |
 | action | `factorized_interp` | `tail_safe` | Threshold-space-only change |
 | combined | `factorized_interp` | `weighted` | Optional interaction check |
+| legacy | `legacy` | `weighted` | Exact original independent Kmin/Kmax/Pmax heads and reward |
 
 `factorized_interp` retains the original threshold coordinates and inserts
 every adjacent midpoint. Kmin and Kmax each have 17 categories. Exploration,
@@ -22,6 +23,11 @@ seven multiscale values so the action-only arm changes thresholds only.
 Native `tail_safe` and `weighted` reward values have different scales. Compare
 their within-run direction, not their absolute magnitudes. Cross-variant
 conclusions should use FCT, completion, throughput, queue, ECN, and PFC.
+
+The `legacy` arm is intentionally different from `factorized_interp`. It uses
+the original independent grids (6 Kmin values, 4 Kmax values, and 10 Pmax
+values) without pairing Kmin and Kmax into one profile and without adding
+midpoints. This preserves the historical 240 categorical combinations exactly.
 
 ## Smoke
 

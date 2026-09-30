@@ -24,6 +24,11 @@ VARIANTS = {
     "weighted": ("multiscale", "weighted"),
     "action": ("factorized_interp", "tail_safe"),
     "combined": ("factorized_interp", "weighted"),
+    # Exact pre-multiscale ACC setup: Kmin, Kmax, and Pmax are selected by
+    # three independent heads on the original 6 x 4 x 10 categorical grids.
+    # Keep this separate from ``factorized_interp``: the legacy policy does
+    # not pair thresholds and does not insert midpoint categories.
+    "legacy": ("legacy", "weighted"),
 }
 
 
@@ -120,7 +125,11 @@ def main():
     )
     parser.add_argument(
         "--variants", default="baseline,weighted,action",
-        help="comma-separated subset of baseline,weighted,action,combined",
+        help=(
+            "comma-separated subset of baseline,weighted,action,combined,legacy; "
+            "legacy reproduces the original independent-head action space "
+            "with the original weighted reward"
+        ),
     )
     parser.add_argument("--run-id-prefix", default="acc_pilot_webserver_s1")
     parser.add_argument(
@@ -144,7 +153,8 @@ def main():
     requested = [item.strip() for item in args.variants.split(",") if item.strip()]
     if not requested or any(item not in VARIANTS for item in requested):
         raise ValueError(
-            "--variants must contain baseline, weighted, action, or combined"
+            "--variants must contain baseline, weighted, action, combined, "
+            "or legacy"
         )
     if len(set(requested)) != len(requested):
         raise ValueError("--variants contains duplicates")

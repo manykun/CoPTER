@@ -62,7 +62,7 @@ if [[ "$EXPERIMENT_KIND" == formal ]]; then
 elif [[ "$EXPERIMENT_KIND" == acc_pilot ]]; then
   [[ "$MODE" == ACC ]] || { echo "ACC pilot only supports ACC" >&2; exit 2; }
   [[ "$REWARD_PROFILE" == tail_safe || "$REWARD_PROFILE" == weighted ]] || { echo "ACC pilot reward must be tail_safe or weighted" >&2; exit 2; }
-  [[ "$ACTION_SPACE" == multiscale || "$ACTION_SPACE" == factorized_interp ]] || { echo "ACC pilot action space must be multiscale or factorized_interp" >&2; exit 2; }
+  [[ "$ACTION_SPACE" == legacy || "$ACTION_SPACE" == multiscale || "$ACTION_SPACE" == factorized_interp ]] || { echo "ACC pilot action space must be legacy, multiscale, or factorized_interp" >&2; exit 2; }
 else
   echo "--experiment-kind must be formal or acc_pilot" >&2
   exit 2

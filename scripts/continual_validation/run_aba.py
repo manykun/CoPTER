@@ -118,10 +118,11 @@ def validate_config(config: dict) -> None:
         if methods != ["acc"]:
             raise ValueError("ACC pilot configurations must use methods: ACC")
         if str(config.get("action_space")) not in (
-            "multiscale", "factorized_interp"
+            "legacy", "multiscale", "factorized_interp"
         ):
             raise ValueError(
-                "ACC pilot action_space must be multiscale or factorized_interp"
+                "ACC pilot action_space must be legacy, multiscale, or "
+                "factorized_interp"
             )
         if str(config.get("reward_profile")) not in (
             "tail_safe", "weighted"

@@ -50,6 +50,23 @@ class ABASchedulerTest(unittest.TestCase):
         self.assertEqual([row[3] for row in rows], [1, 2, 3, 4, 5, 6])
         self.assertEqual([row[0] for row in rows], ["a1", "a1", "b", "b", "a2", "a2"])
 
+    def test_acc_pilot_accepts_exact_legacy_action_and_reward(self):
+        config = RUN_ABA.load_config(
+            ROOT / "configs" / "aba" / "hadoop_alistorage.yaml"
+        )
+        config.update({
+            "run_id": "legacy_weighted_fixture",
+            "experiment_kind": "acc_pilot",
+            "route": "CCC",
+            "a1_epochs": 100,
+            "b_epochs": 0,
+            "a2_epochs": 0,
+            "methods": "ACC",
+            "action_space": "legacy",
+            "reward_profile": "weighted",
+        })
+        RUN_ABA.validate_config(config)
+
     def test_runtime_config_rewrites_every_output(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
