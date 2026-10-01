@@ -111,3 +111,25 @@ nohup bash scripts/continual_validation/run_acc_reward_action_pilot.sh \
 
 The comparison report is written to
 `experiments/aba/acc_pilot_hadoop_s1_comparison/`.
+
+## Causal diagnostics after a completed baseline pilot
+
+Use the isolated diagnostic runner to distinguish a weak learner from an
+insensitive environment. It evaluates five fixed actions and frozen epoch-0
+and final greedy policies on the same canonical flow. The source checkpoint is
+read-only, every point is repeated, FCT uses the common completed-flow
+intersection, and queue samples are also reported relative to their physical
+Kmin/Kmax thresholds.
+
+```bash
+bash scripts/continual_validation/run_acc_pilot_diagnostics.sh \
+  --run-dir experiments/aba/acc_pilot_hadoop_s1_baseline \
+  --output-dir experiments/aba/acc_pilot_hadoop_s1_baseline_diagnostics \
+  --stage all \
+  --repeats 3 \
+  --port 7700
+```
+
+The source pilot must have reached its registered final epoch. Existing output
+requires `--resume`; changing the source checkpoint, repeat count, or port
+requires a new output directory.
