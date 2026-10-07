@@ -133,3 +133,20 @@ bash scripts/continual_validation/run_acc_pilot_diagnostics.sh \
 The source pilot must have reached its registered final epoch. Existing output
 requires `--resume`; changing the source checkpoint, repeat count, or port
 requires a new output directory.
+
+After the frozen evaluations finish, condition queue measurements on physical
+port activity and rank switch-to-switch port sensitivity:
+
+```bash
+python tools/analysis/analyze_acc_pilot_port_activity.py \
+  --diagnostic-dir experiments/aba/acc_pilot_hadoop_s1_baseline_diagnostics
+```
+
+The resulting `port_activity/REPORT.md`, `scopes.csv`,
+`per_trial_ports.csv`, and `switch_port_sensitivity.csv` distinguish all
+ports from switch-to-switch ports and use normalized transmit-rate cutoffs of
+1%, 5%, and 10%. Queue and rate records are matched by physical port and
+time. The report includes the match coverage; low coverage means conditional
+figures need a closer look at monitor sampling times. The port rankings show
+throughput, queue, ECN, and watched-port reward changes, while FCT remains a
+network-level measurement.
