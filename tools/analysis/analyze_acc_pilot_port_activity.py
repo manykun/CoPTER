@@ -215,7 +215,9 @@ def analyze_trial(destination: Path, label: str, repeat: int, switches: set[int]
             selected = samples if cutoff == 0 else [s for s in samples if s["tx_rate"] > cutoff]
             suffix = "all" if cutoff == 0 else f"tx_gt_{int(cutoff * 100)}pct"
             for name, value in summarize(selected).items():
-                if action is None and name.startswith("queue_ge_"):
+                if action is None and name in (
+                    "queue_ge_kmin_ratio", "queue_ge_kmax_ratio"
+                ):
                     value = None
                 fields[f"{suffix}_{name}"] = value
         rows.append(fields)

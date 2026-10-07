@@ -1,3 +1,4 @@
+import csv
 import json
 import subprocess
 import sys
@@ -72,6 +73,12 @@ class AccPilotPortActivityTest(unittest.TestCase):
             self.assertAlmostEqual(row["all_queue_ge_kmin_ratio"], 2 / 3)
             self.assertAlmostEqual(row["all_queue_ge_kmax_ratio"], 1 / 3)
             self.assertEqual(row["watched_port_reward"], 0.5)
+            frozen_row, = analyze_trial(
+                path, "frozen_initial", 1,
+                topology_switches(path / "input.conf"),
+            )
+            self.assertIsNone(frozen_row["all_queue_ge_kmin_ratio"])
+            self.assertAlmostEqual(frozen_row["all_queue_ge_8kb_ratio"], 2 / 3)
 
             diagnostic = path / "diagnostic"
             trial = diagnostic / "eval" / "fixed_low_gentle" / "repeat_1"
@@ -81,12 +88,30 @@ class AccPilotPortActivityTest(unittest.TestCase):
                 "result.rate", "result.throughput", "agent_metrics.json",
             ):
                 (trial / name).write_bytes((path / name).read_bytes())
+            frozen_trial = diagnostic / "eval" / "frozen_initial" / "repeat_1"
+            frozen_trial.mkdir(parents=True)
+            for name in (
+                "complete.json", "input.conf", "input.flow", "result.queue",
+                "result.rate", "result.throughput", "agent_metrics.json",
+            ):
+                (frozen_trial / name).write_bytes((path / name).read_bytes())
             subprocess.run([
                 sys.executable,
                 str(Path(__file__).resolve().parents[1] / "analyze_acc_pilot_port_activity.py"),
                 "--diagnostic-dir", str(diagnostic),
             ], check=True, capture_output=True, text=True)
             self.assertTrue((diagnostic / "port_activity" / "REPORT.md").is_file())
+            with (diagnostic / "port_activity" / "scopes.csv").open(
+                encoding="utf-8", newline=""
+            ) as handle:
+                frozen = next(
+                    row for row in csv.DictReader(handle)
+                    if row["label"] == "frozen_initial"
+                    and row["scope"] == "switch_switch"
+                    and row["activity"] == "all"
+                )
+            self.assertAlmostEqual(float(frozen["queue_ge_8kb_ratio"]), 2 / 3)
+            self.assertEqual(frozen["queue_ge_kmin_ratio"], "")
 
     def test_empty_sample_summary(self):
         self.assertIsNone(summarize([])["queue_ge_kmin_ratio"])
