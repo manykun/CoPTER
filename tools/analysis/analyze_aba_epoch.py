@@ -35,6 +35,7 @@ NETWORK_FIELDS = [
     "reward", "loss", "td_loss", "consistency_loss", "reference_loss",
     "q_prediction_abs_max", "q_target_abs_max", "td_error_abs_p95_max",
     "expected_q_bound", "q_inflation_limit", "q_inflated_ports",
+    "replay_congested_sample_ratio", "replay_congested_available_ratio",
     "local_replay_size", "global_replay_size", "global_replay_clusters",
     "global_replay_boundary_entries", "global_replay_evictions",
     "global_replay_drift_score_max", "global_replay_task_sizes",
@@ -56,6 +57,9 @@ PORT_FIELDS = [
     "reward_population", "port_reward", "tail_safe_raw", "active_steps",
     "congested_steps", "port_loss", "port_q_prediction_abs_max",
     "port_q_target_abs_max", "port_td_error_abs_p95_max",
+    "port_replay_congested_sample_ratio",
+    "port_replay_congested_available_ratio",
+    "reference_action", "reference_greedy_fraction", "reference_margin_mean",
     "dominant_action", "dominant_action_fraction",
     "queue_samples", "mean_queue_kb", "p95_queue_kb", "p99_queue_kb", "max_queue_kb",
     "rate_samples", "mean_throughput_mbps", "p95_throughput_mbps", "p99_throughput_mbps",
@@ -217,6 +221,9 @@ def main():
         denominator = congested_steps if population == "congested" else active_steps
         identifier = detail.get("identifier")
         training_detail = (agent_record.get("train_port_metrics") or {}).get(str(agent_port), {})
+        ranking_detail = (agent_record.get("watch_ports_q_ranking") or {}).get(
+            str(agent_port), {}
+        )
         switch_id = port_id = None
         if identifier and "-" in str(identifier):
             try:
@@ -235,6 +242,19 @@ def main():
             "port_q_prediction_abs_max": training_detail.get("q_prediction_abs_max"),
             "port_q_target_abs_max": training_detail.get("q_target_abs_max"),
             "port_td_error_abs_p95_max": training_detail.get("td_error_abs_p95_max"),
+            "port_replay_congested_sample_ratio": training_detail.get(
+                "replay_congested_sample_ratio"
+            ),
+            "port_replay_congested_available_ratio": training_detail.get(
+                "replay_congested_available_ratio"
+            ),
+            "reference_action": ranking_detail.get("reference_action"),
+            "reference_greedy_fraction": ranking_detail.get(
+                "reference_greedy_fraction"
+            ),
+            "reference_margin_mean": ranking_detail.get(
+                "reference_margin_mean"
+            ),
             "dominant_action_fraction": (
                 dominant_count / denominator if denominator else None
             ),

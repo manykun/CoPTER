@@ -70,6 +70,22 @@ def test_acc_exposes_bounded_q_diagnostics():
         assert all(np.isfinite(value) for value in diagnostics[group].values())
 
 
+def test_acc_reference_action_q_ranking():
+    agent = ACC(
+        "q_ranking",
+        AgentParameters(state_dim=18, hidden_dims=(8,)),
+        action_space="multiscale",
+    )
+    detail = agent.action_value_diagnostics(
+        np.zeros(18, dtype=np.float32), reference_action=(8, 0)
+    )
+    assert detail["reference_action"] == "8,0"
+    assert isinstance(detail["reference_is_greedy"], bool)
+    assert np.isfinite(detail["greedy_score"])
+    assert np.isfinite(detail["reference_score"])
+    assert np.isfinite(detail["reference_margin"])
+
+
 class FakeAgent:
     def __init__(self):
         self.name = "fake"
@@ -108,12 +124,15 @@ def test_target_update_uses_global_optimizer_steps():
     helper.shared_rb = deque()
     helper.train_call_count = 0
     helper.global_train_step = 0
+    helper._target_update_count = 0
+    helper._last_target_update_step = 0
     helper._train_call_count_since_save = 0
     helper._recent_losses = deque(maxlen=10)
     helper._recent_rewards = deque(maxlen=10)
     helper._epoch_port_losses = {}
     helper._epoch_port_rewards = {}
     helper._epoch_port_q_diagnostics = {}
+    helper._epoch_port_replay_samples = {}
     helper._q_inflation_seen_ports = set()
     helper._tb = None
 
@@ -130,5 +149,6 @@ def test_target_update_uses_global_optimizer_steps():
 if __name__ == "__main__":
     test_fresh_target_matches_policy()
     test_acc_exposes_bounded_q_diagnostics()
+    test_acc_reference_action_q_ranking()
     test_target_update_uses_global_optimizer_steps()
-    print("ACC Q diagnostics tests passed (3/3)")
+    print("ACC Q diagnostics tests passed (4/4)")

@@ -130,6 +130,20 @@ def validate_config(config: dict) -> None:
             raise ValueError(
                 "ACC pilot reward_profile must be tail_safe or weighted"
             )
+        if int(config.get("reward_window_size", 32)) <= 0:
+            raise ValueError("ACC pilot reward_window_size must be positive")
+        if str(config.get("replay_sampling", "uniform")) not in (
+            "uniform", "congestion_stratified"
+        ):
+            raise ValueError(
+                "ACC pilot replay_sampling must be uniform or "
+                "congestion_stratified"
+            )
+        fraction = float(config.get("replay_congested_fraction", 0.5))
+        if not 0.0 <= fraction <= 1.0:
+            raise ValueError(
+                "ACC pilot replay_congested_fraction must be in [0, 1]"
+            )
         if int(config["a1_epochs"]) <= 0:
             raise ValueError("ACC pilot requires at least one A1 epoch")
         if int(config["b_epochs"]) != 0 or int(config["a2_epochs"]) != 0:
@@ -147,6 +161,7 @@ def validate_config(config: dict) -> None:
 
 
 def protocol(config: dict, config_path: Path, smoke: bool) -> dict:
+    experiment_kind = str(config.get("experiment_kind", "formal"))
     epochs = {
         "a1": 2 if smoke else int(config["a1_epochs"]),
         "b": 2 if smoke else int(config["b_epochs"]),
@@ -194,6 +209,17 @@ def protocol(config: dict, config_path: Path, smoke: bool) -> dict:
     # ABA/CDC runs created before experimental pilot support existed.
     if "experiment_kind" in config:
         result["experiment_kind"] = str(config["experiment_kind"])
+    if experiment_kind == "acc_pilot":
+        result.update({
+            "reward_window_size": int(config.get("reward_window_size", 32)),
+            "replay_sampling": str(config.get("replay_sampling", "uniform")),
+            "replay_congested_fraction": float(
+                config.get("replay_congested_fraction", 0.5)
+            ),
+            "diagnostic_reference_action": str(
+                config.get("diagnostic_reference_action", "")
+            ),
+        })
     if config.get("route"):
         result["route"] = str(config["route"]).upper()
     return result
@@ -562,10 +588,14 @@ def _method_worker_locked(config: dict, protocol_data: dict, run_dir: Path,
             "--action-space", str(config["action_space"]), "--hidden-dims", str(config.get("acc_hidden_dims", "32,64,64,32")),
             "--reward-profile", str(config["reward_profile"]), "--reward-queue-lambda", str(config.get("reward_queue_lambda", 5)),
             "--reward-ecn-lambda", str(config.get("reward_ecn_lambda", 5)), "--reward-weights", str(config.get("reward_weights", "0.50,0.30,0.20")),
+            "--reward-window-size", str(config.get("reward_window_size", 32)),
             "--epsilon-start", str(config.get("epsilon_start", 1)), "--epsilon-end", str(config.get("epsilon_end", 0.05)),
             "--epsilon-decay-steps", str(config.get("epsilon_decay_steps", 2500)), "--epsilon-schedule", str(config["epsilon_schedule"]),
             "--target-update-interval", str(config.get("target_update_interval", 100)), "--shared-replay", str(config.get("shared_replay", False)).lower(),
+            "--replay-sampling", str(config.get("replay_sampling", "uniform")),
+            "--replay-congested-fraction", str(config.get("replay_congested_fraction", 0.5)),
             "--watch-ports", str(config.get("watch_ports", "")), "--watch-trace-file", str(raw_dir / "watch_trace.jsonl"),
+            "--diagnostic-reference-action", str(config.get("diagnostic_reference_action", "")),
             "--fct-source-file", str(raw_dir / "result.fct"), "--fct-step-trace-file", str(raw_dir / "fct_steps.csv"),
             "--tb-enable", "false", "--sor-recent-size", str(config.get("sor_recent_size", 200)),
             "--sor-boundary-size", str(config.get("sor_boundary_size", 1000)), "--sor-max-clusters", str(config.get("sor_max_clusters", 32)),

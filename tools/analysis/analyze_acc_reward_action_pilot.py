@@ -39,6 +39,33 @@ def read_variant(prefix, variant):
     return run_id, protocol, rows
 
 
+def read_port_rows(run_id):
+    path = (
+        ROOT / "experiments" / "aba" / run_id / "summaries" /
+        "acc_epoch_ports.csv"
+    )
+    if not path.exists():
+        path = (
+            ROOT / "simulation" / "output" / "aba" / run_id /
+            "acc" / "epoch_ports.csv"
+        )
+    with path.open(encoding="utf-8", newline="") as handle:
+        return [
+            row for row in csv.DictReader(handle)
+            if row.get("record_source") == "watch"
+        ]
+
+
+def read_frozen_diagnostics(run_id):
+    path = (
+        ROOT / "experiments" / "aba" / f"{run_id}_diagnostics" /
+        "summary.json"
+    )
+    if not path.exists():
+        return None
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
 def window_mean(rows, field, first):
     selected = rows[:10] if first else rows[-10:]
     values = [number(row.get(field)) for row in selected]
@@ -112,6 +139,10 @@ def make_plots(output, data):
         ("mean_ecn_rate", "Mean ECN rate"),
         ("pfc_duty", "PFC duty"),
     ])
+    plot("replay_signal.png", [
+        ("replay_congested_available_ratio", "Congested fraction in replay"),
+        ("replay_congested_sample_ratio", "Congested fraction in minibatch"),
+    ])
     return []
 
 
@@ -160,12 +191,17 @@ def main():
         "- Native rewards from tail_safe and weighted have different scales and are not compared across profiles.",
         "- FCT and physical metrics are per-epoch training trajectories, not frozen-policy evaluations.",
         "", "## Configuration", "",
-        "| Variant | Action space | Reward | Epochs |", "|---|---|---|---:|",
+        "| Variant | Action space | Reward | Reward window | Replay sampling | Congested target | Epochs |",
+        "|---|---|---|---:|---|---:|---:|",
     ]
     for variant, (_, protocol, rows) in data.items():
         lines.append(
             f"| {variant} | {protocol['action_space']} | "
-            f"{protocol['reward_profile']} | {len(rows)} |"
+            f"{protocol['reward_profile']} | "
+            f"{protocol.get('reward_window_size', 32)} | "
+            f"{protocol.get('replay_sampling', 'uniform')} | "
+            f"{protocol.get('replay_congested_fraction', 0.5):.2f} | "
+            f"{len(rows)} |"
         )
     lines += [
         "", "## First-10 to last-10 changes", "",
@@ -190,10 +226,95 @@ def main():
             f"{fmt(values['mean_queue_kb'],2,'%')} | {fmt(values['mean_ecn_rate'],2,'%')} |"
         )
     lines += [
+        "", "## Learning-signal diagnostics", "",
+        "| Variant | Replay signal available first/last 10 | Signal sampled first/last 10 | Reference action greedy on watched ports (last 10) | Reference Q margin (last 10) |",
+        "|---|---:|---:|---:|---:|",
+    ]
+    for variant, (run_id, _, rows) in data.items():
+        available_first = window_mean(
+            rows, "replay_congested_available_ratio", True
+        )
+        available_last = window_mean(
+            rows, "replay_congested_available_ratio", False
+        )
+        sampled_first = window_mean(
+            rows, "replay_congested_sample_ratio", True
+        )
+        sampled_last = window_mean(
+            rows, "replay_congested_sample_ratio", False
+        )
+        port_rows = read_port_rows(run_id)
+        final_epochs = {
+            int(row["global_epoch"]) for row in rows[-10:]
+        }
+        final_ports = [
+            row for row in port_rows
+            if int(row["global_epoch"]) in final_epochs
+        ]
+        greedy_values = [
+            number(row.get("reference_greedy_fraction"))
+            for row in final_ports
+        ]
+        margin_values = [
+            number(row.get("reference_margin_mean"))
+            for row in final_ports
+        ]
+        greedy_values = [value for value in greedy_values if value is not None]
+        margin_values = [value for value in margin_values if value is not None]
+        lines.append(
+            f"| {variant} | {fmt(available_first,3)} / {fmt(available_last,3)} | "
+            f"{fmt(sampled_first,3)} / {fmt(sampled_last,3)} | "
+            f"{fmt(mean(greedy_values) if greedy_values else None,3)} | "
+            f"{fmt(mean(margin_values) if margin_values else None,4)} |"
+        )
+
+    frozen = {
+        variant: read_frozen_diagnostics(run_id)
+        for variant, (run_id, _, _) in data.items()
+    }
+    if any(value is not None for value in frozen.values()):
+        lines += [
+            "", "## Frozen-policy validation", "",
+            "| Variant | Reward change | Mean FCT change | p95 FCT change | p99 FCT change | Completion change pp | Frozen repeats available |",
+            "|---|---:|---:|---:|---:|---:|---|",
+        ]
+        for variant in data:
+            summary = frozen.get(variant) or {}
+            initial = summary.get("frozen_initial") or {}
+            final = summary.get("frozen_final") or {}
+            repeats_available = bool(initial and final)
+            completion_before = number(initial.get("completion_ratio"))
+            completion_after = number(final.get("completion_ratio"))
+            completion_change = (
+                100.0 * (completion_after - completion_before)
+                if completion_before is not None and completion_after is not None
+                else None
+            )
+            lines.append(
+                f"| {variant} | "
+                f"{fmt(percent_change(number(initial.get('reward')), number(final.get('reward'))),2,'%')} | "
+                f"{fmt(percent_change(number(initial.get('mean_fct_us')), number(final.get('mean_fct_us'))),2,'%')} | "
+                f"{fmt(percent_change(number(initial.get('p95_fct_us')), number(final.get('p95_fct_us'))),2,'%')} | "
+                f"{fmt(percent_change(number(initial.get('p99_fct_us')), number(final.get('p99_fct_us'))),2,'%')} | "
+                f"{fmt(completion_change,4)} | "
+                f"{'yes' if repeats_available else 'no'} |"
+            )
+        baseline_summary = frozen.get("baseline") or {}
+        reference = baseline_summary.get("fixed_high_gentle") or {}
+        if reference:
+            lines += [
+                "",
+                "Baseline fixed `high_gentle` reference: "
+                f"mean FCT **{fmt(number(reference.get('mean_fct_us')))} us**, "
+                f"p95 FCT **{fmt(number(reference.get('p95_fct_us')))} us**. "
+                "The learned frozen policies should move toward this physical reference.",
+            ]
+    lines += [
         "", "## Figures", "",
         "- `figures/reward_loss.png`",
         "- `figures/fct_curves.png`",
         "- `figures/network_curves.png`",
+        "- `figures/replay_signal.png`",
     ]
     if notes:
         lines += ["", "## Notes", ""] + [f"- {note}" for note in notes]

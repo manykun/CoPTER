@@ -25,6 +25,28 @@ FIXTURES = Path(__file__).parent / "fixtures"
 
 
 class MetricsCoreTest(unittest.TestCase):
+    def test_acc_replay_signal_ratios_are_update_weighted(self):
+        result = aggregate_agent_losses({
+            "train_port_metrics": {
+                "1": {
+                    "updates": 3,
+                    "replay_congested_sample_ratio": 0.5,
+                    "replay_congested_available_ratio": 0.2,
+                },
+                "2": {
+                    "updates": 1,
+                    "replay_congested_sample_ratio": 0.1,
+                    "replay_congested_available_ratio": 0.6,
+                },
+            },
+        })
+        self.assertAlmostEqual(
+            result["replay_congested_sample_ratio"], 0.4
+        )
+        self.assertAlmostEqual(
+            result["replay_congested_available_ratio"], 0.3
+        )
+
     def test_structured_replay_composition_is_preserved(self):
         result = aggregate_agent_losses({
             "replay": {"global": {

@@ -16,6 +16,7 @@ from port_metrics import (
     parse_watch_ports,
 )
 from structures import (
+    ACC_REPLAY_SAMPLING,
     ACC_ACTION_SPACES,
     EPSILON_SCHEDULES,
     AgentHelperParameters,
@@ -76,6 +77,10 @@ if __name__ == "__main__":
     parser.add_argument("--reward_profile", choices=("weighted", "tail_safe"), default="weighted")
     parser.add_argument("--reward_queue_lambda", type=float, default=5.0)
     parser.add_argument("--reward_ecn_lambda", type=float, default=5.0)
+    parser.add_argument(
+        "--reward_window_size", type=int, default=32,
+        help="Recent observation count used for per-action reward assignment.",
+    )
     parser.add_argument("--state_save_interval", type=int, default=1)
     parser.add_argument(
         "--target_update_interval",
@@ -92,6 +97,14 @@ if __name__ == "__main__":
         default="true",
         help="Enable ACC cross-port shared/global replay. false keeps only per-port FIFO replay.",
     )
+    parser.add_argument(
+        "--replay_sampling", choices=ACC_REPLAY_SAMPLING, default="uniform",
+        help="ACC local replay sampling policy.",
+    )
+    parser.add_argument(
+        "--replay_congested_fraction", type=float, default=0.5,
+        help="Target congested-transition fraction for stratified ACC minibatches.",
+    )
     parser.add_argument("--seed", type=int, default=1, help="Random seed for Python, NumPy, and PyTorch.")
     parser.add_argument("--run_id", type=str, default=None, help="Optional run identifier stored with training state and metrics.")
     parser.add_argument("--phase", type=str, default=None, help="Optional training phase stored with training state and metrics.")
@@ -103,6 +116,10 @@ if __name__ == "__main__":
     parser.add_argument("--force_port_action", type=str, default="", help="Frozen local sweep: override one port with PORT,KMIN_NORM,KMAX_NORM,PMAX while all other ports remain greedy.")
     parser.add_argument("--watch_ports", type=str, default="", help="Comma-separated port indices to track explicitly. Their per-epoch rollout reward (EMA) is written to metrics jsonl and TensorBoard (rollout/reward_port{p}) so a fixed port's reward trajectory can be plotted across epochs.")
     parser.add_argument("--watch_trace_file", type=str, default="", help="Optional JSONL path for per-step metrics of --watch_ports.")
+    parser.add_argument(
+        "--diagnostic_reference_action", type=str, default="",
+        help="Optional action indices whose Q ranking is tracked on watch ports.",
+    )
     parser.add_argument("--fct_source_file", type=str, default="", help="ns-3 FCT stream to read incrementally.")
     parser.add_argument("--fct_step_trace_file", type=str, default="", help="CSV output with one FCT record per environment step.")
     parser.add_argument("--launcher_episode", type=int, default=None, help="Launcher episode identifier stored in the FCT trace.")
@@ -128,6 +145,10 @@ if __name__ == "__main__":
     set_random_seed(args.seed)
     if args.reward_queue_lambda < 0 or args.reward_ecn_lambda < 0:
         raise SystemExit("tail-safe reward lambdas must be non-negative")
+    if args.reward_window_size <= 0:
+        raise SystemExit("--reward_window_size must be positive")
+    if not 0.0 <= args.replay_congested_fraction <= 1.0:
+        raise SystemExit("--replay_congested_fraction must be in [0, 1]")
     if args.target_update_interval <= 0:
         raise SystemExit("--target_update_interval must be a positive integer")
 
@@ -162,6 +183,16 @@ if __name__ == "__main__":
         watch_ports = parse_watch_ports(args.watch_ports)
     except ValueError as exc:
         raise SystemExit(f"invalid --watch_ports: {exc}")
+    diagnostic_reference_action = None
+    if args.diagnostic_reference_action:
+        try:
+            diagnostic_reference_action = validate_acc_action_indices(
+                args.diagnostic_reference_action.split(","), args.action_space
+            )
+        except ValueError as exc:
+            raise SystemExit(
+                f"invalid --diagnostic_reference_action: {exc}"
+            )
 
     # Print the parsed arguments
     logger.info(f"Parsed arguments: {args}")
@@ -183,6 +214,7 @@ if __name__ == "__main__":
         reward_profile=args.reward_profile,
         reward_queue_lambda=args.reward_queue_lambda,
         reward_ecn_lambda=args.reward_ecn_lambda,
+        reward_window_size=args.reward_window_size,
     )
     
     network_helper = NetworkHelper(ns3_socket=args.ns3_socket, nhp=network_helper_params)
@@ -218,6 +250,8 @@ if __name__ == "__main__":
         state_save_interval=args.state_save_interval,
         shared_replay_enabled=args.shared_replay == "true",
         target_update_interval=args.target_update_interval,
+        replay_sampling=args.replay_sampling,
+        replay_congested_fraction=args.replay_congested_fraction,
     )
 
     config_hash = hashlib.sha256(
@@ -299,6 +333,16 @@ if __name__ == "__main__":
     reward_fallback_samples = 0
     reward_fallback_steps = 0
     action_histogram = {}
+    watch_q_ranking = {
+        port: {
+            "samples": 0,
+            "reference_greedy_count": 0,
+            "reference_margin_sum": 0.0,
+            "reference_margin_min": None,
+            "reference_margin_max": None,
+        }
+        for port in watch_ports
+    }
 
     try:
         while True:
@@ -346,6 +390,29 @@ if __name__ == "__main__":
                     actions = [forced_action_idx for _ in range(n_port)]
                 else:
                     paras, actions = agent_helper.decide(port_states, epsi=current_epsilon)
+
+                if diagnostic_reference_action is not None:
+                    for port in watch_ports:
+                        detail = agent_helper.agent_pool[
+                            port
+                        ].action_value_diagnostics(
+                            port_states[port], diagnostic_reference_action
+                        )
+                        stats = watch_q_ranking[port]
+                        margin = float(detail["reference_margin"])
+                        stats["samples"] += 1
+                        stats["reference_greedy_count"] += int(
+                            detail["reference_is_greedy"]
+                        )
+                        stats["reference_margin_sum"] += margin
+                        stats["reference_margin_min"] = (
+                            margin if stats["reference_margin_min"] is None
+                            else min(stats["reference_margin_min"], margin)
+                        )
+                        stats["reference_margin_max"] = (
+                            margin if stats["reference_margin_max"] is None
+                            else max(stats["reference_margin_max"], margin)
+                        )
 
                 if forced_port_action is not None:
                     port, kmin_norm, kmax_norm, pmax = forced_port_action
@@ -575,6 +642,24 @@ if __name__ == "__main__":
                     for port, value in port_metric_tracker.legacy_rewards().items()
                 } if watch_ports else {},
                 "watch_ports_metrics": port_metric_tracker.summary(),
+                "watch_ports_q_ranking": {
+                    str(port): {
+                        **stats,
+                        "reference_action": (
+                            ",".join(str(index) for index in diagnostic_reference_action)
+                            if diagnostic_reference_action is not None else None
+                        ),
+                        "reference_greedy_fraction": (
+                            stats["reference_greedy_count"] / stats["samples"]
+                            if stats["samples"] else None
+                        ),
+                        "reference_margin_mean": (
+                            stats["reference_margin_sum"] / stats["samples"]
+                            if stats["samples"] else None
+                        ),
+                    }
+                    for port, stats in watch_q_ranking.items()
+                },
                 "fct_step_trace": fct_step_tracker.summary(),
             })
             if args.eval_greedy:

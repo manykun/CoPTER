@@ -29,6 +29,29 @@ VARIANTS = {
     # Keep this separate from ``factorized_interp``: the legacy policy does
     # not pair thresholds and does not insert midpoint categories.
     "legacy": ("legacy", "weighted"),
+    # Credit-assignment study: action space, traffic, buffer and reward formula
+    # remain identical to baseline. Only the reward history and replay sampler
+    # change, so FCT differences have an interpretable cause.
+    "short_window": ("multiscale", "tail_safe"),
+    "credit": ("multiscale", "tail_safe"),
+}
+
+VARIANT_OVERRIDES = {
+    "baseline": {
+        "reward_window_size": 32,
+        "replay_sampling": "uniform",
+        "replay_congested_fraction": 0.5,
+    },
+    "short_window": {
+        "reward_window_size": 4,
+        "replay_sampling": "uniform",
+        "replay_congested_fraction": 0.5,
+    },
+    "credit": {
+        "reward_window_size": 4,
+        "replay_sampling": "congestion_stratified",
+        "replay_congested_fraction": 0.5,
+    },
 }
 
 
@@ -71,7 +94,13 @@ def build_config(base: dict, run_id: str, variant: str, epochs: int,
         "action_space": action_space,
         "reward_profile": reward_profile,
         "shared_replay": False,
+        "diagnostic_reference_action": "8,0",
     })
+    config.update(VARIANT_OVERRIDES.get(variant, {
+        "reward_window_size": 32,
+        "replay_sampling": "uniform",
+        "replay_congested_fraction": 0.5,
+    }))
     return config
 
 
@@ -127,6 +156,7 @@ def main():
         "--variants", default="baseline,weighted,action",
         help=(
             "comma-separated subset of baseline,weighted,action,combined,legacy; "
+            "credit-assignment variants short_window and credit are also supported; "
             "legacy reproduces the original independent-head action space "
             "with the original weighted reward"
         ),
@@ -154,7 +184,7 @@ def main():
     if not requested or any(item not in VARIANTS for item in requested):
         raise ValueError(
             "--variants must contain baseline, weighted, action, combined, "
-            "or legacy"
+            "legacy, short_window, or credit"
         )
     if len(set(requested)) != len(requested):
         raise ValueError("--variants contains duplicates")

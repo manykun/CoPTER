@@ -75,6 +75,10 @@ REWARD_WEIGHTS="0.50,0.30,0.20"
 REWARD_PROFILE="weighted"
 REWARD_QUEUE_LAMBDA=5.0
 REWARD_ECN_LAMBDA=5.0
+REWARD_WINDOW_SIZE=32
+REPLAY_SAMPLING="uniform"
+REPLAY_CONGESTED_FRACTION=0.5
+DIAGNOSTIC_REFERENCE_ACTION=""
 SHARED_REPLAY="true"
 SOR_RECENT_SIZE=2000
 SOR_BOUNDARY_SIZE=20000
@@ -137,7 +141,11 @@ while [[ $# -gt 0 ]]; do
         --reward-profile) REWARD_PROFILE="$2"; shift 2 ;;
         --reward-queue-lambda) REWARD_QUEUE_LAMBDA="$2"; shift 2 ;;
         --reward-ecn-lambda) REWARD_ECN_LAMBDA="$2"; shift 2 ;;
+        --reward-window-size) REWARD_WINDOW_SIZE="$2"; shift 2 ;;
         --shared-replay) SHARED_REPLAY="$2"; shift 2 ;;
+        --replay-sampling) REPLAY_SAMPLING="$2"; shift 2 ;;
+        --replay-congested-fraction) REPLAY_CONGESTED_FRACTION="$2"; shift 2 ;;
+        --diagnostic-reference-action) DIAGNOSTIC_REFERENCE_ACTION="$2"; shift 2 ;;
         --sor-recent-size) SOR_RECENT_SIZE="$2"; shift 2 ;;
         --sor-boundary-size) SOR_BOUNDARY_SIZE="$2"; shift 2 ;;
         --sor-max-clusters) SOR_MAX_CLUSTERS="$2"; shift 2 ;;
@@ -378,7 +386,10 @@ run_single_experiment() {
                 --reward_profile "${REWARD_PROFILE}"
                 --reward_queue_lambda "${REWARD_QUEUE_LAMBDA}"
                 --reward_ecn_lambda "${REWARD_ECN_LAMBDA}"
+                --reward_window_size "${REWARD_WINDOW_SIZE}"
                 --shared_replay "${SHARED_REPLAY}"
+                --replay_sampling "${REPLAY_SAMPLING}"
+                --replay_congested_fraction "${REPLAY_CONGESTED_FRACTION}"
             )
         fi
         [ "${ONLINE}" -eq 1 ] && AGENT_ARGS+=(--online)
@@ -389,6 +400,9 @@ run_single_experiment() {
         [ -n "${EVAL_TAG}" ] && AGENT_ARGS+=(--eval_tag "${EVAL_TAG}")
         [ -n "${WATCH_PORTS}" ] && AGENT_ARGS+=(--watch_ports "${WATCH_PORTS}")
         [ -n "${WATCH_TRACE_FILE}" ] && AGENT_ARGS+=(--watch_trace_file "${WATCH_TRACE_FILE}")
+        [ -n "${DIAGNOSTIC_REFERENCE_ACTION}" ] && AGENT_ARGS+=(
+            --diagnostic_reference_action "${DIAGNOSTIC_REFERENCE_ACTION}"
+        )
         if [ "${FCT_STEP_TRACE}" = "true" ]; then
             local FCT_SOURCE_LOCAL
             FCT_SOURCE_LOCAL=$(awk '$1 == "FCT_OUTPUT_FILE" {print $2; exit}' "${NS3_CONF_LOCAL}")

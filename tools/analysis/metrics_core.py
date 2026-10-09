@@ -519,6 +519,12 @@ def aggregate_agent_losses(record: Mapping[str, object]) -> Dict[str, Optional[f
         "expected_q_bound": maximum("expected_q_bound"),
         "q_inflation_limit": maximum("q_inflation_limit"),
         "q_inflated_ports": sum(bool(detail.get("q_inflated")) for detail in details),
+        "replay_congested_sample_ratio": weighted_epoch_mean(
+            "replay_congested_sample_ratio"
+        ),
+        "replay_congested_available_ratio": weighted_epoch_mean(
+            "replay_congested_available_ratio"
+        ),
         "local_replay_size": _number(replay.get("local_size_total")),
         "global_replay_size": _number(
             replay.get("global_size", global_detail.get("size"))

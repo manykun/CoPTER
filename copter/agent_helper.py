@@ -34,6 +34,13 @@ DEFAULT_COPTER_PARAMETER = AgentParameters(state_dim=18, kmin_dim=5, kmax_dim=10
 class ReplayBuffer:
     def __init__(self, capacity):
         self.buffer = deque(maxlen=capacity)
+        self.last_sample_diagnostics = {
+            "sampling": "uniform",
+            "congested_available": 0,
+            "congested_sampled": 0,
+            "sample_size": 0,
+            "buffer_size": 0,
+        }
 
 
     def push(self, state, action, reward, next_state):
@@ -45,8 +52,58 @@ class ReplayBuffer:
             self.push(state, action, reward, next_state)
 
 
-    def sample(self, batch_size):
-        batch = random.sample(self.buffer, batch_size)
+    @staticmethod
+    def _is_congested(entry):
+        """Return whether a transition contains queue or ECN signal.
+
+        ACC states contain three six-value observations. Queue and ECN occupy
+        offsets 0 and 2. Inspecting the stored state keeps the replay snapshot
+        format unchanged and therefore remains resume-compatible.
+        """
+        state, _, _, next_state = entry
+        values = np.concatenate((np.asarray(state), np.asarray(next_state)))
+        queue = values[0::6]
+        ecn = values[2::6]
+        return bool(
+            (queue.size and float(np.max(queue)) > 0.005)
+            or (ecn.size and float(np.max(ecn)) > 1e-5)
+        )
+
+    def sample(self, batch_size, sampling="uniform", congested_fraction=0.5):
+        if sampling == "uniform":
+            batch = random.sample(self.buffer, batch_size)
+            congested_sampled = sum(self._is_congested(item) for item in batch)
+            congested_available = sum(
+                self._is_congested(item) for item in self.buffer
+            )
+        elif sampling == "congestion_stratified":
+            congested = [item for item in self.buffer if self._is_congested(item)]
+            quiet = [item for item in self.buffer if not self._is_congested(item)]
+            target = int(round(batch_size * float(congested_fraction)))
+            take_congested = min(target, len(congested))
+            take_quiet = min(batch_size - take_congested, len(quiet))
+            remaining = batch_size - take_congested - take_quiet
+            if remaining:
+                take_congested += min(remaining, len(congested) - take_congested)
+                remaining = batch_size - take_congested - take_quiet
+            if remaining:
+                take_quiet += min(remaining, len(quiet) - take_quiet)
+            batch = (
+                random.sample(congested, take_congested)
+                + random.sample(quiet, take_quiet)
+            )
+            random.shuffle(batch)
+            congested_sampled = take_congested
+            congested_available = len(congested)
+        else:
+            raise ValueError(f"unknown replay sampling policy: {sampling}")
+        self.last_sample_diagnostics = {
+            "sampling": sampling,
+            "congested_available": int(congested_available),
+            "congested_sampled": int(congested_sampled),
+            "sample_size": int(len(batch)),
+            "buffer_size": int(len(self.buffer)),
+        }
         states, actions, rewards, next_states = zip(*batch)
         return (
             np.array(states),
@@ -172,6 +229,7 @@ class AgentHelper:
         # serializes them at the end of the one-epoch process.
         self._epoch_port_losses = {}
         self._epoch_port_rewards = {}
+        self._epoch_port_replay_samples = {}
         self._epoch_port_q_diagnostics = {}
         self._q_inflation_seen_ports = set()
         # Current "epoch" id (i.e. how many copter.py invocations) - read from train_state if exists
@@ -274,7 +332,14 @@ class AgentHelper:
             # 判断当前端口的经验回放缓冲区是否有足够多的样本
             if len(self.rb_pool[port_idx]) > sample_size:
                 # 从经验回放缓冲区采样训练数据
-                states, actions, rewards, next_states = self.rb_pool[port_idx].sample(sample_size)
+                states, actions, rewards, next_states = self.rb_pool[port_idx].sample(
+                    sample_size,
+                    sampling=self.p.replay_sampling,
+                    congested_fraction=self.p.replay_congested_fraction,
+                )
+                self._epoch_port_replay_samples.setdefault(port_idx, []).append(
+                    dict(self.rb_pool[port_idx].last_sample_diagnostics)
+                )
 
                 logger.info(f"Training agent {agent.name} with {len(states)} samples.")
                 loss = agent.train_model(states, actions, rewards, next_states)
@@ -490,6 +555,24 @@ class AgentHelper:
                         f"ACC target interval mismatch: checkpoint={saved_interval}, "
                         f"requested={self.p.target_update_interval}"
                     )
+                saved_sampling = ts.get("replay_sampling", "uniform")
+                if saved_sampling != self.p.replay_sampling:
+                    raise ValueError(
+                        f"ACC replay sampling mismatch: checkpoint={saved_sampling}, "
+                        f"requested={self.p.replay_sampling}"
+                    )
+                saved_fraction = float(ts.get(
+                    "replay_congested_fraction",
+                    self.p.replay_congested_fraction,
+                ))
+                if not np.isclose(
+                    saved_fraction, self.p.replay_congested_fraction
+                ):
+                    raise ValueError(
+                        "ACC replay congested fraction mismatch: "
+                        f"checkpoint={saved_fraction}, "
+                        f"requested={self.p.replay_congested_fraction}"
+                    )
                 self.global_train_step = int(ts.get("global_train_step", 0))
                 self.global_env_step = int(ts.get("global_env_step", 0))
                 saved_phase = ts.get("phase")
@@ -607,6 +690,10 @@ class AgentHelper:
             "shared_replay_size": len(self.shared_rb),
             "shared_replay_enabled": bool(self.p.shared_replay_enabled),
             "epsilon_schedule": self.p.epsilon_schedule,
+            "replay_sampling": self.p.replay_sampling,
+            "replay_congested_fraction": float(
+                self.p.replay_congested_fraction
+            ),
             "target_update_interval": int(self.p.target_update_interval),
             "target_update_count": int(self._target_update_count),
             "last_target_update_step": int(self._last_target_update_step),
@@ -644,6 +731,10 @@ class AgentHelper:
             "train_call_count": int(self.train_call_count),
             "epsilon": float(self.epsilon),
             "epsilon_schedule": self.p.epsilon_schedule,
+            "replay_sampling": self.p.replay_sampling,
+            "replay_congested_fraction": float(
+                self.p.replay_congested_fraction
+            ),
             "mean_reward": mean_reward,
             "mean_loss": mean_loss,
             "target_update_interval": int(self.p.target_update_interval),
@@ -673,6 +764,7 @@ class AgentHelper:
                         float(np.mean(self._epoch_port_rewards.get(port, [])))
                         if self._epoch_port_rewards.get(port) else None
                     ),
+                    **self._summarize_port_replay_samples(port),
                     **self._summarize_port_q_diagnostics(port),
                 }
                 for port, losses in sorted(self._epoch_port_losses.items())
@@ -740,6 +832,28 @@ class AgentHelper:
             "q_inflation_limit": float(samples[-1]["inflation_limit"]),
             "q_inflation_events": sum(bool(sample["inflated"]) for sample in samples),
             "q_inflated": any(bool(sample["inflated"]) for sample in samples),
+        }
+
+    def _summarize_port_replay_samples(self, port):
+        samples = self._epoch_port_replay_samples.get(port, [])
+        if not samples:
+            return {}
+        congested_sampled = sum(
+            sample["congested_sampled"] for sample in samples
+        )
+        sample_count = sum(sample["sample_size"] for sample in samples)
+        available_ratios = [
+            sample["congested_available"] / max(sample["buffer_size"], 1)
+            for sample in samples
+        ]
+        return {
+            "replay_sampling": self.p.replay_sampling,
+            "replay_congested_sample_ratio": (
+                congested_sampled / sample_count if sample_count else None
+            ),
+            "replay_congested_available_ratio": (
+                float(np.mean(available_ratios))
+            ),
         }
 
 

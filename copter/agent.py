@@ -15,6 +15,7 @@ from structures import (
     acc_action_dimensions,
     acc_action_from_indices,
     describe_acc_action,
+    validate_acc_action_indices,
 )
 
 
@@ -227,6 +228,48 @@ class ACC(Agent):
         )
         # 返回kmin、kmax、pmax参数值以及索引值
         return (acc_action_from_indices(action, self.action_space), action)
+
+    def action_value_diagnostics(self, state, reference_action=None):
+        """Return compact greedy/reference Q diagnostics for one state.
+
+        The ACC heads are additive, so the reported score is the same sum used
+        by training. This is diagnostic-only and never changes action choice.
+        """
+        state_tensor = torch.FloatTensor(state).unsqueeze(0).to(self.device)
+        with torch.no_grad():
+            heads = self.policy_net(state_tensor)
+        if self.action_space == "factorized_interp":
+            greedy = tuple(
+                int(index.item())
+                for index in self._factorized_greedy_actions(heads)
+            )
+        else:
+            greedy = tuple(int(head.argmax().item()) for head in heads)
+
+        def score(action):
+            return float(sum(
+                head[0, index].item()
+                for head, index in zip(heads, action)
+            ))
+
+        result = {
+            "greedy_action": ",".join(str(index) for index in greedy),
+            "greedy_score": score(greedy),
+        }
+        if reference_action is not None:
+            reference = validate_acc_action_indices(
+                reference_action, self.action_space
+            )
+            reference_score = score(reference)
+            result.update({
+                "reference_action": ",".join(
+                    str(index) for index in reference
+                ),
+                "reference_score": reference_score,
+                "reference_margin": reference_score - result["greedy_score"],
+                "reference_is_greedy": reference == greedy,
+            })
+        return result
     
     
     def train_model(self, state, action, reward, next_state):

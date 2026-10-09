@@ -13,6 +13,10 @@ class NetworkHelperParameters:
     reward_profile: str = "weighted"
     reward_queue_lambda: float = 5.0
     reward_ecn_lambda: float = 5.0
+    # Number of recent observations used to assign a reward to the latest
+    # action.  Keep 32 as the historical default; ACC pilot experiments may
+    # use a shorter window to reduce cross-action credit smearing.
+    reward_window_size: int = 32
 
 
 def calculate_tail_safe_reward(
@@ -52,6 +56,11 @@ class AgentHelperParameters:
     rb_size: int = 1000
     rb_size_global: int = 100000
     shared_replay_enabled: bool = True
+    # ACC-only sampling policy. ``congestion_stratified`` guarantees that an
+    # available fraction of every minibatch contains a queue/ECN signal,
+    # without changing replay capacity or discarding quiet transitions.
+    replay_sampling: str = "uniform"
+    replay_congested_fraction: float = 0.5
     # Hard-copy the ACC policy into its target network after this many
     # completed optimizer updates.  This is deliberately expressed in
     # global train steps: one experiment epoch is a separate process and its
@@ -69,6 +78,7 @@ class AgentHelperParameters:
 
 
 EPSILON_SCHEDULES = ("phase", "global")
+ACC_REPLAY_SAMPLING = ("uniform", "congestion_stratified")
 
 
 def scheduled_epsilon(start, end, decay_steps, global_step, phase_step, schedule="phase"):

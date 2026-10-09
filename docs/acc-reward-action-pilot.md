@@ -13,6 +13,8 @@ epsilon, and the authoritative per-epoch analysis pipeline.
 | action | `factorized_interp` | `tail_safe` | Threshold-space-only change |
 | combined | `factorized_interp` | `weighted` | Optional interaction check |
 | legacy | `legacy` | `weighted` | Exact original independent Kmin/Kmax/Pmax heads and reward |
+| short_window | `multiscale` | `tail_safe` over 4 steps | Isolate reward credit smearing |
+| credit | `multiscale` | `tail_safe` over 4 steps | Add 50% congestion-stratified local replay |
 
 `factorized_interp` retains the original threshold coordinates and inserts
 every adjacent midpoint. Kmin and Kmax each have 17 categories. Exploration,
@@ -150,3 +152,78 @@ time. The report includes the match coverage; low coverage means conditional
 figures need a closer look at monitor sampling times. The port rankings show
 throughput, queue, ECN, and watched-port reward changes, while FCT remains a
 network-level measurement.
+
+## Credit-assignment experiment after the Hadoop diagnosis
+
+The fixed-action evaluation shows that the environment can respond: action
+`8,0` (`Kmin=80 KB`, `Kmax=160 KB`, `Pmax=0.05`) materially improves Hadoop
+FCT, while the trained policy does not learn to prefer it. Test credit
+assignment before changing traffic, buffer, action ranges, or SOR. These
+three arms keep all of those variables fixed:
+
+| Arm | Reward history | Local replay minibatch |
+|---|---:|---|
+| baseline | 32 observations | uniform |
+| short_window | 4 observations | uniform |
+| credit | 4 observations | target 50% queue/ECN-informative transitions |
+
+The historical 32-observation congestion/activity detector remains unchanged
+in all arms. Only the reward attribution history is shortened, so the
+short-window comparison does not silently redefine the monitored population.
+
+Run a two-epoch smoke first:
+
+```bash
+python scripts/continual_validation/run_acc_reward_action_pilot.py \
+  --base-config configs/aba/hadoop_alistorage.yaml \
+  --stage smoke \
+  --variants baseline,short_window,credit \
+  --run-id-prefix acc_credit_hadoop_s1 \
+  --epochs 50 \
+  --stop-after 2 \
+  --port-base 7800 \
+  --jobs 3
+```
+
+Then start three 50-epoch arms in parallel with a fresh prefix:
+
+```bash
+nohup python scripts/continual_validation/run_acc_reward_action_pilot.py \
+  --base-config configs/aba/hadoop_alistorage.yaml \
+  --stage all \
+  --variants baseline,short_window,credit \
+  --run-id-prefix acc_credit_hadoop_s1 \
+  --epochs 50 \
+  --stop-after 50 \
+  --port-base 7800 \
+  --jobs 3 \
+  > experiments/aba/acc_credit_hadoop_s1_driver.log 2>&1 &
+```
+
+The comparison report adds replay-signal availability/sample ratios and the
+Q-value margin of reference action `8,0`. After training, freeze each final
+policy. Run the full fixed-action suite once for the baseline and only the
+frozen evaluation for the other arms:
+
+```bash
+bash scripts/continual_validation/run_acc_pilot_diagnostics.sh \
+  --run-dir experiments/aba/acc_credit_hadoop_s1_baseline \
+  --output-dir experiments/aba/acc_credit_hadoop_s1_baseline_diagnostics \
+  --stage all --repeats 3 --port 7810
+
+for arm in short_window credit; do
+  bash scripts/continual_validation/run_acc_pilot_diagnostics.sh \
+    --run-dir "experiments/aba/acc_credit_hadoop_s1_${arm}" \
+    --output-dir "experiments/aba/acc_credit_hadoop_s1_${arm}_diagnostics" \
+    --stage frozen --repeats 3 --port 7810
+done
+
+python tools/analysis/analyze_acc_reward_action_pilot.py \
+  --run-id-prefix acc_credit_hadoop_s1 \
+  --variants baseline,short_window,credit
+```
+
+Loss reduction alone is not success. Continue to ABA/SOR only if the frozen
+final policy moves mean and p95 FCT toward the fixed `high_gentle` reference,
+the sampled informative-transition ratio rises in the `credit` arm, and the
+Q margin of action `8,0` improves without a material completion loss.

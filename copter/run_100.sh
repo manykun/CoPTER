@@ -13,9 +13,11 @@ MODE="" PHASE="" EPOCH="" PORT="" EXP_NAME="" MODEL_DIR="" RUN_ID="" LOG=""
 EXPERIMENT_KIND=formal
 SEED=1 BUFFER_KB=400 ACTION_SPACE=multiscale HIDDEN_DIMS="32,64,64,32"
 REWARD_PROFILE=tail_safe REWARD_QUEUE_LAMBDA=5 REWARD_ECN_LAMBDA=5
+REWARD_WINDOW_SIZE=32 REPLAY_SAMPLING=uniform REPLAY_CONGESTED_FRACTION=0.5
 REWARD_WEIGHTS="0.50,0.30,0.20" EPSILON_START=1 EPSILON_END=0.05
 EPSILON_DECAY=2500 EPSILON_SCHEDULE=global TARGET_INTERVAL=100 SHARED_REPLAY=false
 WATCH_PORTS="" WATCH_TRACE="" FCT_SOURCE="" FCT_TRACE="" TB_ENABLE=false RESUME=false
+DIAGNOSTIC_REFERENCE_ACTION=""
 SOR_RECENT=200 SOR_BOUNDARY=1000 SOR_CLUSTERS=32 SOR_LAMBDA_CONS=0.01
 SOR_LAMBDA_REG=0.001 SOR_REF_INTERVAL=256 SOR_SYNC_INTERVAL=8 SOR_SAVE_EVERY=1
 
@@ -31,13 +33,17 @@ while [[ $# -gt 0 ]]; do
     --reward-profile) REWARD_PROFILE="$2"; shift 2 ;;
     --reward-queue-lambda) REWARD_QUEUE_LAMBDA="$2"; shift 2 ;;
     --reward-ecn-lambda) REWARD_ECN_LAMBDA="$2"; shift 2 ;;
+    --reward-window-size) REWARD_WINDOW_SIZE="$2"; shift 2 ;;
     --reward-weights) REWARD_WEIGHTS="$2"; shift 2 ;;
     --epsilon-start) EPSILON_START="$2"; shift 2 ;; --epsilon-end) EPSILON_END="$2"; shift 2 ;;
     --epsilon-decay-steps) EPSILON_DECAY="$2"; shift 2 ;;
     --epsilon-schedule) EPSILON_SCHEDULE="$2"; shift 2 ;;
     --target-update-interval) TARGET_INTERVAL="$2"; shift 2 ;;
     --shared-replay) SHARED_REPLAY="$2"; shift 2 ;;
+    --replay-sampling) REPLAY_SAMPLING="$2"; shift 2 ;;
+    --replay-congested-fraction) REPLAY_CONGESTED_FRACTION="$2"; shift 2 ;;
     --watch-ports) WATCH_PORTS="$2"; shift 2 ;; --watch-trace-file) WATCH_TRACE="$2"; shift 2 ;;
+    --diagnostic-reference-action) DIAGNOSTIC_REFERENCE_ACTION="$2"; shift 2 ;;
     --fct-source-file) FCT_SOURCE="$2"; shift 2 ;; --fct-step-trace-file) FCT_TRACE="$2"; shift 2 ;;
     --tb-enable) TB_ENABLE="$2"; shift 2 ;; --resume) RESUME=true; shift ;;
     --sor-recent-size) SOR_RECENT="$2"; shift 2 ;; --sor-boundary-size) SOR_BOUNDARY="$2"; shift 2 ;;
@@ -95,8 +101,13 @@ COMMON=(
 )
 
 if [[ "$MODE" == ACC ]]; then
-  EXTRA=(--shared_replay "$SHARED_REPLAY")
+  EXTRA=(--shared_replay "$SHARED_REPLAY" --reward_window_size "$REWARD_WINDOW_SIZE"
+    --replay_sampling "$REPLAY_SAMPLING"
+    --replay_congested_fraction "$REPLAY_CONGESTED_FRACTION")
   [[ "$RESUME" == true ]] && EXTRA+=(--resume)
+  [[ -n "$DIAGNOSTIC_REFERENCE_ACTION" ]] && EXTRA+=(
+    --diagnostic_reference_action "$DIAGNOSTIC_REFERENCE_ACTION"
+  )
   cd "$ROOT/copter"
   exec "$PYTHON_BIN" copter.py "${COMMON[@]}" "${EXTRA[@]}" >"$LOG" 2>&1
 else

@@ -270,12 +270,20 @@ def run_evaluation(config: dict, protocol: dict, source_conf: Path, flow: Path,
         "--reward-profile", str(protocol["reward_profile"]),
         "--reward-queue-lambda", str(protocol["reward_queue_lambda"]),
         "--reward-ecn-lambda", str(protocol["reward_ecn_lambda"]),
+        "--reward-window-size", str(protocol.get("reward_window_size", 32)),
         "--reward-weights", str(protocol["reward_weights"]),
         "--shared-replay", "false", "--eval-greedy", "--one-shot",
+        "--replay-sampling", str(protocol.get("replay_sampling", "uniform")),
+        "--replay-congested-fraction", str(
+            protocol.get("replay_congested_fraction", 0.5)
+        ),
         "--eval-tag", tag, "--port", str(port),
         "--run-id", f"{protocol['run_id']}_diagnostics", "--phase", "a1",
         "--watch-ports", str(config.get("watch_ports", "")),
         "--watch-trace-file", str(watch_trace),
+        "--diagnostic-reference-action", str(
+            protocol.get("diagnostic_reference_action", "8,0")
+        ),
     ]
     if forced_action is not None:
         command += ["--force-action", ",".join(map(str, forced_action))]
@@ -414,7 +422,11 @@ def analyze(output: Path, protocol: dict, flow: Path) -> None:
         "| Checkpoint | Reward | Mean FCT us | p95 FCT us | p99 FCT us | Completion | Throughput Mbps | Queue KB | ECN | Dominant action |",
         "|---|---:|---:|---:|---:|---:|---:|---:|---:|---|",
     ]
-    for label, title in (("frozen_initial", "epoch 0"), ("frozen_final", "epoch 100")):
+    final_epoch = sum(int(value) for value in protocol["epochs"].values())
+    for label, title in (
+        ("frozen_initial", "epoch 0"),
+        ("frozen_final", f"epoch {final_epoch}"),
+    ):
         item = summary.get(label, {})
         records = initial_records if label == "frozen_initial" else final_records
         histogram = Counter()

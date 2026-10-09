@@ -39,12 +39,26 @@ class NetworkHelper:
         self.obs_history = [deque(maxlen=nhp.state_observations + 1) for _ in range(self.n_port)]
         logger.info(f"Observation history sizes: {len(self.obs_history)}")
 
-        # Windowed statistics for queue length and ECN rate
-        # These capture the temporal dynamics that instantaneous sampling misses
-        self.window_size = 32  # Number of steps to average over
+        # Keep the historical 32-step signal window for activity/congestion
+        # classification.  The reward window is deliberately separate: the
+        # credit-assignment pilot may shorten reward attribution without also
+        # changing which ports are called active or congested.
+        if int(nhp.reward_window_size) <= 0:
+            raise ValueError("reward_window_size must be positive")
+        self.window_size = 32
+        self.reward_window_size = int(nhp.reward_window_size)
         self.qlen_window = [deque(maxlen=self.window_size) for _ in range(self.n_port)]
         self.ecn_window = [deque(maxlen=self.window_size) for _ in range(self.n_port)]
         self.txrate_window = [deque(maxlen=self.window_size) for _ in range(self.n_port)]
+        self.reward_qlen_window = [
+            deque(maxlen=self.reward_window_size) for _ in range(self.n_port)
+        ]
+        self.reward_ecn_window = [
+            deque(maxlen=self.reward_window_size) for _ in range(self.n_port)
+        ]
+        self.reward_txrate_window = [
+            deque(maxlen=self.reward_window_size) for _ in range(self.n_port)
+        ]
 
         # Initialize an empty action for next step
         self.action = [0.0] * (self.n_port * self.nhp.port_actions)   
@@ -181,6 +195,11 @@ class NetworkHelper:
             self.qlen_window[port_idx].append(port_obs.queue_length_norm)
             self.ecn_window[port_idx].append(port_obs.ecn_rate_norm)
             self.txrate_window[port_idx].append(port_obs.tx_rate_norm)
+            self.reward_qlen_window[port_idx].append(
+                port_obs.queue_length_norm
+            )
+            self.reward_ecn_window[port_idx].append(port_obs.ecn_rate_norm)
+            self.reward_txrate_window[port_idx].append(port_obs.tx_rate_norm)
             logger.trace(f"Step {curr_step} - Port {port_idx} - Observation {port_obs}.")
 
         logger.info(f"Step {curr_step} - Done {done}")
@@ -234,12 +253,12 @@ class NetworkHelper:
                          rate is around 0.02-0.05. Uses a smooth bell curve
                          so both under-marking and over-marking are penalised.
         """
-        if len(self.qlen_window[port_idx]) > 0:
-            avg_qlen   = float(np.mean(self.qlen_window[port_idx]))
-            peak_qlen  = float(np.max(self.qlen_window[port_idx]))
-            avg_ecn    = float(np.mean(self.ecn_window[port_idx]))
-            peak_ecn   = float(np.max(self.ecn_window[port_idx]))
-            avg_txrate = float(np.mean(self.txrate_window[port_idx]))
+        if len(self.reward_qlen_window[port_idx]) > 0:
+            avg_qlen = float(np.mean(self.reward_qlen_window[port_idx]))
+            peak_qlen = float(np.max(self.reward_qlen_window[port_idx]))
+            avg_ecn = float(np.mean(self.reward_ecn_window[port_idx]))
+            peak_ecn = float(np.max(self.reward_ecn_window[port_idx]))
+            avg_txrate = float(np.mean(self.reward_txrate_window[port_idx]))
         else:
             curr = self.obs_history[port_idx][-1]
             avg_qlen = peak_qlen = curr.queue_length_norm
