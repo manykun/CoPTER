@@ -132,17 +132,21 @@ def prepare_final_copy(source: Path, destination: Path, exp: str) -> None:
         raise ValueError("final-model copy lacks train state")
 
 
-def last_eval_record(metrics: Path, tag: str) -> dict:
+def last_eval_record(metrics: Path, tag: str, start_offset: int = 0) -> dict:
     matches = []
-    with metrics.open(encoding="utf-8") as handle:
-        for line in handle:
-            if not line.strip():
+    with metrics.open("rb") as handle:
+        handle.seek(start_offset)
+        for raw_line in handle:
+            if not raw_line.strip():
                 continue
-            record = json.loads(line)
+            record = json.loads(raw_line.decode("utf-8"))
             if record.get("eval_greedy") and record.get("eval_tag") == tag:
                 matches.append(record)
     if len(matches) != 1:
-        raise ValueError(f"expected one metrics record for {tag}, found {len(matches)}")
+        raise ValueError(
+            f"expected one new metrics record for {tag} after byte "
+            f"offset {start_offset}, found {len(matches)}"
+        )
     return matches[0]
 
 
@@ -287,6 +291,8 @@ def run_evaluation(config: dict, protocol: dict, source_conf: Path, flow: Path,
     ]
     if forced_action is not None:
         command += ["--force-action", ",".join(map(str, forced_action))]
+    metrics_path = model / f"{exp}_metrics.jsonl"
+    metrics_offset = metrics_path.stat().st_size if metrics_path.exists() else 0
     before = model_fingerprint(model)
     environment = os.environ.copy()
     environment["COPTER_LOG_BASE"] = str(destination / "launcher_logs")
@@ -298,7 +304,9 @@ def run_evaluation(config: dict, protocol: dict, source_conf: Path, flow: Path,
     after = model_fingerprint(model)
     if before != after:
         raise RuntimeError(f"frozen evaluation modified model files for {label}")
-    agent_record = last_eval_record(model / f"{exp}_metrics.jsonl", tag)
+    agent_record = last_eval_record(
+        metrics_path, tag, start_offset=metrics_offset
+    )
     write_json(destination / "agent_metrics.json", agent_record)
     write_json(marker, {
         "label": label, "repeat": repetition,

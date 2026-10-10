@@ -1,4 +1,5 @@
 import importlib.util
+import json
 import tempfile
 import unittest
 from collections import Counter
@@ -13,6 +14,32 @@ SPEC.loader.exec_module(MODULE)
 
 
 class AccPilotDiagnosticTests(unittest.TestCase):
+    def test_last_eval_record_uses_only_current_process_append(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            metrics = Path(temporary) / "metrics.jsonl"
+            old_records = [
+                {"eval_greedy": True, "eval_tag": "repeat_2", "value": 1},
+                {"eval_greedy": True, "eval_tag": "repeat_2", "value": 2},
+            ]
+            metrics.write_text(
+                "".join(json.dumps(record) + "\n" for record in old_records),
+                encoding="utf-8",
+            )
+            start_offset = metrics.stat().st_size
+            current_record = {
+                "eval_greedy": True,
+                "eval_tag": "repeat_2",
+                "value": 3,
+            }
+            with metrics.open("a", encoding="utf-8") as handle:
+                handle.write(json.dumps(current_record) + "\n")
+
+            actual = MODULE.last_eval_record(
+                metrics, "repeat_2", start_offset=start_offset
+            )
+
+            self.assertEqual(actual, current_record)
+
     def test_tv_distance(self):
         self.assertEqual(MODULE.tv_distance(Counter(a=2), Counter(a=3)), 0.0)
         self.assertEqual(MODULE.tv_distance(Counter(a=2), Counter(b=3)), 1.0)
