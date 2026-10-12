@@ -34,6 +34,11 @@ VARIANTS = {
     # change, so FCT differences have an interpretable cause.
     "short_window": ("multiscale", "tail_safe"),
     "credit": ("multiscale", "tail_safe"),
+    # Registered two-arm reward-alignment test.  Both arms retain the credit
+    # pilot's action space, short attribution window, and replay sampler;
+    # only the queue penalty changes.  New names keep completed runs intact.
+    "credit_control": ("multiscale", "tail_safe"),
+    "credit_queue1": ("multiscale", "tail_safe"),
 }
 
 VARIANT_OVERRIDES = {
@@ -52,7 +57,23 @@ VARIANT_OVERRIDES = {
         "replay_sampling": "congestion_stratified",
         "replay_congested_fraction": 0.5,
     },
+    "credit_control": {
+        "reward_window_size": 4,
+        "replay_sampling": "congestion_stratified",
+        "replay_congested_fraction": 0.5,
+        "reward_queue_lambda": 5.0,
+        "reward_ecn_lambda": 5.0,
+    },
+    "credit_queue1": {
+        "reward_window_size": 4,
+        "replay_sampling": "congestion_stratified",
+        "replay_congested_fraction": 0.5,
+        "reward_queue_lambda": 1.0,
+        "reward_ecn_lambda": 5.0,
+    },
 }
+
+ALIGNMENT_VARIANTS = frozenset(("credit_control", "credit_queue1"))
 
 
 def atomic_yaml(path: Path, config: dict) -> None:
@@ -101,6 +122,9 @@ def build_config(base: dict, run_id: str, variant: str, epochs: int,
         "replay_sampling": "uniform",
         "replay_congested_fraction": 0.5,
     }))
+    if variant in ALIGNMENT_VARIANTS:
+        watched = [item.strip() for item in str(base.get("watch_ports", "")).split(",") if item.strip()]
+        config["watch_ports"] = ",".join(dict.fromkeys([*watched, "349"]))
     return config
 
 
@@ -156,7 +180,8 @@ def main():
         "--variants", default="baseline,weighted,action",
         help=(
             "comma-separated subset of baseline,weighted,action,combined,legacy; "
-            "credit-assignment variants short_window and credit are also supported; "
+            "credit-assignment variants short_window and credit, plus the "
+            "registered credit_control/credit_queue1 reward test, are supported; "
             "legacy reproduces the original independent-head action space "
             "with the original weighted reward"
         ),
@@ -184,7 +209,7 @@ def main():
     if not requested or any(item not in VARIANTS for item in requested):
         raise ValueError(
             "--variants must contain baseline, weighted, action, combined, "
-            "legacy, short_window, or credit"
+            "legacy, short_window, credit, credit_control, or credit_queue1"
         )
     if len(set(requested)) != len(requested):
         raise ValueError("--variants contains duplicates")

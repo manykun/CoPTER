@@ -160,7 +160,10 @@ def main():
     output.mkdir(parents=True, exist_ok=True)
     combined = output / "epoch_metrics.csv"
     sample_rows = next(iter(data.values()))[2]
-    fields = ["variant", "action_space", "reward_profile"] + list(sample_rows[0])
+    fields = [
+        "variant", "action_space", "reward_profile",
+        "reward_queue_lambda", "reward_ecn_lambda",
+    ] + list(sample_rows[0])
     with combined.open("w", encoding="utf-8", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=fields)
         writer.writeheader()
@@ -170,6 +173,8 @@ def main():
                     "variant": variant,
                     "action_space": protocol["action_space"],
                     "reward_profile": protocol["reward_profile"],
+                    "reward_queue_lambda": protocol["reward_queue_lambda"],
+                    "reward_ecn_lambda": protocol["reward_ecn_lambda"],
                     **row,
                 })
 
@@ -188,16 +193,17 @@ def main():
         "# ACC reward/action-space pilot", "",
         "- Scope: single-task ACC acquisition on the canonical Task A traffic.",
         "- Comparison: first 10 epochs versus last 10 epochs.",
-        "- Native rewards from tail_safe and weighted have different scales and are not compared across profiles.",
+        "- Native rewards with different formulas or penalty coefficients are not compared across arms; use frozen physical metrics.",
         "- FCT and physical metrics are per-epoch training trajectories, not frozen-policy evaluations.",
         "", "## Configuration", "",
-        "| Variant | Action space | Reward | Reward window | Replay sampling | Congested target | Epochs |",
-        "|---|---|---|---:|---|---:|---:|",
+        "| Variant | Action space | Reward | Queue / ECN lambda | Reward window | Replay sampling | Congested target | Epochs |",
+        "|---|---|---|---|---:|---|---:|---:|",
     ]
     for variant, (_, protocol, rows) in data.items():
         lines.append(
             f"| {variant} | {protocol['action_space']} | "
             f"{protocol['reward_profile']} | "
+            f"{protocol['reward_queue_lambda']:g} / {protocol['reward_ecn_lambda']:g} | "
             f"{protocol.get('reward_window_size', 32)} | "
             f"{protocol.get('replay_sampling', 'uniform')} | "
             f"{protocol.get('replay_congested_fraction', 0.5):.2f} | "
