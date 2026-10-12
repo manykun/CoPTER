@@ -48,6 +48,35 @@ class AccPilotDiagnosticTests(unittest.TestCase):
             0.5,
         )
 
+    def test_resume_rejects_changed_forced_port_set(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            destination = root / "eval" / "target_1" / "repeat_1"
+            destination.mkdir(parents=True)
+            model = root / "model"
+            model.mkdir()
+            flow = root / "source.flow"
+            flow.write_text("0\n", encoding="utf-8")
+            (destination / "input.flow").write_bytes(flow.read_bytes())
+            for name in ("input.conf", "result.fct", "agent_metrics.json"):
+                (destination / name).write_text("\n", encoding="utf-8")
+            (destination / "complete.json").write_text(json.dumps({
+                "label": "target_1", "repeat": 1,
+                "forced_action": None,
+                "forced_ports_action": [[323], [8, 0]],
+                "model_fingerprint": {},
+            }), encoding="utf-8")
+            args = (
+                {}, {}, root / "source.conf", flow, root, model,
+                "experiment", "target_1", 1, 7820,
+            )
+            self.assertEqual(
+                MODULE.run_evaluation(*args, forced_ports_action=((323,), (8, 0))),
+                destination,
+            )
+            with self.assertRaisesRegex(ValueError, "differs from request"):
+                MODULE.run_evaluation(*args, forced_ports_action=((321,), (8, 0)))
+
     def test_multiscale_threshold_activation_uses_link_rate(self):
         with tempfile.TemporaryDirectory() as temporary:
             destination = Path(temporary)

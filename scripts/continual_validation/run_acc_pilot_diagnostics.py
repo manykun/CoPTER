@@ -244,10 +244,32 @@ def threshold_activation(destination: Path, action, action_space: str) -> dict:
 
 def run_evaluation(config: dict, protocol: dict, source_conf: Path, flow: Path,
                    output: Path, model: Path, exp: str, label: str,
-                   repetition: int, port: int, forced_action=None) -> Path:
+                   repetition: int, port: int, forced_action=None,
+                   forced_ports_action=None, watch_ports=None) -> Path:
+    if forced_action is not None and forced_ports_action is not None:
+        raise ValueError("only one forced action mode may be used")
     destination = output / "eval" / label / f"repeat_{repetition}"
     marker = destination / "complete.json"
     if marker.exists():
+        completed = read_json(marker)
+        expected = {
+            "label": label,
+            "repeat": repetition,
+            "forced_action": list(forced_action) if forced_action is not None else None,
+            "forced_ports_action": (
+                [list(forced_ports_action[0]), list(forced_ports_action[1])]
+                if forced_ports_action is not None else None
+            ),
+        }
+        if any(completed.get(key) != value for key, value in expected.items()):
+            raise ValueError(f"completed evaluation differs from request: {marker}")
+        if completed.get("model_fingerprint") != model_fingerprint(model):
+            raise ValueError(f"completed evaluation model differs from request: {marker}")
+        for name in ("input.flow", "input.conf", "result.fct", "agent_metrics.json"):
+            if not (destination / name).is_file():
+                raise ValueError(f"completed evaluation is missing {name}: {destination}")
+        if sha256(destination / "input.flow") != sha256(flow):
+            raise ValueError(f"completed evaluation flow differs from request: {marker}")
         return destination
     destination.mkdir(parents=True, exist_ok=True)
     local_flow = destination / "input.flow"
@@ -283,7 +305,9 @@ def run_evaluation(config: dict, protocol: dict, source_conf: Path, flow: Path,
         ),
         "--eval-tag", tag, "--port", str(port),
         "--run-id", f"{protocol['run_id']}_diagnostics", "--phase", "a1",
-        "--watch-ports", str(config.get("watch_ports", "")),
+        "--watch-ports", str(
+            config.get("watch_ports", "") if watch_ports is None else watch_ports
+        ),
         "--watch-trace-file", str(watch_trace),
         "--diagnostic-reference-action", str(
             protocol.get("diagnostic_reference_action", "8,0")
@@ -291,6 +315,12 @@ def run_evaluation(config: dict, protocol: dict, source_conf: Path, flow: Path,
     ]
     if forced_action is not None:
         command += ["--force-action", ",".join(map(str, forced_action))]
+    if forced_ports_action is not None:
+        ports, action = forced_ports_action
+        command += [
+            "--force-ports-action",
+            f"{','.join(map(str, ports))}:{','.join(map(str, action))}",
+        ]
     metrics_path = model / f"{exp}_metrics.jsonl"
     metrics_offset = metrics_path.stat().st_size if metrics_path.exists() else 0
     before = model_fingerprint(model)
@@ -311,6 +341,7 @@ def run_evaluation(config: dict, protocol: dict, source_conf: Path, flow: Path,
     write_json(marker, {
         "label": label, "repeat": repetition,
         "model_fingerprint": before, "forced_action": forced_action,
+        "forced_ports_action": forced_ports_action,
     })
     return destination
 

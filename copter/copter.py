@@ -23,6 +23,7 @@ from structures import (
     DCQCNParameters,
     NetworkHelperParameters,
     acc_action_from_indices,
+    parse_forced_ports_action,
     validate_acc_action_indices,
 )
 
@@ -114,6 +115,7 @@ if __name__ == "__main__":
     parser.add_argument("--eval_tag", type=str, default="", help="Optional tag recorded into metrics (e.g. phase/task name).")
     parser.add_argument("--force_action", type=str, default="", help="Sanity-check: force a fixed action index triple 'kmin_idx,kmax_idx,pmax_idx' for ALL ports/steps (overrides the policy). Used to test reward sensitivity to actions.")
     parser.add_argument("--force_port_action", type=str, default="", help="Frozen local sweep: override one port with PORT,KMIN_NORM,KMAX_NORM,PMAX while all other ports remain greedy.")
+    parser.add_argument("--force_ports_action", type=str, default="", help="Frozen ACC intervention: override PORT[,PORT...]:ACTION on the selected ports while all others remain greedy.")
     parser.add_argument("--watch_ports", type=str, default="", help="Comma-separated port indices to track explicitly. Their per-epoch rollout reward (EMA) is written to metrics jsonl and TensorBoard (rollout/reward_port{p}) so a fixed port's reward trajectory can be plotted across epochs.")
     parser.add_argument("--watch_trace_file", type=str, default="", help="Optional JSONL path for per-step metrics of --watch_ports.")
     parser.add_argument(
@@ -173,10 +175,20 @@ if __name__ == "__main__":
         forced_port_action = parse_forced_port_action(args.force_port_action)
     except ValueError as exc:
         raise SystemExit(f"invalid --force_port_action: {exc}")
-    if forced_action_idx is not None and forced_port_action is not None:
-        raise SystemExit("--force_action and --force_port_action are mutually exclusive")
+    try:
+        forced_ports_action = parse_forced_ports_action(
+            args.force_ports_action, args.action_space
+        )
+    except ValueError as exc:
+        raise SystemExit(f"invalid --force_ports_action: {exc}")
+    if sum(value is not None for value in (
+        forced_action_idx, forced_port_action, forced_ports_action
+    )) > 1:
+        raise SystemExit("forced action options are mutually exclusive")
     if forced_port_action is not None and not args.eval_greedy:
         raise SystemExit("--force_port_action is allowed only with --eval_greedy")
+    if forced_ports_action is not None and not args.eval_greedy:
+        raise SystemExit("--force_ports_action is allowed only with --eval_greedy")
 
     # Parse optional watch-port list (fixed ports whose reward we track across epochs).
     try:
@@ -241,6 +253,16 @@ if __name__ == "__main__":
             f"forced port {forced_port_action[0]} is outside "
             f"[0, {network_helper.get_n_port() - 1}]"
         )
+    if forced_ports_action is not None:
+        invalid = [
+            port for port in forced_ports_action[0]
+            if port >= network_helper.get_n_port()
+        ]
+        if invalid:
+            raise SystemExit(
+                f"forced port {invalid[0]} is outside "
+                f"[0, {network_helper.get_n_port() - 1}]"
+            )
     
     agent_helper_params = AgentHelperParameters(
         epsilon_start=args.epsilon_start,
@@ -421,6 +443,13 @@ if __name__ == "__main__":
                     # the applied continuous values in `actions` makes traces
                     # and action histograms auditable.
                     actions[port] = (kmin_norm, kmax_norm, pmax)
+
+                if forced_ports_action is not None:
+                    ports, action = forced_ports_action
+                    parameter = acc_action_from_indices(action, args.action_space)
+                    for port in ports:
+                        paras[port] = parameter
+                        actions[port] = action
 
                 for action in actions:
                     action_key = ",".join(str(index) for index in action)
@@ -615,6 +644,16 @@ if __name__ == "__main__":
                 "forced_port_action": (
                     list(forced_port_action)
                     if forced_port_action is not None else None
+                ),
+                "forced_ports_action": (
+                    {"ports": list(forced_ports_action[0]),
+                     "action": list(forced_ports_action[1])}
+                    if forced_ports_action is not None else None
+                ),
+                "port_identifiers": (
+                    [network_helper.port_identifier_map.get(port)
+                     for port in range(network_helper.get_n_port())]
+                    if args.eval_greedy else None
                 ),
                 "action_histogram": action_histogram,
                 **{

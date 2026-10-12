@@ -234,6 +234,28 @@ def validate_acc_action_indices(indices, action_space="legacy"):
     return action
 
 
+def parse_forced_ports_action(value, action_space="multiscale"):
+    """Parse PORT[,PORT...]:ACTION for a frozen ACC port-set intervention."""
+    if not value:
+        return None
+    if value.count(":") != 1:
+        raise ValueError("forced ports action must be PORT[,PORT...]:ACTION")
+    port_text, action_text = value.split(":", 1)
+    fields = [item.strip() for item in port_text.split(",")]
+    if not fields or any(not item for item in fields):
+        raise ValueError("forced ports must be comma-separated integers")
+    try:
+        ports = tuple(int(item) for item in fields)
+    except ValueError as exc:
+        raise ValueError("forced ports must be comma-separated integers") from exc
+    if any(port < 0 for port in ports) or len(set(ports)) != len(ports):
+        raise ValueError("forced ports must be unique non-negative integers")
+    action = validate_acc_action_indices(
+        [item.strip() for item in action_text.split(",")], action_space
+    )
+    return ports, action
+
+
 def acc_action_from_indices(indices, action_space="legacy"):
     """Map categorical ACC action indices to normalized DCQCN parameters."""
     action = validate_acc_action_indices(indices, action_space)
