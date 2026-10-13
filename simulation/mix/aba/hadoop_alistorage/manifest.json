@@ -1,0 +1,26 @@
+{
+  "schema_version": 1,
+  "seed": 1,
+  "generator": "tools/traffic/TraGen.py",
+  "route": "CDC",
+  "tasks": {
+    "realistic_hadoop": {
+      "conf": "task_c_hadoop.conf",
+      "conf_sha256": "00fca6dce71edab797b3de737a082e74ce118c15d411f9ada7d5e73136dd3688",
+      "flow": "task_c_hadoop.flow",
+      "expected_flows": 4957,
+      "flow_sha256": "edd7f8fc03e09b016e092e5e06d738226d13ba2c87e542043704b330553193e2",
+      "generator_config": "tools/traffic/acc_validation/realistic_hadoop.json",
+      "generator_config_sha256": "23b01dbef47db152296c8a2467f22538851200119bb781ed7308788c9bf22393"
+    },
+    "realistic_alistorage": {
+      "conf": "task_d_alistorage.conf",
+      "conf_sha256": "7ec8ec406315934246db7154fde8ca251c084fbc867e6d342a314dae10f5e417",
+      "flow": "task_d_alistorage.flow",
+      "expected_flows": 70566,
+      "flow_sha256": "5a7df8a7349c84ff6764753ffeecfd9b93a7c7f86f884048b7b1fcbaf5d2092a",
+      "generator_config": "tools/traffic/acc_validation/realistic_alistorage.json",
+      "generator_config_sha256": "fd139ed0e2f1e4281270a5b1de7eea00ce6d49d79b7f583e884334a4b406c1f9"
+    }
+  }
+}

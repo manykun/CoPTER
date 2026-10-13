@@ -67,25 +67,46 @@ class DualHeadNN(nn.Module):
 #     #     x = self.shared_net(x)
 #     #     return self.k_min_head(x), self.k_max_head(x), self.p_max_head(x)
 class TripleHeadACC(nn.Module):
-    def __init__(self, state_dim, k_min_dim, k_max_dim, p_max_dim):
+    def __init__(self, state_dim, k_min_dim, k_max_dim, p_max_dim, hidden_dims=(32, 64, 64, 32)):
         super(TripleHeadACC, self).__init__()
-        self.shared_net = nn.Sequential(
-            nn.Linear(state_dim, 32),
-            nn.ReLU(),
-            nn.Linear(32, 64),
-            nn.ReLU(),
-            nn.Linear(64, 64),
-            nn.ReLU(),
-            nn.Linear(64, 32),
-            nn.ReLU(),
-        )
-        self.k_min_head = nn.Linear(32, k_min_dim)
-        self.k_max_head = nn.Linear(32, k_max_dim)
-        self.p_max_head = nn.Linear(32, p_max_dim)
+        hidden_dims = tuple(int(width) for width in hidden_dims)
+        if not hidden_dims or any(width <= 0 for width in hidden_dims):
+            raise ValueError("hidden_dims must contain positive layer widths")
+        layers = []
+        input_dim = state_dim
+        for output_dim in hidden_dims:
+            layers.extend((nn.Linear(input_dim, output_dim), nn.ReLU()))
+            input_dim = output_dim
+        self.shared_net = nn.Sequential(*layers)
+        self.k_min_head = nn.Linear(input_dim, k_min_dim)
+        self.k_max_head = nn.Linear(input_dim, k_max_dim)
+        self.p_max_head = nn.Linear(input_dim, p_max_dim)
     
     def forward(self, x):
         x = self.shared_net(x)
         return self.k_min_head(x), self.k_max_head(x), self.p_max_head(x)
+
+
+class DualHeadProfileACC(nn.Module):
+    """ACC network for a valid (Kmin,Kmax) profile plus an independent Pmax."""
+
+    def __init__(self, state_dim, profile_dim, p_max_dim, hidden_dims=(32, 64, 64, 32)):
+        super(DualHeadProfileACC, self).__init__()
+        hidden_dims = tuple(int(width) for width in hidden_dims)
+        if not hidden_dims or any(width <= 0 for width in hidden_dims):
+            raise ValueError("hidden_dims must contain positive layer widths")
+        layers = []
+        input_dim = state_dim
+        for output_dim in hidden_dims:
+            layers.extend((nn.Linear(input_dim, output_dim), nn.ReLU()))
+            input_dim = output_dim
+        self.shared_net = nn.Sequential(*layers)
+        self.profile_head = nn.Linear(input_dim, profile_dim)
+        self.p_max_head = nn.Linear(input_dim, p_max_dim)
+
+    def forward(self, x):
+        x = self.shared_net(x)
+        return self.profile_head(x), self.p_max_head(x)
 
 class TripleHeadCoPTER(nn.Module):
     def __init__(self, state_dim, k_min_dim, k_max_dim, p_max_dim):

@@ -1,0 +1,2 @@
+"""Authoritative CoPTER analysis package."""
+

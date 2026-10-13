@@ -21,6 +21,7 @@
 #include <fstream>
 #include <unordered_map>
 #include <cmath>
+#include <cstdint>
 #include <time.h> 
 #include "ns3/core-module.h"
 #include "ns3/qbb-helper.h"
@@ -108,6 +109,14 @@ uint32_t opengym_n_switches = 0; // total number of switches in the topology
 uint32_t opengym_n_ports = 0; // total number of ports in the topology
 uint32_t opengym_n_state_per_port = 6; // number of state variables per port
 uint32_t opengym_n_action_per_port = 3; // number of action variables per port
+
+// Frozen-policy intervention: override one flattened OpenGym port with
+// physical ECN parameters while every other port continues to use the action
+// selected by the agent.  A negative index disables the intervention.
+int32_t opengym_force_port_index = -1;
+uint32_t opengym_force_kmin_kb = 0;
+uint32_t opengym_force_kmax_kb = 0;
+double opengym_force_pmax = 0.0;
 
 // Kmin and Kmax are set for 25Gbps links, convertion needed for max/min Kmin/Kmax
 double opengym_min_kmin = 20000; // 20KB
@@ -304,6 +313,7 @@ bool MyExecuteActions(Ptr<OpenGymDataContainer> action) {
     for (uint32_t i = 0; i < opengym_n_switches; i++ ) {
         Ptr<SwitchNode> sw = DynamicCast<SwitchNode>(opengym_switches_pool.Get(i));
         for (uint32_t j = 1; j < sw->GetNDevices(); j++) {
+            uint32_t port_index = configure_idx / opengym_n_action_per_port;
             double norm_kmin = actions->GetValue(configure_idx);
             double norm_kmax = actions->GetValue(configure_idx + 1);
             double pmax = actions->GetValue(configure_idx + 2);
@@ -319,9 +329,22 @@ bool MyExecuteActions(Ptr<OpenGymDataContainer> action) {
             uint32_t kmin_in_byte = norm_kmin * (max_kmin - min_kmin) + min_kmin;
             uint32_t kmax_in_byte = norm_kmax * (max_kmax - min_kmax) + min_kmax;
 
-            NS_LOG_UNCOND("Switch " << i << " Port " << j << " ConfigECN (bytes) Kmin = " << kmin_in_byte << " Kmax = " << kmax_in_byte);
+            uint32_t kmin_in_kb = kmin_in_byte / 1000;
+            uint32_t kmax_in_kb = kmax_in_byte / 1000;
+            if (opengym_force_port_index >= 0 &&
+                port_index == static_cast<uint32_t>(opengym_force_port_index)) {
+                kmin_in_kb = opengym_force_kmin_kb;
+                kmax_in_kb = opengym_force_kmax_kb;
+                pmax = opengym_force_pmax;
+            }
 
-            sw->m_mmu->ConfigEcn(j, kmin_in_byte / 1000, kmax_in_byte / 1000, pmax);
+            NS_LOG_UNCOND("Switch " << i << " Port " << j
+                          << " OpenGymPort " << port_index
+                          << " ConfigECN (KB) Kmin = " << kmin_in_kb
+                          << " Kmax = " << kmax_in_kb
+                          << " Pmax = " << pmax);
+
+            sw->m_mmu->ConfigEcn(j, kmin_in_kb, kmax_in_kb, pmax);
             configure_idx += 3;
         }
     }
@@ -545,7 +568,26 @@ void qp_finish(FILE* fout, Ptr<RdmaQueuePair> q){
 }
 
 void get_pfc(FILE* fout, Ptr<QbbNetDevice> dev, uint32_t type){
-    fprintf(fout, "%lu %u %u %u %u\n", Simulator::Now().GetTimeStep(), dev->GetNode()->GetId(), dev->GetNode()->GetNodeType(), dev->GetIfIndex(), type);
+    // Include the peer node so Python can map a PFC event to the exact
+    // OpenGym identifier "switch-peer".  The original five columns stay in
+    // place for backward compatibility; the sixth column is -1 only for an
+    // unexpectedly disconnected device.
+    int32_t peer_node_id = -1;
+    Ptr<NetDevice> current = dev;
+    Ptr<Channel> channel = current->GetChannel();
+    if (channel) {
+        for (uint32_t index = 0; index < channel->GetNDevices(); ++index) {
+            Ptr<NetDevice> peer = channel->GetDevice(index);
+            if (peer != current && peer->GetNode()) {
+                peer_node_id = static_cast<int32_t>(peer->GetNode()->GetId());
+                break;
+            }
+        }
+    }
+    fprintf(fout, "%lu %u %u %u %u %d\n",
+            Simulator::Now().GetTimeStep(), dev->GetNode()->GetId(),
+            dev->GetNode()->GetNodeType(), dev->GetIfIndex(), type,
+            peer_node_id);
 }
 
 struct QlenDistribution{
@@ -1085,9 +1127,38 @@ int main(int argc, char *argv[])
                 opengym_max_kmax = v;
                 std::cout << "OPENGYM_MAX_KMAX\t\t" << opengym_max_kmax << " bytes (" << opengym_max_kmax/1000 << "KB)\n";
             }
+            else if (key.compare("OPENGYM_FORCE_PORT_INDEX") == 0)
+            {
+                conf >> opengym_force_port_index;
+                std::cout << "OPENGYM_FORCE_PORT_INDEX\t" << opengym_force_port_index << "\n";
+            }
+            else if (key.compare("OPENGYM_FORCE_KMIN_KB") == 0)
+            {
+                conf >> opengym_force_kmin_kb;
+                std::cout << "OPENGYM_FORCE_KMIN_KB\t\t" << opengym_force_kmin_kb << "\n";
+            }
+            else if (key.compare("OPENGYM_FORCE_KMAX_KB") == 0)
+            {
+                conf >> opengym_force_kmax_kb;
+                std::cout << "OPENGYM_FORCE_KMAX_KB\t\t" << opengym_force_kmax_kb << "\n";
+            }
+            else if (key.compare("OPENGYM_FORCE_PMAX") == 0)
+            {
+                conf >> opengym_force_pmax;
+                std::cout << "OPENGYM_FORCE_PMAX\t\t" << opengym_force_pmax << "\n";
+            }
             fflush(stdout);
         }
         conf.close();
+
+        if (opengym_force_port_index >= 0 &&
+            (opengym_force_kmax_kb <= opengym_force_kmin_kb ||
+             opengym_force_kmax_kb > buffer_size ||
+             opengym_force_pmax < 0.0 || opengym_force_pmax > 1.0)) {
+            std::cerr << "Invalid physical OpenGym port override: require "
+                      << "0 <= Kmin < Kmax <= BUFFER_SIZE and 0 <= Pmax <= 1\n";
+            return 1;
+        }
     }
     else
     {
@@ -1471,6 +1542,13 @@ int main(int argc, char *argv[])
                 Ptr<SwitchNode> sw = DynamicCast<SwitchNode>(opengym_switches_pool.Get(i));
                 opengym_n_ports += sw->GetNDevices() - 1;
             }
+        }
+
+        if (opengym_force_port_index >= 0 &&
+            static_cast<uint32_t>(opengym_force_port_index) >= opengym_n_ports) {
+            std::cerr << "OPENGYM_FORCE_PORT_INDEX " << opengym_force_port_index
+                      << " is outside [0, " << opengym_n_ports << ")\n";
+            return 1;
         }
     
         NS_LOG_UNCOND("OpenGym n_switches: " << opengym_n_switches << " n_ports: " << opengym_n_ports);
