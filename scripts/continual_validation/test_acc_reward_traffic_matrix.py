@@ -12,7 +12,8 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from scripts.continual_validation.run_acc_reward_traffic_matrix import (
-    REWARDS, TASKS, cell_config, plan_for, prepare_plan, selection, task_base,
+    REWARDS, TASKS, cell_config, check_frozen_ports, frozen_port,
+    plan_for, prepare_plan, selection, task_base,
 )
 from scripts.continual_validation import run_acc_reward_traffic_matrix as runner
 from tools.analysis.analyze_acc_reward_traffic_matrix import (
@@ -60,8 +61,27 @@ class RewardTrafficMatrixTest(unittest.TestCase):
         reduced = plan_for(args, ["hadoop"], ["weighted"], "matrix")
         full_cell = next(cell for cell in complete["cells"] if cell["task"] == "hadoop" and cell["reward"] == "weighted")
         self.assertEqual(reduced["cells"][0]["port"], full_cell["port"])
+        self.assertEqual(frozen_port(full_cell, 8100), 8108)
+        args.eval_port_base = 8100
+        self.assertEqual(plan_for(args, list(TASKS), list(REWARDS), "matrix"), complete)
         with self.assertRaises(ValueError):
             selection("tail5,tail5", REWARDS, "--rewards")
+
+    def test_frozen_ports_preflight_preserves_registered_protocol(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            cell = {"task": "webserver", "reward": "tail5", "run_id": "fixture_webserver_tail5"}
+            plan = {"cells": [cell]}
+            output = root / "experiments" / "aba" / "fixture_webserver_tail5_diagnostics"
+            output.mkdir(parents=True)
+            (output / "protocol.json").write_text(json.dumps({"port": 8000}), encoding="utf-8")
+            with patch.object(runner, "ROOT", root), patch.object(runner.socket, "socket") as mocked_socket:
+                with self.assertRaisesRegex(RuntimeError, "registered for evaluation port 8000"):
+                    check_frozen_ports(plan, 8100)
+                mocked_socket.return_value.__enter__.return_value.bind.side_effect = OSError("in use")
+                with self.assertRaisesRegex(RuntimeError, "evaluation port 8000 is unavailable"):
+                    check_frozen_ports(plan, 8000)
+            self.assertEqual(json.loads((output / "protocol.json").read_text())["port"], 8000)
 
     def test_existing_plan_and_cell_config_cannot_change_on_resume(self):
         with tempfile.TemporaryDirectory() as temporary:

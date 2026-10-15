@@ -144,19 +144,47 @@ def run_cell(cell: dict, stage: str, resume: bool) -> None:
     print(f"[{cell['task']}/{cell['reward']}] complete", flush=True)
 
 
-def frozen_cell(cell: dict, port_base: int, repeats: int) -> None:
+def frozen_port(cell: dict, eval_port_base: int) -> int:
+    index = list(TASKS).index(cell["task"]) * len(REWARDS) + REWARDS.index(cell["reward"])
+    return eval_port_base + index
+
+
+def check_frozen_ports(plan: dict, eval_port_base: int) -> None:
+    for cell in plan["cells"]:
+        port = frozen_port(cell, eval_port_base)
+        output = ROOT / "experiments" / "aba" / f"{cell['run_id']}_diagnostics"
+        manifest = output / "protocol.json"
+        if output.exists():
+            if not manifest.is_file():
+                raise RuntimeError(f"existing diagnostic directory lacks protocol: {output}")
+            registered_port = json.loads(manifest.read_text(encoding="utf-8")).get("port")
+            if registered_port != port:
+                raise RuntimeError(
+                    f"{output} is registered for evaluation port {registered_port}, not {port}; "
+                    "preserve and archive the incomplete directory before changing ports"
+                )
+        with socket.socket() as probe:
+            try:
+                probe.bind(("127.0.0.1", port))
+            except OSError as exc:
+                raise RuntimeError(
+                    f"evaluation port {port} is unavailable for {cell['run_id']}; "
+                    "choose a free --eval-port-base without changing --port-base"
+                ) from exc
+
+
+def frozen_cell(cell: dict, eval_port_base: int, repeats: int) -> None:
     run_dir = ROOT / "experiments" / "aba" / cell["run_id"]
     output = run_dir.with_name(run_dir.name + "_diagnostics")
-    index = list(TASKS).index(cell["task"]) * len(REWARDS) + REWARDS.index(cell["reward"])
     command = [sys.executable, str(SCRIPT_DIR / "run_acc_pilot_diagnostics.py"),
                "--run-dir", str(run_dir), "--output-dir", str(output),
                "--stage", "frozen", "--repeats", str(repeats),
-               "--port", str(port_base + 100 + index)]
+               "--port", str(frozen_port(cell, eval_port_base))]
     if output.exists():
         command.append("--resume")
     log = run_dir / "frozen_driver.log"
     print(f"[{cell['task']}/{cell['reward']}] frozen evaluation log={log}", flush=True)
-    with log.open("a" if output.exists() else "w", encoding="utf-8") as handle:
+    with log.open("a", encoding="utf-8") as handle:
         result = subprocess.run(command, cwd=ROOT, stdout=handle, stderr=subprocess.STDOUT)
     if result.returncode:
         raise RuntimeError(f"frozen evaluation failed for {cell['run_id']}; inspect {log}")
@@ -191,6 +219,8 @@ def main() -> None:
     parser.add_argument("--epochs", type=int, default=50)
     parser.add_argument("--seed", type=int, default=1)
     parser.add_argument("--port-base", type=int, default=7900)
+    parser.add_argument("--eval-port-base", type=int,
+                        help="frozen evaluation ports; defaults to --port-base + 100 and is not part of the training plan")
     parser.add_argument("--jobs", type=int, default=3,
                         help="maximum concurrent NS-3/ACC pairs (not total cells)")
     parser.add_argument("--repeats", type=int, default=2)
@@ -205,8 +235,11 @@ def main() -> None:
         parser.error("--jobs must be in [1,4] and --repeats must be at least 2")
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]*", args.run_id_prefix):
         parser.error("--run-id-prefix must be a simple alphanumeric/hyphen/underscore name")
-    if args.port_base < 1024 or args.port_base + 111 > 65535:
+    if args.port_base < 1024 or args.port_base + 11 > 65535:
         parser.error("--port-base is outside the available TCP port range")
+    eval_port_base = args.eval_port_base if args.eval_port_base is not None else args.port_base + 100
+    if eval_port_base < 1024 or eval_port_base + 11 > 65535:
+        parser.error("--eval-port-base is outside the available TCP port range")
     if args.min_free_gb < 0:
         parser.error("--min-free-gb cannot be negative")
     prefix = args.run_id_prefix + ("_smoke" if args.stage == "smoke" else "")
@@ -217,6 +250,8 @@ def main() -> None:
             parser.error(f"only {free_gb:.1f} GiB free; minimum is {args.min_free_gb:g} GiB")
     if args.stage in ("smoke", "train", "all"):
         check_training_ports(plan)
+    if args.stage in ("frozen", "all"):
+        check_frozen_ports(plan, eval_port_base)
     plan_dir = prepare_plan(args, plan)
     if args.stage in ("prepare", "smoke", "train", "all"):
         failures = []
@@ -234,7 +269,7 @@ def main() -> None:
         # These evaluations are deliberately serialized: each writes a large
         # raw trace and multiple NS-3 processes can overload a shared host.
         for cell in plan["cells"]:
-            frozen_cell(cell, args.port_base, args.repeats)
+            frozen_cell(cell, eval_port_base, args.repeats)
     if args.stage in ("train", "frozen", "analyze", "all"):
         analyze(plan_dir, args.stage in ("frozen", "all"))
     print(f"matrix stage {args.stage} complete: {plan_dir}", flush=True)

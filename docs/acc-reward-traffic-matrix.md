@@ -84,8 +84,16 @@ cat experiments/aba/acc_reward_traffic_matrix_s1_matrix/REPORT.md
 ```
 
 If training completed but frozen evaluation needs to be resumed, run the same
-matrix arguments with `--stage frozen --resume`.  If all frozen evaluations
-finished and only reporting failed, use `--stage analyze`.  The report and
+matrix arguments with `--stage frozen --resume`.  Frozen evaluations default
+to ports `--port-base + 100` through `--port-base + 111`; if that range is
+occupied, select a separate free range with `--eval-port-base`.  This changes
+only the diagnostic runner, not the registered training plan.  An existing
+diagnostic directory registers its evaluation port in `protocol.json` and
+cannot be resumed on another port.  Preserve and archive an incomplete
+directory before retrying with a different range; do not overwrite a
+completed diagnostic run.  The runner checks every requested evaluation port
+before starting any frozen evaluation.  If all frozen evaluations finished
+and only reporting failed, use `--stage analyze`.  The report and
 figures are under `experiments/aba/acc_reward_traffic_matrix_s1_matrix/`.
 
 ## How to interpret
