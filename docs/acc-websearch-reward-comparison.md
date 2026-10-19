@@ -33,12 +33,27 @@ git pull git@github.com:manykun/CoPTER.git exp/acc-validation
 Rebuild once before starting parallel simulations because ns-3 telemetry changed:
 
 ```bash
+export PATH="/usr/local/bin:$PATH"
+export PROTOC=/usr/local/bin/protoc
+export PKG_CONFIG_PATH="/usr/local/lib/pkgconfig:/usr/local/lib64/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
+export LD_LIBRARY_PATH="/usr/local/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 cd ns-3.33
-./waf build
+./waf configure --enable-examples --enable-mpi
+./waf build --targets=copter-sim -j4
+ldd build/scratch/copter-sim | grep protobuf
 cd ..
 python -m unittest discover -s copter -p test_acc_interval_rewards.py
 python -m unittest tools.analysis.tests.test_metrics_core tools.analysis.tests.test_aba_scheduler tools.analysis.tests.test_websearch_reward_pilot
 ```
+
+These environment selections match the server's `/usr/local` Protobuf 3.20.3
+installation. For another host, select its matching protoc and protobuf.pc.
+Configure obtains the include/library paths from pkg-config, checks compiler
+and header versions, and compiles, links and executes a generated-message
+probe. It no longer hardcodes `/usr/bin/protoc`. Reconfiguration replaces the
+old cached linker search order and records the selected library in RPATH.
+No system header directories are moved or removed. The build targets only
+`copter-sim` and its dependencies, not unrelated scratch programs.
 
 ```bash
 bash scripts/continual_validation/run_acc_websearch_rewards.sh \

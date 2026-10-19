@@ -1,71 +1,72 @@
 # -*- Mode: python; py-indent-offset: 4; indent-tabs-mode: nil; coding: utf-8; -*-
 
 import os
-import sys
+import shutil
 import subprocess
 
-from waflib import Options
-from waflib.Errors import WafError
-
-#def options(opt):
-#    pass
-
 def configure(conf):
-    conf.env['ENABLE_ZMQ'] = conf.check(mandatory=False, lib='zmq', define_name='HAVE_ZMQ', uselib='ZMQ')
-    conf.env['ENABLE_PROTOBUF'] = conf.check(mandatory=False, lib='protobuf', define_name='HAVE_PROTOBUF', uselib='PROTOBUF')
-
-    # check if protoc is installed
-    conf.env['ENABLE_PROTOC'] = False
-
-    protoc_min_version = (3,0,0)
-    # protoc = [conf.find_program('protoc', var='PROTOC')]
-    protoc = ["/usr/bin/protoc"]
-
+    conf.env['ENABLE_ZMQ'] = conf.check(mandatory=False, lib='zmq', define_name='HAVE_ZMQ', uselib_store='ZMQ')
+    # Use pkg-config's include AND library paths. A generic -lprotobuf check
+    # can pair /usr/local headers with an older system library cached by Waf.
+    conf.check_cfg(package='protobuf', args=['--cflags', '--libs'],
+                   uselib_store='PROTOBUF', mandatory=True)
+    pkg_config = os.environ.get('PKG_CONFIG', 'pkg-config')
+    protoc = os.environ.get('PROTOC') or shutil.which('protoc')
+    if not protoc:
+        conf.fatal('protoc is missing; select the compiler matching pkg-config protobuf')
     try:
-        cmd = [protoc[0], '--version']
-        output = subprocess.check_output(cmd).decode("utf-8")
-        output = output.split(" ")[1].rstrip()
-        protoc_version = tuple(output.split('.'))
-        protoc_version = tuple(map(int, protoc_version))
-        conf.msg('Checking for protoc version', output)
-        conf.env['ENABLE_PROTOC'] = True
-    except Exception:
-        conf.fatal('Could not determine the protoc version %r'%protoc)
+        compiler_version = subprocess.check_output([protoc, '--version']).decode().strip().split()[-1]
+        library_version = subprocess.check_output([pkg_config, '--modversion', 'protobuf']).decode().strip()
+        include_dir = subprocess.check_output([pkg_config, '--variable=includedir', 'protobuf']).decode().strip()
+        lib_dir = subprocess.check_output([pkg_config, '--variable=libdir', 'protobuf']).decode().strip()
+        numeric_version = tuple(int(part) for part in compiler_version.split('.'))
+    except (OSError, ValueError, subprocess.CalledProcessError) as exc:
+        conf.fatal('Cannot inspect the Protobuf toolchain: %s' % exc)
+    if compiler_version != library_version or len(numeric_version) != 3 or numeric_version < (3, 0, 0):
+        conf.fatal('Protobuf mismatch: protoc %s (%s), pkg-config library %s. Select one matching toolchain with PROTOC and PKG_CONFIG_PATH.' % (compiler_version, protoc, library_version))
+    if not os.path.isdir(include_dir) or not os.path.isdir(lib_dir):
+        conf.fatal('pkg-config protobuf returned missing include/library directories')
+    conf.msg('Protobuf compiler', '%s (%s)' % (protoc, compiler_version))
+    conf.msg('Protobuf headers', include_dir)
+    conf.msg('Protobuf libraries', lib_dir)
+    # Promote the selected installation ahead of inherited library paths. RPATH
+    # also makes dependent ns-3 programs resolve this library at runtime.
+    for key, values in (('INCLUDES', [include_dir]), ('LIBPATH', [lib_dir]), ('RPATH', [lib_dir])):
+        conf.env[key] = values + [value for value in conf.env[key] if value not in values]
+    conf.env.append_unique('LIB', ['zmq', 'protobuf'])
+    conf.env['RPATH_PROTOBUF'] = [lib_dir]
+    expected_version = numeric_version[0] * 1000000 + numeric_version[1] * 1000 + numeric_version[2]
+    conf.check_cxx(
+        fragment='''#include <google/protobuf/stubs/common.h>
+static_assert(GOOGLE_PROTOBUF_VERSION == %d, "Protobuf header/protoc mismatch");
+int main() { GOOGLE_PROTOBUF_VERIFY_VERSION; return 0; }
+''' % expected_version,
+        uselib='PROTOBUF', execute=True, mandatory=True,
+        msg='Checking Protobuf compiler/header/linked runtime agreement')
+    conf.env['ENABLE_PROTOBUF'] = True
+    conf.env['ENABLE_PROTOC'] = True
+    conf.env['PROTOC'] = [protoc]
+    if not conf.env['ENABLE_ZMQ']:
+        conf.fatal('OpenGym requires ZeroMQ')
 
-    if not conf.env['ENABLE_ZMQ'] or not conf.env['ENABLE_PROTOBUF'] or not conf.env['ENABLE_PROTOC']:
-        conf.env['MODULES_NOT_BUILT'].append('opengym')
-        return
-
-    # if protoc was found, check if version >= 3.0.0
-    if protoc_version < protoc_min_version:
-        conf.fatal('protoc version %s older than minimum supported version %s' %
-                ('.'.join(map(str, protoc_version)), '.'.join(map(str, protoc_min_version)) ))
-
-    conf.env.append_value("LINKFLAGS", ["-lzmq", "-lprotobuf"])
-    conf.env.append_value("LIB", ["zmq", "protobuf"])
-
-    # build protobuff messages
+    # Regenerate both bindings with the selected compiler, without a shell.
     try:
-        pbSrcDir = str(conf.path) + "/model/"
-        # protoc = protoc[0]
-        protoc = "/usr/bin/protoc"
-        rc = subprocess.call(protoc+" -I="+pbSrcDir+" --cpp_out="+pbSrcDir+" "+pbSrcDir+"messages.proto", shell=True)
-
-        if rc == 0:
-            conf.msg("Build ns3gym Protobuf C++ messages", "Done")
-        else:
-            conf.fatal('Build ns3gym Protobuf C++ messages failed')
-
-        rc = subprocess.call(protoc+" -I="+pbSrcDir+" --python_out="+pbSrcDir+"ns3gym/ns3gym/ "+pbSrcDir+"messages.proto", shell=True)
-
-        if rc == 0:
-            conf.msg("Build ns3gym Protobuf Python messages", "Done")
-        else:
-            conf.fatal('Build ns3gym Protobuf Python messages failed')
-
-    except Exception as e:
-        conf.env['MODULES_NOT_BUILT'].append('opengym')
-        conf.fatal('Build of ns3gym Protobuf messages failed')
+        pbSrcDir = os.path.join(conf.path.abspath(), 'model')
+        for flag, destination in (('--cpp_out', pbSrcDir), ('--python_out', os.path.join(pbSrcDir, 'ns3gym', 'ns3gym'))):
+            subprocess.check_call([protoc, '-I=' + pbSrcDir, '-I=' + include_dir,
+                                   flag + '=' + destination, os.path.join(pbSrcDir, 'messages.proto')])
+        conf.msg('Build ns3gym Protobuf messages', 'Done')
+    except (OSError, subprocess.CalledProcessError) as exc:
+        conf.fatal('Build of ns3gym Protobuf messages failed: %s' % exc)
+    conf.check_cxx(
+        fragment='''#include "messages.pb.cc"
+int main() {
+    ns3opengym::EnvStateMsg msg;
+    msg.set_info("protobuf-link-probe");
+    return msg.info() == "protobuf-link-probe" ? 0 : 1;
+}
+''', includes=[pbSrcDir], uselib='PROTOBUF', execute=True, mandatory=True,
+        msg='Checking generated OpenGym messages compile, link and run')
 
 def build(bld):
     # Don't do anything for this module if click should not be built.
@@ -98,9 +99,7 @@ def build(bld):
         'helper/opengym-helper.h',
         ]
 
-    if bld.env['ENABLE_ZMQ']:
-        module.use.extend(['lzmq'])
-        module.use.extend(['lprotobuf'])
+    module.uselib = ['ZMQ', 'PROTOBUF']
 
     if bld.env.ENABLE_EXAMPLES:
         bld.recurse('examples')
