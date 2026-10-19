@@ -113,6 +113,12 @@ def make_plots(output, data):
                         [point[1] for point in points],
                         label=legend, linewidth=1.5,
                     )
+                    # Keep all observations visible; trailing 10-epoch means
+                    # reveal sustained trends without selecting endpoints.
+                    if len(points) >= 10:
+                        axis.plot([p[0] for p in points[9:]],
+                                  [mean(p[1] for p in points[i-9:i+1]) for i in range(9, len(points))],
+                                  linewidth=2.3, linestyle="--", label=f"{variant}: trailing 10")
             axis.set_ylabel(label)
             axis.grid(alpha=.25)
             if field in log_fields:
@@ -143,6 +149,11 @@ def make_plots(output, data):
         ("replay_congested_available_ratio", "Congested fraction in replay"),
         ("replay_congested_sample_ratio", "Congested fraction in minibatch"),
     ])
+    if any("short_mean_fct_us" in rows[0] for _, _, rows in data.values()):
+        for group in ("short", "medium", "long"):
+            plot(f"fct_{group}.png", [(f"{group}_{metric}_fct_us", f"{group} {metric} FCT (us)") for metric in ("mean", "p95", "p99")])
+        plot("reward_components.png", [("reward_throughput_mean", "Utilization term input"), ("reward_queue_mean", "Queue mapping score")])
+        plot("q_epsilon.png", [("q_prediction_abs_max", "Q prediction abs max"), ("q_target_abs_max", "Q target abs max"), ("epsilon", "Epsilon")])
     return []
 
 
@@ -193,7 +204,7 @@ def main():
         "# ACC reward/action-space pilot", "",
         "- Scope: single-task ACC acquisition on the canonical Task A traffic.",
         "- Comparison: first 10 epochs versus last 10 epochs.",
-        "- Native rewards with different formulas or penalty coefficients are not compared across arms; use frozen physical metrics.",
+        "- Native rewards with different formulas or penalty coefficients are not compared across arms; compare physical metrics.",
         "- FCT and physical metrics are per-epoch training trajectories, not frozen-policy evaluations.",
         "", "## Configuration", "",
         "| Variant | Action space | Reward | Queue / ECN lambda | Reward window | Replay sampling | Congested target | Epochs |",
@@ -209,6 +220,18 @@ def main():
             f"{protocol.get('replay_congested_fraction', 0.5):.2f} | "
             f"{len(rows)} |"
         )
+    if any(protocol["reward_profile"] in ("acc_paper", "acc_3816bc6_aligned") for _, protocol, _ in data.values()):
+        lines += ["", "Both arms use action-interval time-mean queue bytes and byte-counter utilization; no frozen evaluation is scheduled.",
+                  "acc_paper: 0.7 utilization + 0.3 queue score, thresholds 20*2^n KiB (n=0..9; above final threshold capped at score 0.1).",
+                  "acc_3816bc6_aligned: historical 0.5/0.5 formula and 400-KiB normalization; interval average replaces the historic instantaneous queue input.",
+                  "Size groups: short <=100 KiB; medium (100 KiB, 1 MiB); long >=1 MiB. Counts are completed flows in each epoch; no cross-epoch intersection.",
+                  "Figures show every epoch plus trailing 10-epoch means. Reward queue-bin counts and exact interval timestamps are in watch traces and agent metrics."]
+        lines += ["", "## Ten-epoch physical trend", "", "| Variant | Epochs | Mean FCT us | p95 FCT us | Completion | Throughput Mbps |", "|---|---|---:|---:|---:|---:|"]
+        for variant, (_, _, rows) in data.items():
+            for start in range(0, len(rows), 10):
+                window = rows[start:start+10]
+                values = [window_mean(window, key, True) for key in ("mean_fct_us", "p95_fct_us", "completion_ratio", "mean_throughput_mbps")]
+                lines.append(f"| {variant} | {window[0]['global_epoch']}–{window[-1]['global_epoch']} | " + " | ".join(fmt(value) for value in values) + " |")
     lines += [
         "", "## First-10 to last-10 changes", "",
         "| Variant | Reward | Loss | Mean FCT | p95 FCT | p99 FCT | Completion pp | Throughput | Queue | ECN |",

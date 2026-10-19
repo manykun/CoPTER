@@ -178,9 +178,16 @@ bool MyGetGameOver(void) {
     // return Simulator::Now().GetSeconds() > simulator_stop_time;
 }
 //获取obs
+uint64_t reward_action_start_ns = 0;
+bool reward_action_started = false;
+std::vector<uint64_t> reward_tx_start;
+std::vector<double> reward_mean_queues, reward_tx_utilization;
+
 Ptr<OpenGymDataContainer> MyGetObservation(void) {
 
     port_identifiers.clear(); // 每次观测前清空
+    reward_mean_queues.clear();
+    reward_tx_utilization.clear();
 
     std::vector<uint32_t> shape = {opengym_n_ports * 6};
     Ptr<OpenGymBoxContainer<double>> box = CreateObject<OpenGymBoxContainer<double> >(shape);
@@ -242,6 +249,15 @@ Ptr<OpenGymDataContainer> MyGetObservation(void) {
             sw->m_mmu->ResetPeakBytes(j);
             // txRate and ecnRate
             uint64_t max_port_rate =  DynamicCast<QbbNetDevice>(sw->GetDevice(j))->GetDataRate().GetBitRate();
+            const size_t reward_index = reward_mean_queues.size();
+            const uint64_t now_ns = Simulator::Now().GetNanoSeconds();
+            reward_mean_queues.push_back(sw->m_mmu->GetRewardMeanQueue(j));
+            double utilization = 0;
+            if (reward_action_started && now_ns > reward_action_start_ns) {
+                const uint64_t bytes = sw->GetPortTotalTxBytes(j) - reward_tx_start.at(reward_index);
+                utilization = double(bytes) * 8e9 / double(now_ns - reward_action_start_ns) / max_port_rate;
+            }
+            reward_tx_utilization.push_back(utilization);
             box->AddValue(sw->GetPortRate(j)/max_port_rate);
             box->AddValue(sw->GetPortEcnRate(j)/max_port_rate);
             sw->ResetRateStats(j, Simulator::Now().GetNanoSeconds()); // reset rate stats
@@ -288,7 +304,23 @@ std::string MyGetExtraInfo(void) {
             if (i > 0) ss << ", "; // 避免末尾多余逗号
             ss << "\"" << port_identifiers[i] << "\""; // 每个标识用双引号包裹
         }
-        ss << "]}";
+        ss << "]";
+        if (reward_action_started) {
+            ss << ",\"reward_interval\":{\"version\":1,\"start_ns\":" << reward_action_start_ns
+               << ",\"end_ns\":" << Simulator::Now().GetNanoSeconds()
+               << ",\"mean_queue_bytes\":[" << std::setprecision(17);
+            for (size_t i = 0; i < reward_mean_queues.size(); ++i) {
+                if (i) ss << ",";
+                ss << reward_mean_queues[i];
+            }
+            ss << "],\"tx_utilization\":[";
+            for (size_t i = 0; i < reward_tx_utilization.size(); ++i) {
+                if (i) ss << ",";
+                ss << reward_tx_utilization[i];
+            }
+            ss << "]}";
+        }
+        ss << "}";
         
         std::string info = ss.str();
         NS_LOG_UNCOND("✅ NS3首次step返回port_identifiers（数量：" << port_identifiers.size() << "）: " << info);
@@ -309,11 +341,16 @@ bool MyExecuteActions(Ptr<OpenGymDataContainer> action) {
     Ptr<OpenGymBoxContainer<float>> actions = DynamicCast<OpenGymBoxContainer<float>>(action);
 
     uint32_t configure_idx = 0;
+    reward_action_start_ns = Simulator::Now().GetNanoSeconds();
+    reward_action_started = true;
+    reward_tx_start.clear();
 
     for (uint32_t i = 0; i < opengym_n_switches; i++ ) {
         Ptr<SwitchNode> sw = DynamicCast<SwitchNode>(opengym_switches_pool.Get(i));
         for (uint32_t j = 1; j < sw->GetNDevices(); j++) {
             uint32_t port_index = configure_idx / opengym_n_action_per_port;
+            sw->m_mmu->ResetRewardQueue(j);
+            reward_tx_start.push_back(sw->GetPortTotalTxBytes(j));
             double norm_kmin = actions->GetValue(configure_idx);
             double norm_kmax = actions->GetValue(configure_idx + 1);
             double pmax = actions->GetValue(configure_idx + 2);

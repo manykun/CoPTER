@@ -120,6 +120,22 @@ def summarize_fct(
     }
 
 
+def summarize_fct_by_size(fct_path: Path) -> dict:
+    """Per-epoch completed-flow metrics: <=100 KiB, middle, >=1 MiB."""
+    groups = {name: [] for name in ("short", "medium", "long")}
+    for identity, (actual, _) in parse_fct(fct_path).items():
+        size = int(identity[4])
+        group = "short" if size <= 100 * 1024 else "long" if size >= 1024**2 else "medium"
+        groups[group].append(actual / 1000.0)
+    result = {}
+    for name, values in groups.items():
+        result[f"{name}_completed_flows"] = len(values)
+        result[f"{name}_mean_fct_us"] = mean(values) if values else None
+        for label, q in (("p95", .95), ("p99", .99)):
+            result[f"{name}_{label}_fct_us"] = percentile(values, q)
+    return result
+
+
 def _summarize_grouped(
     grouped: Mapping[Tuple[int, int], Sequence[float]],
     scale: float,

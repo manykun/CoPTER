@@ -20,6 +20,8 @@ from run_aba import load_config  # noqa: E402
 
 
 VARIANTS = {
+    "acc_paper": ("multiscale", "acc_paper"),
+    "acc_3816bc6_aligned": ("multiscale", "acc_3816bc6_aligned"),
     "baseline": ("multiscale", "tail_safe"),
     "weighted": ("multiscale", "weighted"),
     "action": ("factorized_interp", "tail_safe"),
@@ -42,6 +44,11 @@ VARIANTS = {
 }
 
 VARIANT_OVERRIDES = {
+    **{name: {
+        "reward_window_size": 1,
+        "replay_sampling": "congestion_stratified",
+        "replay_congested_fraction": 0.5,
+    } for name in ("acc_paper", "acc_3816bc6_aligned")},
     "baseline": {
         "reward_window_size": 32,
         "replay_sampling": "uniform",

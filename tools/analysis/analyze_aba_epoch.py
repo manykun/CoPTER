@@ -26,6 +26,7 @@ from tools.analysis.metrics_core import (
     provenance,
     select_agent_epoch_record,
     summarize_fct,
+    summarize_fct_by_size,
 )
 
 
@@ -50,11 +51,15 @@ NETWORK_FIELDS = [
     "ns3_exit_code", "agent_exit_code", "process_max_rss_mb",
     "analysis_version",
 ]
+NETWORK_FIELDS += [f"{group}_{metric}" for group in ("short", "medium", "long") for metric in ("completed_flows", "mean_fct_us", "p95_fct_us", "p99_fct_us")]
+REWARD_COMPONENT_FIELDS = ("reward_throughput_mean", "reward_queue_mean", "reward_reward_queue_term_mean", "reward_reward_throughput_term_mean", "reward_reward_mean_queue_bytes_mean")
+NETWORK_FIELDS += list(REWARD_COMPONENT_FIELDS)
 
 PORT_FIELDS = [
     "run_id", "method", "phase", "task", "global_epoch", "phase_epoch",
     "record_source", "agent_port", "switch_id", "port_id", "identifier",
     "reward_population", "port_reward", "tail_safe_raw", "active_steps",
+    "reward_queue_bins", "reward_throughput_term", "reward_queue_term", "reward_mean_queue_bytes",
     "congested_steps", "port_loss", "port_q_prediction_abs_max",
     "port_q_target_abs_max", "port_td_error_abs_p95_max",
     "port_replay_congested_sample_ratio",
@@ -156,6 +161,8 @@ def main():
         "epsilon": agent_record.get("epsilon"),
         **training,
         **fct,
+        **summarize_fct_by_size(inputs["fct"]),
+        **{key: agent_record.get(key) for key in REWARD_COMPONENT_FIELDS},
         "mean_throughput_mbps": throughput.get("mean"),
         "p95_throughput_mbps": throughput.get("p95"),
         "p99_throughput_mbps": throughput.get("p99"),
@@ -236,6 +243,8 @@ def main():
             "record_source": "watch", "agent_port": int(agent_port),
             "switch_id": switch_id, "port_id": port_id, "identifier": identifier,
             "reward_population": population, "port_reward": means.get("reward"),
+            "reward_queue_bins": json.dumps(detail.get("reward_queue_bins", {}), sort_keys=True),
+            **{key: means.get(key) for key in ("reward_throughput_term", "reward_queue_term", "reward_mean_queue_bytes")},
             "tail_safe_raw": means.get("tail_safe_raw"), "active_steps": active_steps,
             "congested_steps": congested_steps, "dominant_action": dominant_action,
             "port_loss": training_detail.get("loss_mean"),
@@ -263,6 +272,8 @@ def main():
     prov = provenance(inputs, args.flow, args.runtime_conf, args.warmup_rate_buckets)
     prov["rate_stream_summary"] = rate
     prov["agent_record_epoch"] = agent_record.get("epoch")
+    prov["reward_profile"] = agent_record.get("reward_profile")
+    prov["fct_size_groups_version"] = "completed-v1: short<=100KiB; medium<1MiB; long>=1MiB"
     atomic_json(raw / "epoch_metrics.json", row)
     write_csv(raw / "epoch_ports.csv", port_rows, PORT_FIELDS)
     atomic_json(raw / "analysis_provenance.json", prov)

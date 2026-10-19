@@ -5,6 +5,7 @@ from ns3gym import ns3env
 import numpy as np
 import json
 from collections import deque
+from acc_rewards import INTERVAL_PROFILES, calculate_acc_reward, parse_reward_interval
 from loguru import logger
 from structures import (
     NetworkHelperParameters,
@@ -18,6 +19,10 @@ class NetworkHelper:
     def __init__(self, ns3_socket, nhp: NetworkHelperParameters):
         # Store the NetworkHelperParameters
         self.nhp = nhp
+        self.reward_interval = None
+        self.reward_interval_end = None
+        if nhp.reward_profile in INTERVAL_PROFILES and nhp.reward_window_size != 1:
+            raise ValueError("interval ACC rewards require reward_window_size=1")
         logger.info(f"NetworkHelper initialized with parameters: {self.nhp}")
         
         # Initialize ns3-gym environment
@@ -169,6 +174,11 @@ class NetworkHelper:
             )
 
         obs = np.asarray(obs)
+        if self.nhp.reward_profile in INTERVAL_PROFILES:
+            self.reward_interval = parse_reward_interval(
+                info, self.n_port, self.reward_interval_end
+            )
+            self.reward_interval_end = int(self.reward_interval["end_ns"])
         expected_size = self.n_port * self.nhp.port_states
         if obs.ndim != 1 or obs.size != expected_size:
             raise RuntimeError(
@@ -305,7 +315,27 @@ class NetworkHelper:
             self.nhp.reward_queue_lambda,
             self.nhp.reward_ecn_lambda,
         )
-        if self.nhp.reward_profile == "tail_safe":
+        interval_components = {}
+        if self.nhp.reward_profile in INTERVAL_PROFILES:
+            if self.reward_interval is None:
+                raise RuntimeError("reward requested before interval telemetry")
+            interval = self.reward_interval
+            queue_bytes = interval["mean_queue_bytes"][port_idx]
+            avg_txrate = interval["tx_utilization"][port_idx]
+            interval_components = calculate_acc_reward(
+                self.nhp.reward_profile, queue_bytes, avg_txrate
+            )
+            reward = interval_components["reward"]
+            r_throughput = interval_components["throughput"]
+            r_queue = interval_components["queue"]
+            r_ecn = 0.0
+            avg_qlen = queue_bytes / (self.nhp.switch_buffer_size * 1024)
+            interval_components.update({
+                "reward_mean_queue_bytes": queue_bytes,
+                "reward_interval_start_ns": interval["start_ns"],
+                "reward_interval_end_ns": interval["end_ns"],
+            })
+        elif self.nhp.reward_profile == "tail_safe":
             reward = tail_safe["reward"]
         elif self.nhp.reward_profile == "weighted":
             reward = (
@@ -334,6 +364,7 @@ class NetworkHelper:
             "ecn_cost_sq": float(tail_safe["ecn_cost_sq"]),
             "tail_safe_raw": float(tail_safe["raw"]),
             "tail_safe_clipped": float(tail_safe["reward"]),
+            **interval_components,
         }
 
     def get_port_current_reward(self, port_idx):

@@ -81,6 +81,7 @@ class PortMetricTracker:
             "actions_all": Counter(),
             "actions_active": Counter(),
             "actions_congested": Counter(),
+            "reward_queue_bins": Counter(),
             "reward_ema_congested": None,
             "identifier": None,
         }
@@ -109,6 +110,10 @@ class PortMetricTracker:
                 raise ValueError(
                     f"port {port} reward components missing: {','.join(missing)}"
                 )
+            interval = network_helper.get_port_current_reward_components(port)
+            for key, value in interval.items():
+                if key.startswith("reward_"):
+                    components[key] = float(value)
             active = bool(network_helper.is_port_active(port))
             congested = bool(network_helper.is_port_congested(port))
             action = actions[port] if actions is not None else None
@@ -119,6 +124,8 @@ class PortMetricTracker:
 
             stats = self._stats[port]
             stats["samples"] += 1
+            if "reward_queue_bin" in components:
+                stats["reward_queue_bins"][str(int(components["reward_queue_bin"]))] += 1
             stats["actions_all"][action_key] += 1
             for key, value in components.items():
                 stats["sums_all"][key] += value
@@ -157,7 +164,7 @@ class PortMetricTracker:
     def _means(sums, count):
         return {
             key: (sums[key] / count if count else None)
-            for key in COMPONENT_KEYS
+            for key in dict.fromkeys((*COMPONENT_KEYS, *sums))
         }
 
     def summary(self):
@@ -165,6 +172,7 @@ class PortMetricTracker:
         for port, stats in self._stats.items():
             output[str(port)] = {
                 "identifier": stats["identifier"],
+                "reward_queue_bins": dict(stats["reward_queue_bins"]),
                 "samples": stats["samples"],
                 "active_steps": stats["active_steps"],
                 "congested_steps": stats["congested_steps"],

@@ -59,6 +59,7 @@ def build(bld):
         'model/rdma-hw.h',
         'model/switch-node.h',
         'model/switch-mmu.h',
+        'model/action-queue-integral.h',
         'model/pint.h',
         'helper/sim-setting.h',
         ]

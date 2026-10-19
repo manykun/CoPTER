@@ -125,13 +125,15 @@ def validate_config(config: dict) -> None:
                 "factorized_interp"
             )
         if str(config.get("reward_profile")) not in (
-            "tail_safe", "weighted"
+            "tail_safe", "weighted", "acc_paper", "acc_3816bc6_aligned"
         ):
             raise ValueError(
                 "ACC pilot reward_profile must be tail_safe or weighted"
             )
         if int(config.get("reward_window_size", 32)) <= 0:
             raise ValueError("ACC pilot reward_window_size must be positive")
+        if config["reward_profile"] in ("acc_paper", "acc_3816bc6_aligned") and int(config.get("reward_window_size", 32)) != 1:
+            raise ValueError("interval ACC rewards require reward_window_size=1")
         if str(config.get("replay_sampling", "uniform")) not in (
             "uniform", "congestion_stratified"
         ):
@@ -164,8 +166,8 @@ def protocol(config: dict, config_path: Path, smoke: bool) -> dict:
     experiment_kind = str(config.get("experiment_kind", "formal"))
     epochs = {
         "a1": 2 if smoke else int(config["a1_epochs"]),
-        "b": 2 if smoke else int(config["b_epochs"]),
-        "a2": 2 if smoke else int(config["a2_epochs"]),
+        "b": min(2, int(config["b_epochs"])) if smoke else int(config["b_epochs"]),
+        "a2": min(2, int(config["a2_epochs"])) if smoke else int(config["a2_epochs"]),
     }
     inputs = {}
     for task in ("a", "b"):
@@ -222,6 +224,10 @@ def protocol(config: dict, config_path: Path, smoke: bool) -> dict:
         })
     if config.get("route"):
         result["route"] = str(config["route"]).upper()
+    if config["reward_profile"] in ("acc_paper", "acc_3816bc6_aligned"):
+        result["reward_telemetry_version"] = 1
+        result["reward_attribution"] = "single_action_interval_time_mean_queue"
+        result["reward_source_commit"] = "3816bc6dd293ae7432ca6e4d0437efc7baceb9ae" if config["reward_profile"] == "acc_3816bc6_aligned" else "ACC_SIGCOMM_2021_equation_2"
     return result
 
 

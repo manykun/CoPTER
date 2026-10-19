@@ -75,7 +75,7 @@ if __name__ == "__main__":
         help="ACC categorical action space. multiscale uses a valid threshold-profile head plus Pmax.",
     )
     parser.add_argument("--reward_weights", type=str, default="0.50,0.30,0.20", help="Throughput,queue,ECN reward weights; must sum to 1.")
-    parser.add_argument("--reward_profile", choices=("weighted", "tail_safe"), default="weighted")
+    parser.add_argument("--reward_profile", choices=("weighted", "tail_safe", "acc_paper", "acc_3816bc6_aligned"), default="weighted")
     parser.add_argument("--reward_queue_lambda", type=float, default=5.0)
     parser.add_argument("--reward_ecn_lambda", type=float, default=5.0)
     parser.add_argument(
@@ -350,6 +350,8 @@ if __name__ == "__main__":
         "peak_queue", "avg_ecn", "peak_ecn", "combined_queue",
         "combined_ecn", "queue_cost_sq", "ecn_cost_sq", "tail_safe_raw", "tail_safe_clipped",
     )
+    if args.reward_profile in ("acc_paper", "acc_3816bc6_aligned"):
+        reward_component_keys += ("reward_queue_term", "reward_throughput_term", "reward_mean_queue_bytes")
     reward_component_sums = {key: 0.0 for key in reward_component_keys}
     reward_component_count = 0
     reward_fallback_samples = 0
