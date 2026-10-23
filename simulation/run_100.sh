@@ -1,29 +1,36 @@
-#!/bin/bash
+#!/usr/bin/env bash
+# Execute exactly one ns-3 epoch. The ABA scheduler owns all iteration.
+set -euo pipefail
 
-# 循环执行100次
-for i in {1..20}
-do
-    echo "=============================="
-    echo "开始第 $i 次执行 (共100次)"
-    echo "=============================="
-    
-    # 执行命令并记录开始时间
-    start_time=$(date +%s)
-    # ./run-copter-sim.sh /home/ame/copter/simulation/mix/mix_webserver_websearch_hadoop_clusters/acc_mix_webserver_websearch_hadoop_clusters.conf --port=5555
-    ./run-copter-sim.sh /root/paddlejob/workspace/yangziwen/CoPTER/simulation/mix/copter_Hadoop_Shuffle.conf --port=5558
-    
-    # 计算命令执行时间
-    end_time=$(date +%s)
-    duration=$((end_time - start_time))
-    
-    echo "------------------------------"
-    echo "命令执行完成，耗时: $duration 秒"
-    
-    # 如果不是最后一次执行，则等待30秒
-    if [ $i -lt 20 ]; then
-        echo "等待30秒后开始下一次执行..."
-        sleep 30
-    else
-        echo "已完成所有100次执行"
-    fi
+usage() {
+  echo "Usage: bash simulation/run_100.sh --config FILE --port N --epoch N --log FILE" >&2
+}
+
+CONFIG=""
+PORT=""
+EPOCH=""
+LOG=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --config) CONFIG="$2"; shift 2 ;;
+    --port) PORT="$2"; shift 2 ;;
+    --epoch) EPOCH="$2"; shift 2 ;;
+    --log) LOG="$2"; shift 2 ;;
+    -h|--help) usage; exit 0 ;;
+    *) echo "Unknown argument: $1" >&2; usage; exit 2 ;;
+  esac
 done
+
+[[ -n "$CONFIG" && -n "$PORT" && -n "$EPOCH" && -n "$LOG" ]] || { usage; exit 2; }
+[[ -f "$CONFIG" ]] || { echo "Configuration not found: $CONFIG" >&2; exit 2; }
+[[ "$PORT" =~ ^[0-9]+$ ]] || { echo "Invalid port: $PORT" >&2; exit 2; }
+[[ "$EPOCH" =~ ^[0-9]+$ ]] || { echo "Invalid epoch: $EPOCH" >&2; exit 2; }
+
+SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+CONFIG=$(cd "$(dirname "$CONFIG")" && pwd)/$(basename "$CONFIG")
+mkdir -p "$(dirname "$LOG")"
+LOG=$(cd "$(dirname "$LOG")" && pwd)/$(basename "$LOG")
+
+echo "[ns3] epoch=$EPOCH port=$PORT config=$CONFIG"
+cd "$SCRIPT_DIR"
+exec ./run-copter-sim.sh "$CONFIG" --port="$PORT" >"$LOG" 2>&1

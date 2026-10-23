@@ -69,6 +69,7 @@ namespace ns3 {
 			total += egress_bytes[port][k];
 		if (total > peak_egress_bytes[port])
 			peak_egress_bytes[port] = total;
+		reward_queue[port].Set(Simulator::Now().GetNanoSeconds(), total);
 	}
 	void SwitchMmu::RemoveFromIngressAdmission(uint32_t port, uint32_t qIndex, uint32_t psize){
 		uint32_t from_hdrm = std::min(hdrm_bytes[port][qIndex], psize);
@@ -85,6 +86,7 @@ namespace ns3 {
 			total += egress_bytes[port][k];
 		if (total > peak_egress_bytes[port])
 			peak_egress_bytes[port] = total;
+		reward_queue[port].Set(Simulator::Now().GetNanoSeconds(), total);
 	}
 	bool SwitchMmu::CheckShouldPause(uint32_t port, uint32_t qIndex){
 		return !paused[port][qIndex] && (hdrm_bytes[port][qIndex] > 0 || GetSharedUsed(port, qIndex) >= GetPfcThreshold(port));
@@ -145,6 +147,14 @@ namespace ns3 {
 	}
 
 	// Peak queue tracking for RL observations
+	void SwitchMmu::ResetRewardQueue(uint32_t port){
+		uint64_t total = 0;
+		for (uint32_t k = 0; k < qCnt; k++) total += egress_bytes[port][k];
+		reward_queue[port].Reset(Simulator::Now().GetNanoSeconds(), total);
+	}
+	double SwitchMmu::GetRewardMeanQueue(uint32_t port) const {
+		return reward_queue[port].Mean(Simulator::Now().GetNanoSeconds());
+	}
 	void SwitchMmu::ResetPeakBytes(uint32_t port){
 		peak_egress_bytes[port] = 0;
 	}

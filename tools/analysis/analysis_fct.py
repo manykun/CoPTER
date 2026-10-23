@@ -1,25 +1,21 @@
 import argparse
 import numpy as np
 import os
+from pathlib import Path
+from metrics_core import parse_fct, percentile
 
 
 def get_pctl(a, p):
-    """计算指定百分位值"""
-    i = int(len(a) * p)
-    return a[i] if i < len(a) else a[-1]  # 避免索引越界
+    """Compatibility wrapper around the authoritative percentile."""
+    return percentile(a, p)
 
 
 def process_file(file_path):
     """处理文件并返回按流量大小排序的 [fct, flow_size] 列表（替换原slowdown为fct）"""
-    result = []
-    with open(file_path, 'r') as f:
-        for line in f:
-            fields = line.strip().split()
-            if len(fields) < 8:  # 确保行有足够的字段
-                continue
-            flow_size = int(fields[4])        # 第5个字段：流量大小
-            fct = int(fields[6])              # 第7个字段：实际FCT值（直接保存该值）
-            result.append([fct, flow_size])   # 存储[实际FCT, 流量大小]
+    result = [
+        [actual_ns, int(identity[4])]
+        for identity, (actual_ns, _ideal_ns) in parse_fct(Path(file_path)).items()
+    ]
     result.sort(key=lambda x: x[1])  # 按流量大小排序
     return result
 

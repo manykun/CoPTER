@@ -3,6 +3,7 @@
 
 #include <unordered_map>
 #include <ns3/node.h>
+#include "action-queue-integral.h"
 
 namespace ns3 {
 
@@ -46,6 +47,9 @@ public:
 	void ResetPeakBytes(uint32_t port);
 	uint32_t GetPeakBytes(uint32_t port);
 	void ResetAllPeakBytes(void);
+	void ResetRewardQueue(uint32_t port);
+	double GetRewardMeanQueue(uint32_t port) const;
+	ActionQueueIntegral reward_queue[pCnt];
 
 	// config
 	uint32_t node_id;

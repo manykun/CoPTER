@@ -1,0 +1,16 @@
+[
+  {
+    "src_hosts": {"start": 0, "end": 31},
+    "dst_hosts": [128],
+    "cdf": "../pattern/AliStorage.txt",
+    "pattern": "periodic_incast",
+    "incast_dst_count": 1,
+    "load": 0.10,
+    "period_s": 0.004,
+    "burst_jitter_ns": 500,
+    "spread_fraction": 0.05,
+    "size_sampling": "stratified",
+    "start_time_s": 2.0,
+    "duration_s": 1.6699
+  }
+]

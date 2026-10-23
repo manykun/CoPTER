@@ -1,0 +1,113 @@
+import importlib.util
+import json
+import tempfile
+import unittest
+from collections import Counter
+from pathlib import Path
+
+
+ROOT = Path(__file__).resolve().parents[3]
+SCRIPT = ROOT / "scripts" / "continual_validation" / "run_acc_pilot_diagnostics.py"
+SPEC = importlib.util.spec_from_file_location("acc_pilot_diagnostics", SCRIPT)
+MODULE = importlib.util.module_from_spec(SPEC)
+SPEC.loader.exec_module(MODULE)
+
+
+class AccPilotDiagnosticTests(unittest.TestCase):
+    def test_last_eval_record_uses_only_current_process_append(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            metrics = Path(temporary) / "metrics.jsonl"
+            old_records = [
+                {"eval_greedy": True, "eval_tag": "repeat_2", "value": 1},
+                {"eval_greedy": True, "eval_tag": "repeat_2", "value": 2},
+            ]
+            metrics.write_text(
+                "".join(json.dumps(record) + "\n" for record in old_records),
+                encoding="utf-8",
+            )
+            start_offset = metrics.stat().st_size
+            current_record = {
+                "eval_greedy": True,
+                "eval_tag": "repeat_2",
+                "value": 3,
+            }
+            with metrics.open("a", encoding="utf-8") as handle:
+                handle.write(json.dumps(current_record) + "\n")
+
+            actual = MODULE.last_eval_record(
+                metrics, "repeat_2", start_offset=start_offset
+            )
+
+            self.assertEqual(actual, current_record)
+
+    def test_tv_distance(self):
+        self.assertEqual(MODULE.tv_distance(Counter(a=2), Counter(a=3)), 0.0)
+        self.assertEqual(MODULE.tv_distance(Counter(a=2), Counter(b=3)), 1.0)
+        self.assertAlmostEqual(
+            MODULE.tv_distance(Counter(a=1, b=1), Counter(a=1, c=1)),
+            0.5,
+        )
+
+    def test_resume_rejects_changed_forced_port_set(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            destination = root / "eval" / "target_1" / "repeat_1"
+            destination.mkdir(parents=True)
+            model = root / "model"
+            model.mkdir()
+            flow = root / "source.flow"
+            flow.write_text("0\n", encoding="utf-8")
+            (destination / "input.flow").write_bytes(flow.read_bytes())
+            for name in ("input.conf", "result.fct", "agent_metrics.json"):
+                (destination / name).write_text("\n", encoding="utf-8")
+            (destination / "complete.json").write_text(json.dumps({
+                "label": "target_1", "repeat": 1,
+                "forced_action": None,
+                "forced_ports_action": [[323], [8, 0]],
+                "model_fingerprint": {},
+            }), encoding="utf-8")
+            args = (
+                {}, {}, root / "source.conf", flow, root, model,
+                "experiment", "target_1", 1, 7820,
+            )
+            self.assertEqual(
+                MODULE.run_evaluation(*args, forced_ports_action=((323,), (8, 0))),
+                destination,
+            )
+            with self.assertRaisesRegex(ValueError, "differs from request"):
+                MODULE.run_evaluation(*args, forced_ports_action=((321,), (8, 0)))
+
+    def test_multiscale_threshold_activation_uses_link_rate(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            destination = Path(temporary)
+            (destination / "input.conf").write_text(
+                "OPENGYM_MIN_KMIN 5000\n"
+                "OPENGYM_MAX_KMIN 50000\n"
+                "OPENGYM_MIN_KMAX 15000\n"
+                "OPENGYM_MAX_KMAX 100000\n",
+                encoding="utf-8",
+            )
+            # Profile 0 at 40 Gbps maps to Kmin=8,000 and Kmax=24,000 bytes.
+            (destination / "result.rate").write_text(
+                "1 2 40000000000 0.5 0.0 0.1\n",
+                encoding="utf-8",
+            )
+            (destination / "result.queue").write_text(
+                "1 409600 2 4000 0.1\n"
+                "1 409600 2 8000 0.2\n"
+                "1 409600 2 24000 0.3\n",
+                encoding="utf-8",
+            )
+            result = MODULE.threshold_activation(
+                destination, (0, 0), "multiscale"
+            )
+            self.assertEqual(result["queue_threshold_samples"], 3)
+            self.assertAlmostEqual(result["queue_ge_kmin_ratio"], 2 / 3)
+            self.assertAlmostEqual(result["queue_ge_kmax_ratio"], 1 / 3)
+            self.assertAlmostEqual(
+                result["buffer_utilization_max"], 24000 / 409600
+            )
+
+
+if __name__ == "__main__":
+    unittest.main()

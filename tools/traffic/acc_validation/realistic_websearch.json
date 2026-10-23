@@ -1,0 +1,11 @@
+[
+  {
+    "src_hosts": {"start": 0, "end": 127},
+    "dst_hosts": {"start": 128, "end": 255},
+    "cdf": "../pattern/WebSearch.txt",
+    "pattern": "poisson_random",
+    "load": 0.60,
+    "start_time_s": 2.0,
+    "duration_s": 0.03
+  }
+]
